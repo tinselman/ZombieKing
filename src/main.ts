@@ -4,6 +4,7 @@ import { World, GX, GZ, GRAVITY, WIND_ACCEL, type Wind, type Fortifications } fr
 import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './weapons'
 import { planShot } from './ai'
 import { createHud } from './hud'
+import { makeAvatar, standingY } from './avatar'
 import * as sfx from './audio'
 
 const COLLAPSE_AT = 0.4 // fort integrity below this = destroyed
@@ -112,6 +113,22 @@ const sides: SideState[] = [
   { cannon: makeCannon(0xc0392b), az: 0, el: 55 * DEG, arsenal: newArsenal(), wsel: 0, targetX: 0, targetY: 0, targetZ: 0, fallV: 0 },
   { cannon: makeCannon(0x2f6fd6), az: Math.PI, el: 55 * DEG, arsenal: newArsenal(), wsel: 0, targetX: 0, targetY: 0, targetZ: 0, fallV: 0 },
 ]
+
+// VoxPop-style voxel avatars, one per side, standing watch beside their cannon.
+// (Core of the coming night-cycle gameplay — for now they just take the field.)
+const avatars = [makeAvatar(0xc0392b), makeAvatar(0x2f6fd6)]
+avatars[1].rotation.y = -Math.PI // enemy avatar faces back toward the player
+for (const a of avatars) scene.add(a)
+
+function placeAvatars(): void {
+  for (let s = 0; s < 2; s++) {
+    const seat = world.cannonSeat(s)
+    const zOff = s === 0 ? 2 : -2 // stand beside the cannon, not on it
+    const x = seat.x
+    const z = Math.max(1, Math.min(GZ - 2, seat.z + zOff))
+    avatars[s].position.set(x, standingY(world.surfaceY(x, z)), z)
+  }
+}
 
 function dirOf(side: number): THREE.Vector3 {
   const s = sides[side]
@@ -951,6 +968,7 @@ function finishResolve(): void {
     sides[s].targetY = seat.y
     sides[s].targetZ = seat.z
   }
+  placeAvatars()
   const iYou = world.integrity(0)
   const iFoe = world.integrity(1)
   hud.setIntegrity(iYou, iFoe)
@@ -1036,6 +1054,7 @@ function rebuildRoundWorld(): void {
     st.targetZ = seat.z
     st.fallV = 0
   }
+  placeAvatars()
 }
 
 function setupRoundWorld(): void {
@@ -1377,6 +1396,7 @@ window.__sv = {
     wind,
     power: chargePower,
     lastImpact: { x: lastImpact.x, y: lastImpact.y, z: lastImpact.z },
+    avatars: avatars.map(a => ({ x: a.position.x, y: a.position.y, z: a.position.z })),
     proj0: projs[0]
       ? { x: projs[0].pos.x, y: projs[0].pos.y, z: projs[0].pos.z, vx: projs[0].vel.x, vy: projs[0].vel.y, vz: projs[0].vel.z }
       : null,
