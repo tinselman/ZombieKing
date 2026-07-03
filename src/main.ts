@@ -1355,6 +1355,9 @@ function tick(now: number): void {
 
   updateHint()
   updateCamera(dt)
+  // Keep the wind compass screen-relative: arrow points where the wind pushes
+  // on screen, whichever way the camera currently faces.
+  hud.orientWind(camLookCur.x - camPosCur.x, camLookCur.z - camPosCur.z)
   if (!skipRender) {
     renderer.render(scene, camera)
     renderSideView()
