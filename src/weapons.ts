@@ -29,7 +29,7 @@ export type WeaponDef = {
 export const WEAPONS: WeaponDef[] = [
   { id: 'missile', name: 'Baby Missile', ammo: Infinity, blast: 2.8, kind: 'blast' },
   { id: 'bigmissile', name: 'Missile', ammo: 0, blast: 3.8, kind: 'blast', price: 500, pack: 10 },
-  { id: 'babynuke', name: 'Baby Nuke', ammo: 1, blast: 6.0, kind: 'blast', price: 1200, pack: 2 },
+  { id: 'babynuke', name: 'Baby Nuke', ammo: 0, blast: 6.0, kind: 'blast', price: 1200, pack: 2 },
   { id: 'nuke', name: 'Nuke', ammo: 0, blast: 9.5, kind: 'blast', price: 2800, pack: 1 },
   { id: 'leapfrog', name: 'Leap Frog', ammo: 0, blast: 3.4, kind: 'leap', price: 1000, pack: 2 },
   { id: 'funky', name: 'Funky Bomb', ammo: 0, blast: 5.0, kind: 'funky', split: 7, price: 1400, pack: 2 },
@@ -48,7 +48,7 @@ export const WEAPONS: WeaponDef[] = [
   { id: 'sandhog', name: 'Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 16, price: 1200, pack: 2 },
   { id: 'heavysandhog', name: 'Heavy Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 26, price: 2200, pack: 1 },
   { id: 'dirtclod', name: 'Dirt Clod', ammo: 0, blast: 3.0, kind: 'dirt', price: 300, pack: 3 },
-  { id: 'dirtball', name: 'Dirt Ball', ammo: 2, blast: 5.5, kind: 'dirt', price: 700, pack: 2 },
+  { id: 'dirtball', name: 'Dirt Ball', ammo: 0, blast: 5.5, kind: 'dirt', price: 700, pack: 2 },
   { id: 'tondirt', name: 'Ton of Dirt', ammo: 0, blast: 8.5, kind: 'dirt', price: 1400, pack: 1 },
 ]
 

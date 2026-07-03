@@ -59,6 +59,12 @@ const CSS = `
 #sc-shop .srow button { font-size: 12px; font-weight: 700; padding: 4px 0; border-radius: 6px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shop .srow button:disabled { opacity: 0.25; cursor: default; }
 #sc-shop .slabel { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin: 12px 0 2px; }
+#sc-time { position: fixed; left: 16px; bottom: 240px; box-sizing: border-box; padding: 7px 12px 8px; background: rgba(255,255,255,0.78); backdrop-filter: blur(6px); border: 1px solid #d8dde3; border-radius: 10px; box-shadow: 0 2px 10px rgba(40,50,60,0.08); pointer-events: none; }
+#sc-time .tlabel { display: flex; justify-content: space-between; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin-bottom: 4px; }
+#sc-timeTrack { height: 8px; background: #e8ebef; border-radius: 4px; overflow: hidden; }
+#sc-timeFill { height: 100%; width: 0%; border-radius: 4px; background: #e8b84d; }
+#sc-cross { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: #fff; box-shadow: 0 0 5px rgba(0,0,0,0.7); display: none; pointer-events: none; }
+#sc-nightHint { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); font-size: 13px; font-weight: 600; color: #fff; background: rgba(20,26,38,0.82); border: 1px solid #3a4a6b; border-radius: 10px; padding: 10px 18px; display: none; pointer-events: none; text-align: center; }
 #sc-shopStart { margin-top: 18px; width: 100%; font-size: 15px; font-weight: 800; letter-spacing: 0.08em; padding: 12px 0; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shopStart:hover { background: #454c55; }
 `
@@ -86,6 +92,9 @@ export function createHud(
     <div id="sc-banner"></div>
     <div id="sc-msg"></div>
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
+    <div class="panel" id="sc-time"><div class="tlabel"><span id="sc-timeMode">day</span><span>time</span></div><div id="sc-timeTrack"><div id="sc-timeFill"></div></div></div>
+    <div id="sc-cross"></div>
+    <div id="sc-nightHint">click to take control &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; mouse look &nbsp;·&nbsp; space = jump / swim &nbsp;·&nbsp; click shoots an arrow</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
       <h2>THE ARMORY</h2>
@@ -121,6 +130,12 @@ export function createHud(
   const angles = q<HTMLElement>('#sc-angles')
   const sideEl = q<HTMLElement>('#sc-side')
   const worldBtn = q<HTMLButtonElement>('#sc-worldBtn')
+  const weaponsPanel = q<HTMLElement>('#sc-weapons')
+  const timeEl = q<HTMLElement>('#sc-time')
+  const timeMode = q<HTMLElement>('#sc-timeMode')
+  const timeFill = q<HTMLElement>('#sc-timeFill')
+  const crossEl = q<HTMLElement>('#sc-cross')
+  const hintEl = q<HTMLElement>('#sc-nightHint')
   worldBtn.addEventListener('click', () => handlers.onWorldToggle?.())
   const banner = q<HTMLElement>('#sc-banner')
   const msgEl = q<HTMLElement>('#sc-msg')
@@ -246,6 +261,23 @@ export function createHud(
     },
     sideRect(): DOMRect {
       return sideEl.getBoundingClientRect()
+    },
+    // Day/night bar, docked directly above the weapons panel (tracks its size).
+    setTime(mode: 'day' | 'sunset' | 'night' | 'dawn', frac: number) {
+      const wr = weaponsPanel.getBoundingClientRect()
+      timeEl.style.left = `${wr.left}px`
+      timeEl.style.width = `${wr.width}px`
+      timeEl.style.bottom = `${window.innerHeight - wr.top + 8}px`
+      timeMode.textContent = mode
+      timeFill.style.width = `${Math.round(frac * 100)}%`
+      timeFill.style.background =
+        mode === 'day' ? '#e8b84d' : mode === 'sunset' ? '#e8956b' : mode === 'night' ? '#5a6fa8' : '#e8c8a0'
+    },
+    setNightHint(show: boolean) {
+      hintEl.style.display = show ? 'block' : 'none'
+    },
+    setCross(show: boolean) {
+      crossEl.style.display = show ? 'block' : 'none'
     },
     setStatus(round: number, rounds: number, you: number, foe: number, cash: number) {
       statusEl.innerHTML = `<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}`

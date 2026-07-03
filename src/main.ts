@@ -1,6 +1,6 @@
 // Scorched Earth 3D — main entry: scene, game loop, turns, camera, input.
 import * as THREE from 'three'
-import { World, GX, GZ, GRAVITY, WIND_ACCEL, type Wind, type Fortifications } from './world'
+import { World, GX, GY, GZ, GRAVITY, WIND_ACCEL, EMPTY, WATER, type Wind, type Fortifications } from './world'
 import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './weapons'
 import { planShot } from './ai'
 import { createHud } from './hud'
@@ -27,7 +27,8 @@ scene.fog = new THREE.Fog(0xeef1f4, 180, 460)
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1200)
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0xd4d9df, 1.2))
+const hemi = new THREE.HemisphereLight(0xffffff, 0xd4d9df, 1.2)
+scene.add(hemi)
 const sun = new THREE.DirectionalLight(0xffffff, 1.7)
 sun.position.set(GX / 2 + 70, 145, GZ / 2 - 55)
 sun.target.position.set(GX / 2, 0, GZ / 2)
@@ -152,11 +153,11 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
+type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'night'
 
 // Match economy: a match is best-of-ROUNDS; damage earns cash, spent in the armory.
 const ROUNDS = 5
-const START_CASH = 3000
+const START_CASH = 0 // wealth comes from the night scavenge
 const WIN_BONUS = 2500
 const DMG_PAY = 4000 // pay for demolishing 100% of the enemy fort
 
@@ -189,6 +190,353 @@ let endShown = false
 let endInfo: { title: string; sub: string; center: THREE.Vector3 } | null = null
 const lastImpact = new THREE.Vector3(GX / 2, 12, GZ / 2)
 const keys = new Set<string>()
+
+// ---------------------------------------------------------------- day/night cycle
+
+const DAY_LEN = 70 // seconds of daylight combat before sunset
+const NIGHT_LEN = 55 // seconds of night scavenging
+const TRANS_LEN = 3.5 // rapid sunset / dawn
+
+type CycleMode = 'day' | 'sunset' | 'night' | 'dawn'
+let cycleMode: CycleMode = 'day'
+let dayT = 0
+let nightT = 0
+let nightBlend = 0 // 0 = full day, 1 = full night
+
+const SKY_DAY = new THREE.Color(0xeef1f4)
+const SKY_DUSK = new THREE.Color(0xe8a06b)
+const SKY_NIGHT = new THREE.Color(0x131a26)
+const _sky = new THREE.Color()
+
+function applyLighting(): void {
+  const b = nightBlend
+  // Ramp through a warm sunset on the way down (and back up at dawn).
+  if (b < 0.5) _sky.copy(SKY_DAY).lerp(SKY_DUSK, b * 2)
+  else _sky.copy(SKY_DUSK).lerp(SKY_NIGHT, (b - 0.5) * 2)
+  ;(scene.background as THREE.Color).copy(_sky)
+  ;(scene.fog as THREE.Fog).color.copy(_sky)
+  hemi.intensity = 1.2 - b * 1.06
+  sun.intensity = 1.7 - b * 1.64
+  world.setNightBlend(b)
+  flashlight.visible = b > 0.55
+  lantern.visible = b > 0.55
+}
+
+// Night walker: the red avatar becomes playable — WASD + mouse look, space to
+// jump, tap space to stay afloat in water. Carries a flashlight and a bow.
+const walker = { x: 0, y: 0, z: 0, vy: 0, yaw: 0, pitch: -0.15, grounded: false, swimming: false }
+
+const flashlight = new THREE.SpotLight(0xfff1cf, 950, 60, 0.42, 0.5, 1.55)
+flashlight.visible = false
+scene.add(flashlight)
+scene.add(flashlight.target)
+// Soft lantern glow around the walker so the avatar reads in the dark.
+const lantern = new THREE.PointLight(0xffe4b0, 26, 14, 1.6)
+lantern.visible = false
+scene.add(lantern)
+
+type Loot = { mesh: THREE.Mesh; kind: 'cash' | 'weapon'; value: number; weaponId?: string; baseY: number; bob: number }
+const loot: Loot[] = []
+type Arrow = { mesh: THREE.Mesh; vel: THREE.Vector3; life: number; stuck: boolean }
+const arrows: Arrow[] = []
+let lootT = 0
+
+// Weapon drops, cheap-biased.
+const LOOT_POOL = ['bigmissile', 'dirtclod', 'tracer', 'babyroller', 'riotcharge', 'babysandhog', 'napalm', 'dirtball', 'leapfrog', 'babynuke', 'roller', 'funky', 'sandhog', 'mirv', 'nuke']
+
+// Highest solid, non-water cell at (x,z) scanning down from fromY — the floor
+// under a point, ignoring any roof above it.
+function solidGroundY(x: number, z: number, fromY: number): number {
+  const rx = Math.round(x)
+  const rz = Math.round(z)
+  if (rx < 0 || rx >= GX || rz < 0 || rz >= GZ) return 0
+  for (let y = Math.min(GY - 1, Math.floor(fromY)); y >= 0; y--) {
+    const c = world.cellAt(rx, y, rz)
+    if (c !== EMPTY && c !== WATER) return y
+  }
+  return 0
+}
+
+function clearLoot(): void {
+  for (const l of loot) {
+    scene.remove(l.mesh)
+    l.mesh.geometry.dispose()
+    ;(l.mesh.material as THREE.Material).dispose()
+  }
+  loot.length = 0
+}
+
+function clearArrows(): void {
+  for (const a of arrows) {
+    scene.remove(a.mesh)
+    a.mesh.geometry.dispose()
+  }
+  arrows.length = 0
+}
+
+// Money bags (gold) and weapon crates (pale blue) scattered through the city.
+function spawnLoot(): void {
+  clearLoot()
+  const t0 = world.forts[0].towers[0]
+  const t1 = world.forts[1].towers[0]
+  const x0 = Math.min(t0.cx, t1.cx) + 14
+  const x1 = Math.max(t0.cx, t1.cx) - 14
+  const target = 10 + Math.floor(Math.random() * 4)
+  for (let attempt = 0; attempt < 90 && loot.length < target; attempt++) {
+    const x = Math.round(x0 + Math.random() * (x1 - x0))
+    const z = Math.round(4 + Math.random() * (GZ - 8))
+    if (world.isWaterTop(x, z)) continue
+    const gy = solidGroundY(x, z, GY - 1)
+    const isCash = loot.length % 3 !== 2 // ~2/3 cash, 1/3 weapon crates
+    let l: Loot
+    if (isCash) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshBasicMaterial({ color: 0xffd34d }))
+      l = { mesh, kind: 'cash', value: 75 + Math.floor(Math.random() * 14) * 25, baseY: gy + 1.1, bob: Math.random() * 6 }
+    } else {
+      const id = LOOT_POOL[Math.floor(Math.pow(Math.random(), 2.2) * LOOT_POOL.length)]
+      const def = WEAPONS.find(v => v.id === id)!
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.75, 0.75), new THREE.MeshBasicMaterial({ color: 0xaef0ff }))
+      l = { mesh, kind: 'weapon', value: def.pack ?? 1, weaponId: id, baseY: gy + 1.2, bob: Math.random() * 6 }
+    }
+    l.mesh.position.set(x, l.baseY, z)
+    scene.add(l.mesh)
+    loot.push(l)
+  }
+}
+
+function fireArrow(): void {
+  const dir = new THREE.Vector3(
+    Math.cos(walker.yaw) * Math.cos(walker.pitch),
+    Math.sin(walker.pitch),
+    Math.sin(walker.yaw) * Math.cos(walker.pitch)
+  )
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 1.0), projMat)
+  mesh.position.set(walker.x, walker.y + 1.9, walker.z).addScaledVector(dir, 0.9)
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir)
+  scene.add(mesh)
+  arrows.push({ mesh, vel: dir.multiplyScalar(34), life: 8, stuck: false })
+  sfx.tick()
+}
+
+function updateArrows(dt: number): void {
+  for (let i = arrows.length - 1; i >= 0; i--) {
+    const a = arrows[i]
+    if (a.stuck) {
+      a.life -= dt
+      if (a.life <= 0) {
+        scene.remove(a.mesh)
+        a.mesh.geometry.dispose()
+        arrows.splice(i, 1)
+      }
+      continue
+    }
+    a.vel.y -= GRAVITY * 0.55 * dt // arrows arc gently
+    a.mesh.position.addScaledVector(a.vel, dt)
+    const p = a.mesh.position
+    if (a.vel.lengthSq() > 0.01) a.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), a.vel.clone().normalize())
+    if (world.isSolid(p.x, p.y, p.z)) {
+      a.stuck = true
+      a.life = 5
+    } else if (p.y < -10 || p.x < -30 || p.x > GX + 30 || p.z < -30 || p.z > GZ + 30) {
+      scene.remove(a.mesh)
+      a.mesh.geometry.dispose()
+      arrows.splice(i, 1)
+    }
+  }
+}
+
+function solidBody(x: number, y: number, z: number): boolean {
+  const c = world.cellAt(Math.round(x), Math.round(y), Math.round(z))
+  return c !== EMPTY && c !== WATER
+}
+
+// Horizontal move with wall blocking and one-voxel step-up.
+function tryMove(dx: number, dz: number): void {
+  const nx = walker.x + dx
+  const nz = walker.z + dz
+  if (nx < 2 || nx > GX - 3 || nz < 2 || nz > GZ - 3) return
+  const lower = solidBody(nx, walker.y + 0.5, nz)
+  const upper = solidBody(nx, walker.y + 1.5, nz)
+  if (!lower && !upper) {
+    walker.x = nx
+    walker.z = nz
+  } else if (lower && !upper && !solidBody(nx, walker.y + 2.5, nz)) {
+    walker.x = nx
+    walker.z = nz
+    walker.y = Math.round(walker.y + 0.5) + 0.5
+  }
+}
+
+function updateWalker(dt: number): void {
+  if (phase !== 'night') return
+  const fx = Math.cos(walker.yaw)
+  const fz = Math.sin(walker.yaw)
+  let mx = 0
+  let mz = 0
+  if (keys.has('KeyW')) {
+    mx += fx
+    mz += fz
+  }
+  if (keys.has('KeyS')) {
+    mx -= fx
+    mz -= fz
+  }
+  if (keys.has('KeyD')) {
+    mx += -fz
+    mz += fx
+  }
+  if (keys.has('KeyA')) {
+    mx -= -fz
+    mz -= fx
+  }
+  const feetCell = world.cellAt(Math.round(walker.x), Math.round(walker.y + 0.4), Math.round(walker.z))
+  walker.swimming = feetCell === WATER
+  const mlen = Math.hypot(mx, mz)
+  if (mlen > 0) {
+    const step = ((walker.swimming ? 4.5 : 8) * dt) / mlen
+    tryMove(mx * step, mz * step)
+  }
+  if (walker.swimming) {
+    // You sink unless you keep tapping space.
+    walker.vy = Math.max(walker.vy - 9 * dt, -2.2)
+    walker.y += walker.vy * dt
+    const surface = world.waterY + 0.4
+    if (walker.y > surface) {
+      walker.y = surface
+      walker.vy = Math.min(walker.vy, 0)
+    }
+    const g = solidGroundY(walker.x, walker.z, walker.y + 1) + 0.5
+    if (walker.y < g) {
+      walker.y = g
+      walker.vy = 0
+    }
+    walker.grounded = false
+  } else {
+    walker.vy -= GRAVITY * dt
+    walker.y += walker.vy * dt
+    const g = solidGroundY(walker.x, walker.z, walker.y + 1.2) + 0.5
+    if (walker.y <= g) {
+      walker.y = g
+      walker.vy = 0
+      walker.grounded = true
+    } else {
+      walker.grounded = false
+    }
+  }
+  // Drive the avatar body + flashlight beam.
+  const av = avatars[0]
+  av.position.set(walker.x, walker.y + 1.5, walker.z)
+  av.rotation.y = -walker.yaw
+  const dir = new THREE.Vector3(
+    Math.cos(walker.yaw) * Math.cos(walker.pitch),
+    Math.sin(walker.pitch),
+    Math.sin(walker.yaw) * Math.cos(walker.pitch)
+  )
+  flashlight.position.set(walker.x, walker.y + 1.9, walker.z).addScaledVector(dir, 0.6)
+  flashlight.target.position.copy(flashlight.position).addScaledVector(dir, 14)
+  lantern.position.set(walker.x, walker.y + 2.4, walker.z)
+  // Loot: bob, spin, collect on contact.
+  lootT += dt
+  for (let i = loot.length - 1; i >= 0; i--) {
+    const l = loot[i]
+    l.mesh.position.y = l.baseY + Math.sin(lootT * 3 + l.bob) * 0.15
+    l.mesh.rotation.y += dt * 2
+    const d = Math.hypot(l.mesh.position.x - walker.x, l.mesh.position.z - walker.z)
+    if (d < 1.4 && Math.abs(l.mesh.position.y - (walker.y + 1)) < 2.2) {
+      if (l.kind === 'cash') {
+        money[0] += l.value
+        hud.msg(`+$${l.value}`)
+        hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+      } else {
+        const def = WEAPONS.find(v => v.id === l.weaponId)!
+        sides[0].arsenal.set(def.id, (sides[0].arsenal.get(def.id) ?? 0) + l.value)
+        updateWeaponHud()
+        hud.msg(`+${l.value} ${def.name}`)
+      }
+      sfx.pop()
+      scene.remove(l.mesh)
+      l.mesh.geometry.dispose()
+      loot.splice(i, 1)
+    }
+  }
+}
+
+function enterNight(): void {
+  phase = 'night'
+  cycleMode = 'sunset'
+  nightT = 0
+  flyHold = null
+  worldView = false
+  hud.setWorldView(false)
+  hud.banner('SUNSET', 'night falls — scavenge the city')
+  // The avatar climbs down and starts at the foot of its tower, city-side.
+  const t = world.forts[0].towers[0]
+  walker.x = t.cx + 7
+  walker.z = t.cz
+  walker.y = solidGroundY(walker.x, walker.z, GY - 1) + 0.5
+  walker.vy = 0
+  walker.yaw = 0
+  walker.pitch = -0.15
+  spawnLoot()
+  hud.setNightHint(true)
+}
+
+function exitNight(): void {
+  cycleMode = 'day'
+  dayT = 0
+  nightT = 0
+  nightBlend = 0
+  applyLighting()
+  clearLoot()
+  clearArrows()
+  hud.setNightHint(false)
+  hud.setCross(false)
+  if (document.pointerLockElement) document.exitPointerLock()
+  placeAvatars() // back to the tower perch
+  // The computer scavenged offscreen while you were out there.
+  money[1] += 300 + Math.floor(Math.random() * 500)
+  if (Math.random() < 0.5) {
+    const id = LOOT_POOL[Math.floor(Math.pow(Math.random(), 2.2) * LOOT_POOL.length)]
+    const def = WEAPONS.find(v => v.id === id)!
+    sides[1].arsenal.set(id, (sides[1].arsenal.get(id) ?? 0) + (def.pack ?? 1))
+  }
+  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  startTurn(0)
+  hud.banner('DAWN', 'back to your cannon')
+}
+
+function updateCycle(dt: number): void {
+  const combat =
+    phase === 'aim' || phase === 'charge' || phase === 'fly' || phase === 'resolve' || phase === 'aiThink' || phase === 'aiAim'
+  if (cycleMode === 'day') {
+    if (combat) {
+      dayT += dt
+      // Sunset waits for a quiet moment — never mid-flight or mid-AI-turn.
+      if (dayT >= DAY_LEN && phase === 'aim') enterNight()
+    }
+  } else if (cycleMode === 'sunset') {
+    nightBlend = Math.min(1, nightBlend + dt / TRANS_LEN)
+    applyLighting()
+    if (nightBlend >= 1) cycleMode = 'night'
+  } else if (cycleMode === 'night') {
+    nightT += dt
+    if (nightT >= NIGHT_LEN) cycleMode = 'dawn'
+  } else {
+    nightBlend = Math.max(0, nightBlend - dt / TRANS_LEN)
+    applyLighting()
+    if (nightBlend <= 0) exitNight()
+  }
+  const frac =
+    cycleMode === 'day'
+      ? Math.min(1, dayT / DAY_LEN)
+      : cycleMode === 'night'
+        ? Math.min(1, nightT / NIGHT_LEN)
+        : cycleMode === 'sunset'
+          ? nightBlend
+          : 1 - nightBlend
+  hud.setTime(cycleMode, frac)
+  hud.setCross(phase === 'night' && !!document.pointerLockElement)
+}
 
 // ---------------------------------------------------------------- projectiles
 
@@ -286,7 +634,9 @@ const tasks: Task[] = []
 
 function crater(at: THREE.Vector3, r: number, fire: boolean): void {
   world.carve(at.x, at.y, at.z, r)
-  if (fire) world.shockwave(at.x, at.y, at.z, r, Math.random)
+  // Small blasts (the starting Baby Missile) only chip — no wall-toppling
+  // shockwave. Real tower damage takes scavenged or purchased ordnance.
+  if (fire && r >= 3) world.shockwave(at.x, at.y, at.z, r, Math.random)
   world.updateSupport(Math.random)
   spawnExplosion(at, r, fire)
   sfx.boom(r)
@@ -628,7 +978,20 @@ function updateCamera(dt: number): void {
   const desiredLook = new THREE.Vector3()
   let k = 3.5
 
-  if (phase === 'aim' || phase === 'charge') {
+  if (phase === 'night') {
+    // Third-person follow: behind and above the walker, mouse-steered.
+    const dir = new THREE.Vector3(
+      Math.cos(walker.yaw) * Math.cos(walker.pitch),
+      Math.sin(walker.pitch),
+      Math.sin(walker.yaw) * Math.cos(walker.pitch)
+    )
+    const head = new THREE.Vector3(walker.x, walker.y + 1.9, walker.z)
+    desiredPos.copy(head).addScaledVector(dir, -7).add(new THREE.Vector3(0, 1.7, 0))
+    const floor = solidGroundY(desiredPos.x, desiredPos.z, desiredPos.y)
+    if (desiredPos.y < floor + 1.4) desiredPos.y = floor + 1.4
+    desiredLook.copy(head).addScaledVector(dir, 8)
+    k = 18
+  } else if (phase === 'aim' || phase === 'charge') {
     if (worldView) {
       desiredPos.set(GX / 2 - 115, 85, GZ / 2 + 70)
       desiredLook.set(GX / 2 + 8, 6, GZ / 2)
@@ -1074,6 +1437,15 @@ function setupRoundWorld(): void {
   endInfo = null
   flyHold = null
   shotThisRound = false
+  cycleMode = 'day'
+  dayT = 0
+  nightT = 0
+  nightBlend = 0
+  applyLighting()
+  clearLoot()
+  clearArrows()
+  hud.setNightHint(false)
+  hud.setCross(false)
   clearLastTrails()
   hud.setIntegrity(1, 1)
   updateWeaponHud()
@@ -1210,7 +1582,14 @@ window.addEventListener('keydown', e => {
   }
   if (e.code === 'Space') {
     e.preventDefault()
-    if (phase === 'aim' && !e.repeat) {
+    if (phase === 'night' && !e.repeat) {
+      // Jump on land; tap repeatedly to stay afloat in water.
+      if (walker.swimming) walker.vy = Math.min(walker.vy + 3.6, 3.2)
+      else if (walker.grounded) {
+        walker.vy = 10
+        walker.grounded = false
+      }
+    } else if (phase === 'aim' && !e.repeat) {
       phase = 'charge'
       chargeT = 0
       chargePower = 0
@@ -1237,6 +1616,25 @@ window.addEventListener('keyup', e => {
 
 window.addEventListener('blur', () => keys.clear())
 window.addEventListener('pointerdown', () => sfx.unlock())
+
+// Night controls: mouse steers the walker's view; click locks the pointer,
+// and once locked each click shoots an arrow.
+window.addEventListener('mousemove', e => {
+  if (phase !== 'night') return
+  walker.yaw += e.movementX * 0.0029
+  walker.pitch = THREE.MathUtils.clamp(walker.pitch - e.movementY * 0.0029, -1.1, 0.75)
+})
+renderer.domElement.addEventListener('click', () => {
+  if (phase !== 'night') return
+  if (!document.pointerLockElement) {
+    renderer.domElement.requestPointerLock()
+    return
+  }
+  fireArrow()
+})
+document.addEventListener('pointerlockchange', () => {
+  hud.setNightHint(phase === 'night' && !document.pointerLockElement)
+})
 
 function updatePlayerAim(dt: number): void {
   if (phase !== 'aim' && phase !== 'charge') return
@@ -1353,6 +1751,9 @@ function tick(now: number): void {
     m.color.setHex(readying ? 0xd5473a : 0x8a929b)
   }
 
+  updateCycle(dt)
+  updateWalker(dt)
+  updateArrows(dt)
   updateHint()
   updateCamera(dt)
   // Keep the wind compass screen-relative: arrow points where the wind pushes
@@ -1374,7 +1775,7 @@ renderer.setAnimationLoop(tick)
 // (e.g. headless preview tabs). Harmless in normal play.
 declare global {
   interface Window {
-    __sv?: { pump: (seconds: number) => void; state: () => object; world: World; newMatch: () => void }
+    __sv?: { pump: (seconds: number) => void; state: () => object; world: World; newMatch: () => void; sunset: () => void }
   }
 }
 let fakeNow = 0
@@ -1400,10 +1801,14 @@ window.__sv = {
     power: chargePower,
     lastImpact: { x: lastImpact.x, y: lastImpact.y, z: lastImpact.z },
     avatars: avatars.map(a => ({ x: a.position.x, y: a.position.y, z: a.position.z })),
+    cycle: { mode: cycleMode, dayT, nightT, blend: nightBlend, loot: loot.length, walker: { ...walker } },
     proj0: projs[0]
       ? { x: projs[0].pos.x, y: projs[0].pos.y, z: projs[0].pos.z, vx: projs[0].vel.x, vy: projs[0].vel.y, vz: projs[0].vel.z }
       : null,
   }),
   world,
   newMatch: fullReset,
+  sunset: () => {
+    dayT = DAY_LEN // testing: force the next quiet moment to trigger nightfall
+  },
 }
