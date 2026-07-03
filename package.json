@@ -1,0 +1,20 @@
+{
+  "name": "scorched-voxels",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Scorched Voxels — a 3D Scorched Earth artillery duel vs the computer, in a stylized white voxel world.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "@types/three": "^0.183.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  }
+}
