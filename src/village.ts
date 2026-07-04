@@ -145,21 +145,65 @@ export class Village {
       ;[paints[i], paints[k]] = [paints[k], paints[i]]
     }
 
-    // Twelve buildings in a jittered ring around the cemetery, doors inward.
-    const ringRx = this.sx / 2 - 9
-    const ringRz = this.sz / 2 - 8
-    for (let i = 0; i < 12; i++) {
-      const ang = (i / 12) * Math.PI * 2 + (rand() - 0.5) * 0.22
-      const bw = 7 + Math.floor(rand() * 3) // width (world units)
-      const bd = 6 + Math.floor(rand() * 3) // depth
-      const bh = 4 + Math.floor(rand() * 2) // wall height
-      const bx = Math.round(ccx + Math.cos(ang) * (ringRx - bw / 2) )
-      const bz = Math.round(ccz + Math.sin(ang) * (ringRz - bd / 2))
-      this.buildHouse(i, names[i], paints[i], bx, bz, bw, bd, bh, ang, rand)
+    // Twelve buildings on a rectangular ring — three per side, jittered, doors
+    // inward — leaving guaranteed streets between them and around the cemetery.
+    const slots: { x: number; z: number; ang: number }[] = []
+    const inset = 9
+    for (let i = 0; i < 3; i++) {
+      const tx = this.sx * (0.24 + 0.26 * i)
+      const tz = this.sz * (0.27 + 0.23 * i)
+      slots.push({ x: tx, z: inset, ang: -Math.PI / 2 }) // north row (door faces +z)
+      slots.push({ x: tx, z: this.sz - inset, ang: Math.PI / 2 }) // south row
+      slots.push({ x: inset, z: tz, ang: Math.PI }) // west column (door faces +x)
+      slots.push({ x: this.sx - inset, z: tz, ang: 0 }) // east column
     }
+    for (let i = 0; i < 12; i++) {
+      const s = slots[i]
+      const bw = 6 + Math.floor(rand() * 3) // width (world units)
+      const bd = 6 + Math.floor(rand() * 2) // depth
+      const bh = 4 + Math.floor(rand() * 2) // wall height
+      const bx = Math.round(s.x + (rand() - 0.5) * 2)
+      const bz = Math.round(s.z + (rand() - 0.5) * 2)
+      this.buildHouse(i, names[i], paints[i], bx, bz, bw, bd, bh, s.ang, rand)
+    }
+
+    // City wall with one gate per side.
+    this.buildWall(rand)
+
     this.rebuild()
     // Cemetery glow anchor.
     this.glowLight.position.set(this.ox + ccx, baseY + 3, this.oz + ccz)
+  }
+
+  // Low stone perimeter wall around the village, one gate mid-way along each
+  // side — the only ways into the city.
+  private buildWall(rand: () => number): void {
+    const wallH = 10 // fine cells (2.5 units)
+    const x1 = this.sx * F - 3
+    const z1 = this.sz * F - 3
+    const midX = Math.round((this.sx * F) / 2)
+    const midZ = Math.round((this.sz * F) / 2)
+    const gateHalf = 5 // fine half-width (gate 2.5 units wide)
+    for (let fx = 2; fx <= x1; fx++) {
+      for (const fz of [2, z1]) {
+        if (Math.abs(fx - midX) <= gateHalf) continue
+        for (let fy = 0; fy < wallH; fy++) {
+          if (rand() < 0.004) continue // crumbled stones
+          this.put(fx, fy, fz, T_GRAVE, 0)
+        }
+        if ((fx & 7) === 0) this.put(fx, wallH, fz, T_GRAVE, 0) // cap merlons
+      }
+    }
+    for (let fz = 2; fz <= z1; fz++) {
+      for (const fx of [2, x1]) {
+        if (Math.abs(fz - midZ) <= gateHalf) continue
+        for (let fy = 0; fy < wallH; fy++) {
+          if (rand() < 0.004) continue
+          this.put(fx, fy, fz, T_GRAVE, 0)
+        }
+        if ((fz & 7) === 0) this.put(fx, wallH, fz, T_GRAVE, 0)
+      }
+    }
   }
 
   private buildingLights: THREE.PointLight[] = []
@@ -220,34 +264,52 @@ export class Village {
         this.put(cx + fx, 0, cz + fz, T_FLOOR, owner)
       }
     }
-    // Stepped gable roof with eaves, ridge along the longer axis.
+    // Roofline: about half the town is flat-roofed with a parapet, the rest
+    // get stepped gables — plus chimneys either way.
     const alongX = w >= d
-    const spanHalf = alongX ? hd : hw
-    const roofRise = Math.floor(spanHalf * 0.9)
-    for (let s = 0; s <= roofRise; s++) {
-      const lo = -spanHalf - 2 + s
-      const hi = spanHalf + 2 - s
-      if (lo > hi) break
-      for (let a = -(alongX ? hw : hd) - 2; a <= (alongX ? hw : hd) + 2; a++) {
-        for (const edge of [lo, hi]) {
-          const fx = alongX ? a : edge
-          const fz = alongX ? edge : a
-          this.put(cx + fx, wallTop + s, cz + fz, T_ROOF, owner)
-        }
-        // Fill the gable ends.
-        if (Math.abs(a) === (alongX ? hw : hd) + 2) {
-          for (let e = lo; e <= hi; e++) {
-            const fx = alongX ? a : e
-            const fz = alongX ? e : a
-            this.put(cx + fx, wallTop + s, cz + fz, T_WALL, owner)
+    const flatRoof = rand() < 0.5
+    let roofTopY = wallTop
+    if (flatRoof) {
+      for (let fx = -hw - 1; fx <= hw + 1; fx++) {
+        for (let fz = -hd - 1; fz <= hd + 1; fz++) {
+          this.put(cx + fx, wallTop, cz + fz, T_ROOF, owner)
+          const onEdge = Math.abs(fx) >= hw || Math.abs(fz) >= hd
+          if (onEdge) {
+            this.put(cx + fx, wallTop + 1, cz + fz, T_WALL, owner)
+            if (((fx + fz) & 3) !== 0) this.put(cx + fx, wallTop + 2, cz + fz, T_WALL, owner) // parapet merlons
           }
         }
       }
+      roofTopY = wallTop + 2
+    } else {
+      const spanHalf = alongX ? hd : hw
+      const roofRise = Math.floor(spanHalf * 0.9)
+      for (let s = 0; s <= roofRise; s++) {
+        const lo = -spanHalf - 2 + s
+        const hi = spanHalf + 2 - s
+        if (lo > hi) break
+        for (let a = -(alongX ? hw : hd) - 2; a <= (alongX ? hw : hd) + 2; a++) {
+          for (const edge of [lo, hi]) {
+            const fx = alongX ? a : edge
+            const fz = alongX ? edge : a
+            this.put(cx + fx, wallTop + s, cz + fz, T_ROOF, owner)
+          }
+          // Fill the gable ends.
+          if (Math.abs(a) === (alongX ? hw : hd) + 2) {
+            for (let e = lo; e <= hi; e++) {
+              const fx = alongX ? a : e
+              const fz = alongX ? e : a
+              this.put(cx + fx, wallTop + s, cz + fz, T_WALL, owner)
+            }
+          }
+        }
+      }
+      roofTopY = wallTop + roofRise
     }
     // Chimney.
     const chx = cx + (alongX ? hw - 4 : 0)
     const chz = cz + (alongX ? 0 : hd - 4)
-    for (let fy = wallTop; fy < wallTop + roofRise + 5; fy++) {
+    for (let fy = wallTop; fy < roofTopY + 5; fy++) {
       for (let a = 0; a < 2; a++) {
         for (let b = 0; b < 2; b++) this.put(chx + a, fy, chz + b, T_WALL, owner)
       }
@@ -269,6 +331,47 @@ export class Village {
         if (out === 5 && Math.abs(lat) === 4) {
           for (let fy = 0; fy < 10; fy++) this.put(px, fy, pz, T_TRIM, owner) // columns
         }
+      }
+    }
+
+    // Decay: some houses have seen better centuries — missing bricks (worse
+    // toward the top), caved-in roof sections, and rubble around the base.
+    const decay = rand() < 0.55 ? 0.15 + rand() * 0.4 : 0
+    if (decay > 0) {
+      for (let fx = -hw - 2; fx <= hw + 2; fx++) {
+        for (let fz = -hd - 2; fz <= hd + 2; fz++) {
+          for (let fy = 1; fy <= roofTopY + 5; fy++) {
+            const i2 = this.fidx(cx + fx, fy, cz + fz)
+            if (!this.inFine(cx + fx, fy, cz + fz) || !this.solid[i2] || this.owner[i2] !== owner) continue
+            const p = decay * (0.25 + 0.75 * (fy / (roofTopY + 5)))
+            if (rand() < p * 0.4) this.solid[i2] = 0
+          }
+        }
+      }
+      if (decay > 0.28) {
+        // A collapsed roof section.
+        const hx = cx + Math.round((rand() - 0.5) * hw)
+        const hz = cz + Math.round((rand() - 0.5) * hd)
+        const hr = 3 + Math.floor(rand() * 4)
+        for (let fx = -hr; fx <= hr; fx++) {
+          for (let fz = -hr; fz <= hr; fz++) {
+            if (fx * fx + fz * fz > hr * hr) continue
+            for (let fy = wallTop - 1; fy <= roofTopY + 2; fy++) {
+              if (!this.inFine(hx + fx, fy, hz + fz)) continue
+              const i2 = this.fidx(hx + fx, fy, hz + fz)
+              if (this.owner[i2] === owner) this.solid[i2] = 0
+            }
+          }
+        }
+      }
+      // Fallen bricks.
+      const rubble = Math.floor(decay * 30)
+      for (let i2 = 0; i2 < rubble; i2++) {
+        const sideR = rand() < 0.5
+        const rx = cx + (sideR ? (rand() < 0.5 ? -hw : hw) + Math.round((rand() - 0.5) * 6) : Math.round((rand() - 0.5) * 2 * hw))
+        const rz = cz + (sideR ? Math.round((rand() - 0.5) * 2 * hd) : (rand() < 0.5 ? -hd : hd) + Math.round((rand() - 0.5) * 6))
+        this.put(rx, 0, rz, T_WALL, owner)
+        if (rand() < 0.3) this.put(rx, 1, rz, T_WALL, owner)
       }
     }
 

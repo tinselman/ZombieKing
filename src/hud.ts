@@ -16,6 +16,7 @@ const CSS = `
 #sc-wind { top: 16px; left: 50%; transform: translateX(-50%); text-align: center; min-width: 110px; }
 #sc-status { top: 130px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; letter-spacing: 0.05em; padding: 6px 14px; white-space: nowrap; }
 #sc-status span { color: #7a838d; font-weight: 400; }
+#sc-nightTurn { top: 168px; left: 50%; transform: translateX(-50%); font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; padding: 7px 18px; white-space: nowrap; background: rgba(20,26,38,0.85); color: #fff; border-color: #3a4a6b; display: none; }
 #sc-windArrow { font-size: 22px; line-height: 1; display: inline-block; transition: transform 0.4s ease; }
 #sc-windSpeed { font-size: 13px; font-weight: 600; margin-top: 2px; }
 #sc-weapons { bottom: 16px; left: 16px; min-width: 170px; pointer-events: auto; }
@@ -84,6 +85,7 @@ export function createHud(
     <div class="panel" id="sc-fortFoe"><div class="label">Enemy Fort</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
     <div class="panel" id="sc-wind"><div class="label">Wind</div><span id="sc-windArrow">➤</span><div id="sc-windSpeed"></div></div>
     <div class="panel" id="sc-status"></div>
+    <div class="panel" id="sc-nightTurn"></div>
     <div class="panel" id="sc-weapons"><div class="label">Weapon &nbsp;⇥ / click</div><div id="sc-weaponList"></div></div>
     <div class="panel" id="sc-power"><div class="label">Power — hold space, release to fire</div><div id="sc-powerBar"><div class="fill"></div><div id="sc-powerMark"></div></div><div id="sc-powerNum">–</div></div>
     <div class="panel" id="sc-angles"></div>
@@ -94,7 +96,7 @@ export function createHud(
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
     <div class="panel" id="sc-time"><div class="tlabel"><span id="sc-timeMode">day</span><span>time</span></div><div id="sc-timeTrack"><div id="sc-timeFill"></div></div></div>
     <div id="sc-cross"></div>
-    <div id="sc-nightHint">click to take control &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; mouse look &nbsp;·&nbsp; space = jump / swim &nbsp;·&nbsp; click shoots an arrow</div>
+    <div id="sc-nightHint">WASD = hop one space (4 per turn) &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; F / click = shoot (ends turn) &nbsp;·&nbsp; enter = pass</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
       <h2>THE ARMORY</h2>
@@ -117,6 +119,7 @@ export function createHud(
   const windArrow = q<HTMLElement>('#sc-windArrow')
   const windSpeed = q<HTMLElement>('#sc-windSpeed')
   const statusEl = q<HTMLElement>('#sc-status')
+  const nightTurnEl = q<HTMLElement>('#sc-nightTurn')
   const shop = q<HTMLElement>('#sc-shop')
   const shopResult = q<HTMLElement>('#sc-shopResult')
   const shopStatus = q<HTMLElement>('#sc-shopStatus')
@@ -275,6 +278,11 @@ export function createHud(
     },
     setNightHint(show: boolean) {
       hintEl.style.display = show ? 'block' : 'none'
+    },
+    // Whose turn it is at night (null hides the panel).
+    setNightTurn(text: string | null) {
+      nightTurnEl.style.display = text ? 'block' : 'none'
+      if (text) nightTurnEl.textContent = text
     },
     setCross(show: boolean) {
       crossEl.style.display = show ? 'block' : 'none'
