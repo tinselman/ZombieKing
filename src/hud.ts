@@ -96,7 +96,7 @@ export function createHud(
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
     <div class="panel" id="sc-time"><div class="tlabel"><span id="sc-timeMode">day</span><span>time</span></div><div id="sc-timeTrack"><div id="sc-timeFill"></div></div></div>
     <div id="sc-cross"></div>
-    <div id="sc-nightHint">WASD = hop one space (4 per turn) &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; F / click = shoot (ends turn) &nbsp;·&nbsp; enter = pass</div>
+    <div id="sc-nightHint">WASD = hop one space (4 per turn) &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; hold SPACE = draw bow, release to shoot (ends turn) &nbsp;·&nbsp; enter = pass</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
       <h2>THE ARMORY</h2>

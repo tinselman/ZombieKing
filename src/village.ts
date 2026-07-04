@@ -36,6 +36,9 @@ const T_GRAVE = 6
 // identities, so paint tells you nothing about what's inside.
 const PALETTE = [0x8f9bb0, 0xb8a08e, 0xa8b09a, 0xb09aa5, 0x9ab0ae, 0xb0ab8f, 0x9f96b3, 0xb39a96, 0x96a7b3, 0xb3a696, 0xa2b396, 0x8fa3b0]
 
+// Board-game pastels for revealed room floors.
+const PASTELS = [0xf9c6d0, 0xfde9a8, 0xbfe3f2, 0xcfc4ec, 0xc9ecc4, 0xfad2b0, 0xa8d8e8, 0xf7f3b5, 0xd9f2e6, 0xf2d9ee, 0xdce9f9, 0xffe0c2]
+
 export type Building = {
   id: number
   name: string // secret until revealed
@@ -50,6 +53,7 @@ export type Building = {
   revealed: boolean
   light: THREE.PointLight | null
   color: number
+  pastel: number // revealed floor color
 }
 
 const MAX_FINE = 260000
@@ -58,8 +62,8 @@ export class Village {
   ox = 0 // world-space min corner
   oz = 0
   baseY = 0 // island ground level (top solid voxel y)
-  sx = 60 // footprint in world units
-  sz = 46
+  sx = 48 // footprint in world units — condensed, board-game tight
+  sz = 40
   sy = 13 // vertical extent covered by the fine grid
   buildings: Building[] = []
   cemetery = { x0: 0, z0: 0, x1: 0, z1: 0 }
@@ -126,6 +130,12 @@ export class Village {
     this.buildings = []
     for (const b of this.buildingLights) this.scene.remove(b)
     this.buildingLights.length = 0
+    for (const s of this.nameSprites) {
+      this.scene.remove(s)
+      ;(s.material.map as THREE.CanvasTexture | null)?.dispose()
+      s.material.dispose()
+    }
+    this.nameSprites.length = 0
 
     const rand = mulberry32(seed ^ 0x9e3779b9)
 
@@ -135,23 +145,27 @@ export class Village {
     this.cemetery = { x0: this.ox + ccx - 5, z0: this.oz + ccz - 4, x1: this.ox + ccx + 5, z1: this.oz + ccz + 4 }
     this.buildCemetery(Math.round(ccx), Math.round(ccz), rand)
 
-    // Shuffle names and paint.
+    // Shuffle names, paint and floor pastels independently — nothing on the
+    // outside hints at what a building is.
     const names = [...BUILDING_NAMES]
     const paints = [...PALETTE]
+    const pastels = [...PASTELS]
     for (let i = names.length - 1; i > 0; i--) {
       const j = Math.floor(rand() * (i + 1))
       ;[names[i], names[j]] = [names[j], names[i]]
       const k = Math.floor(rand() * (i + 1))
       ;[paints[i], paints[k]] = [paints[k], paints[i]]
+      const p = Math.floor(rand() * (i + 1))
+      ;[pastels[i], pastels[p]] = [pastels[p], pastels[i]]
     }
 
-    // Twelve buildings on a rectangular ring — three per side, jittered, doors
-    // inward — leaving guaranteed streets between them and around the cemetery.
+    // Twelve buildings on a tight rectangular ring — three per side, doors
+    // inward — with lanes just wide enough to walk (no city wall).
     const slots: { x: number; z: number; ang: number }[] = []
-    const inset = 9
+    const inset = 7
     for (let i = 0; i < 3; i++) {
-      const tx = this.sx * (0.24 + 0.26 * i)
-      const tz = this.sz * (0.27 + 0.23 * i)
+      const tx = this.sx * (0.22 + 0.28 * i)
+      const tz = this.sz * (0.26 + 0.24 * i)
       slots.push({ x: tx, z: inset, ang: -Math.PI / 2 }) // north row (door faces +z)
       slots.push({ x: tx, z: this.sz - inset, ang: Math.PI / 2 }) // south row
       slots.push({ x: inset, z: tz, ang: Math.PI }) // west column (door faces +x)
@@ -159,51 +173,17 @@ export class Village {
     }
     for (let i = 0; i < 12; i++) {
       const s = slots[i]
-      const bw = 6 + Math.floor(rand() * 3) // width (world units)
+      const bw = 7 + Math.floor(rand() * 2) // width (world units)
       const bd = 6 + Math.floor(rand() * 2) // depth
       const bh = 4 + Math.floor(rand() * 2) // wall height
       const bx = Math.round(s.x + (rand() - 0.5) * 2)
       const bz = Math.round(s.z + (rand() - 0.5) * 2)
-      this.buildHouse(i, names[i], paints[i], bx, bz, bw, bd, bh, s.ang, rand)
+      this.buildHouse(i, names[i], paints[i], pastels[i], bx, bz, bw, bd, bh, s.ang, rand)
     }
-
-    // City wall with one gate per side.
-    this.buildWall(rand)
 
     this.rebuild()
     // Cemetery glow anchor.
     this.glowLight.position.set(this.ox + ccx, baseY + 3, this.oz + ccz)
-  }
-
-  // Low stone perimeter wall around the village, one gate mid-way along each
-  // side — the only ways into the city.
-  private buildWall(rand: () => number): void {
-    const wallH = 10 // fine cells (2.5 units)
-    const x1 = this.sx * F - 3
-    const z1 = this.sz * F - 3
-    const midX = Math.round((this.sx * F) / 2)
-    const midZ = Math.round((this.sz * F) / 2)
-    const gateHalf = 5 // fine half-width (gate 2.5 units wide)
-    for (let fx = 2; fx <= x1; fx++) {
-      for (const fz of [2, z1]) {
-        if (Math.abs(fx - midX) <= gateHalf) continue
-        for (let fy = 0; fy < wallH; fy++) {
-          if (rand() < 0.004) continue // crumbled stones
-          this.put(fx, fy, fz, T_GRAVE, 0)
-        }
-        if ((fx & 7) === 0) this.put(fx, wallH, fz, T_GRAVE, 0) // cap merlons
-      }
-    }
-    for (let fz = 2; fz <= z1; fz++) {
-      for (const fx of [2, x1]) {
-        if (Math.abs(fz - midZ) <= gateHalf) continue
-        for (let fy = 0; fy < wallH; fy++) {
-          if (rand() < 0.004) continue
-          this.put(fx, fy, fz, T_GRAVE, 0)
-        }
-        if ((fz & 7) === 0) this.put(fx, wallH, fz, T_GRAVE, 0)
-      }
-    }
   }
 
   private buildingLights: THREE.PointLight[] = []
@@ -214,6 +194,7 @@ export class Village {
     id: number,
     name: string,
     color: number,
+    pastel: number,
     bx: number,
     bz: number,
     w: number,
@@ -239,21 +220,25 @@ export class Village {
         const onZ = Math.abs(fz) === hd
         if (!onX && !onZ) continue
         for (let fy = 0; fy < wallTop; fy++) {
-          // Door: 5 fine wide, 9 fine tall on the inward side.
+          // Door: 9 fine (2.25 units) wide — comfortably two hop-cells — and
+          // 9 fine tall, on the inward side. The ONLY way in.
           const inDoor =
             fy < 9 &&
-            ((side === 0 && fx === hw && Math.abs(fz) <= 2) ||
-              (side === 1 && fx === -hw && Math.abs(fz) <= 2) ||
-              (side === 2 && fz === hd && Math.abs(fx) <= 2) ||
-              (side === 3 && fz === -hd && Math.abs(fx) <= 2))
+            ((side === 0 && fx === hw && Math.abs(fz) <= 4) ||
+              (side === 1 && fx === -hw && Math.abs(fz) <= 4) ||
+              (side === 2 && fz === hd && Math.abs(fx) <= 4) ||
+              (side === 3 && fz === -hd && Math.abs(fx) <= 4))
           if (inDoor) continue
-          // Tall Victorian windows: 3 fine wide, 8 fine tall, spaced every 8.
-          const along = onX ? fz + hd : fx + hw
-          const inWindowBand = along % 8 >= 3 && along % 8 <= 5
-          const winV = fy >= 4 && fy < 12
-          if (inWindowBand && winV && !(onX && onZ)) continue
-          // White trim: sills, lintels and the top course.
-          const trim = fy === 3 || fy === 12 || fy === wallTop - 1
+          // Very few windows: only on the door-facing (inward) wall, small and
+          // sparse — the outward faces of the city are blind brick.
+          const whichSide = onX ? (fx > 0 ? 0 : 1) : fz > 0 ? 2 : 3
+          if (whichSide === side && !(onX && onZ)) {
+            const along = onX ? fz + hd : fx + hw
+            const inWindowBand = along % 10 >= 5 && along % 10 <= 7
+            if (inWindowBand && fy >= 5 && fy < 10) continue
+          }
+          // White trim: a lintel course and the top course.
+          const trim = fy === 12 || fy === wallTop - 1
           this.put(cx + fx, fy, cz + fz, trim ? T_TRIM : T_WALL, owner)
         }
       }
@@ -324,57 +309,17 @@ export class Village {
     const doorFx = cx + (side === 0 ? hw : side === 1 ? -hw : 0)
     const doorFz = cz + (side === 2 ? hd : side === 3 ? -hd : 0)
     for (let out = 1; out <= 6; out++) {
-      for (let lat = -4; lat <= 4; lat++) {
+      for (let lat = -5; lat <= 5; lat++) {
         const px = doorFx + dirs.x * out + (dirs.x === 0 ? lat : 0)
         const pz = doorFz + dirs.z * out + (dirs.z === 0 ? lat : 0)
         this.put(px, 10, pz, T_TRIM, owner) // porch roof
-        if (out === 5 && Math.abs(lat) === 4) {
+        if (out === 5 && Math.abs(lat) === 5) {
           for (let fy = 0; fy < 10; fy++) this.put(px, fy, pz, T_TRIM, owner) // columns
         }
       }
     }
 
-    // Decay: some houses have seen better centuries — missing bricks (worse
-    // toward the top), caved-in roof sections, and rubble around the base.
-    const decay = rand() < 0.55 ? 0.15 + rand() * 0.4 : 0
-    if (decay > 0) {
-      for (let fx = -hw - 2; fx <= hw + 2; fx++) {
-        for (let fz = -hd - 2; fz <= hd + 2; fz++) {
-          for (let fy = 1; fy <= roofTopY + 5; fy++) {
-            const i2 = this.fidx(cx + fx, fy, cz + fz)
-            if (!this.inFine(cx + fx, fy, cz + fz) || !this.solid[i2] || this.owner[i2] !== owner) continue
-            const p = decay * (0.25 + 0.75 * (fy / (roofTopY + 5)))
-            if (rand() < p * 0.4) this.solid[i2] = 0
-          }
-        }
-      }
-      if (decay > 0.28) {
-        // A collapsed roof section.
-        const hx = cx + Math.round((rand() - 0.5) * hw)
-        const hz = cz + Math.round((rand() - 0.5) * hd)
-        const hr = 3 + Math.floor(rand() * 4)
-        for (let fx = -hr; fx <= hr; fx++) {
-          for (let fz = -hr; fz <= hr; fz++) {
-            if (fx * fx + fz * fz > hr * hr) continue
-            for (let fy = wallTop - 1; fy <= roofTopY + 2; fy++) {
-              if (!this.inFine(hx + fx, fy, hz + fz)) continue
-              const i2 = this.fidx(hx + fx, fy, hz + fz)
-              if (this.owner[i2] === owner) this.solid[i2] = 0
-            }
-          }
-        }
-      }
-      // Fallen bricks.
-      const rubble = Math.floor(decay * 30)
-      for (let i2 = 0; i2 < rubble; i2++) {
-        const sideR = rand() < 0.5
-        const rx = cx + (sideR ? (rand() < 0.5 ? -hw : hw) + Math.round((rand() - 0.5) * 6) : Math.round((rand() - 0.5) * 2 * hw))
-        const rz = cz + (sideR ? Math.round((rand() - 0.5) * 2 * hd) : (rand() < 0.5 ? -hd : hd) + Math.round((rand() - 0.5) * 6))
-        this.put(rx, 0, rz, T_WALL, owner)
-        if (rand() < 0.3) this.put(rx, 1, rz, T_WALL, owner)
-      }
-    }
-
+    void roofTopY
     const b: Building = {
       id,
       name,
@@ -389,6 +334,7 @@ export class Village {
       revealed: false,
       light: null,
       color,
+      pastel,
     }
     void rand
     this.buildings.push(b)
@@ -467,7 +413,8 @@ export class Village {
     return wx > this.cemetery.x0 && wx < this.cemetery.x1 && wz > this.cemetery.z0 && wz < this.cemetery.z1
   }
 
-  // Flip the lights on, reveal the name to everyone, return it.
+  // Flip the lights on: the floor turns its pastel color, the room's name
+  // hovers inside it in Helvetica, and everyone now knows what it is.
   reveal(b: Building): string {
     if (b.revealed) return b.name
     b.revealed = true
@@ -476,9 +423,30 @@ export class Village {
     this.scene.add(light)
     this.buildingLights.push(light)
     b.light = light
+    // Hovering name.
+    const c = document.createElement('canvas')
+    c.width = 512
+    c.height = 128
+    const g = c.getContext('2d')!
+    g.font = '700 58px Helvetica, Arial, sans-serif'
+    g.textAlign = 'center'
+    g.textBaseline = 'middle'
+    g.shadowColor = 'rgba(0,0,0,0.85)'
+    g.shadowBlur = 14
+    g.fillStyle = 'rgba(255,255,255,0.96)'
+    g.fillText(b.name.toUpperCase(), 256, 64)
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false })
+    )
+    sprite.scale.set(6.4, 1.6, 1)
+    sprite.position.set(b.cx, this.baseY + 3.6, b.cz)
+    this.scene.add(sprite)
+    this.nameSprites.push(sprite)
     this.rebuild()
     return b.name
   }
+
+  private nameSprites: THREE.Sprite[] = []
 
   // Night dial: the cemetery glow and revealed windows burn brightest after dark.
   setNightBlend(blend: number): void {
@@ -544,7 +512,7 @@ export class Village {
           const lit = b?.revealed ?? false
           if (t === T_TRIM) col.setHex(lit ? 0xfff6e0 : 0xf2f2ee)
           else if (t === T_ROOF) col.setHex(0x4a4f5c)
-          else if (t === T_FLOOR) col.setHex(lit ? 0xffe9c0 : 0x2b2e35)
+          else if (t === T_FLOOR) col.setHex(lit && b ? b.pastel : 0x1c1e24)
           else if (t === T_FENCE) col.setHex(0x2a2d33)
           else if (t === T_GRAVE) col.setHex(0x9aa3a8)
           else {
