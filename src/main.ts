@@ -5,6 +5,7 @@ import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './wea
 import { planShot } from './ai'
 import { createHud } from './hud'
 import { makeAvatar, standingY } from './avatar'
+import { Village } from './village'
 import * as sfx from './audio'
 
 const COLLAPSE_AT = 0.4 // fort integrity below this = destroyed
@@ -60,6 +61,7 @@ window.addEventListener('resize', () => {
 })
 
 const world = new World(scene)
+const village = new Village(scene)
 const hud = createHud(document.body, { onWeapon: i => selectWeapon(i), onWorldToggle: () => toggleWorldView() })
 
 // ---------------------------------------------------------------- cannons
@@ -218,6 +220,7 @@ function applyLighting(): void {
   hemi.intensity = 1.2 - b * 1.06
   sun.intensity = 1.7 - b * 1.64
   world.setNightBlend(b)
+  village.setNightBlend(b)
   flashlight.visible = b > 0.55
   lantern.visible = b > 0.55
 }
@@ -334,7 +337,7 @@ function updateArrows(dt: number): void {
     a.mesh.position.addScaledVector(a.vel, dt)
     const p = a.mesh.position
     if (a.vel.lengthSq() > 0.01) a.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), a.vel.clone().normalize())
-    if (world.isSolid(p.x, p.y, p.z)) {
+    if (world.isSolid(p.x, p.y, p.z) || village.isSolidAt(p.x, p.y, p.z)) {
       a.stuck = true
       a.life = 5
     } else if (p.y < -10 || p.x < -30 || p.x > GX + 30 || p.z < -30 || p.z > GZ + 30) {
@@ -346,6 +349,7 @@ function updateArrows(dt: number): void {
 }
 
 function solidBody(x: number, y: number, z: number): boolean {
+  if (village.isSolidAt(x, y, z)) return true
   const c = world.cellAt(Math.round(x), Math.round(y), Math.round(z))
   return c !== EMPTY && c !== WATER
 }
@@ -435,6 +439,13 @@ function updateWalker(dt: number): void {
   flashlight.position.set(walker.x, walker.y + 1.9, walker.z).addScaledVector(dir, 0.6)
   flashlight.target.position.copy(flashlight.position).addScaledVector(dir, 14)
   lantern.position.set(walker.x, walker.y + 2.4, walker.z)
+  // Stepping inside an unexplored building flips its lights on — for everyone.
+  const bld = village.buildingAt(walker.x, walker.z)
+  if (bld && !bld.revealed) {
+    const name = village.reveal(bld)
+    hud.banner(name.toUpperCase(), 'revealed — the lights stay on')
+    sfx.pop()
+  }
   // Loot: bob, spin, collect on contact.
   lootT += dt
   for (let i = loot.length - 1; i >= 0; i--) {
@@ -468,11 +479,10 @@ function enterNight(): void {
   flyHold = null
   worldView = false
   hud.setWorldView(false)
-  hud.banner('SUNSET', 'night falls — scavenge the city')
-  // The avatar climbs down and starts at the foot of its tower, city-side.
-  const t = world.forts[0].towers[0]
-  walker.x = t.cx + 7
-  walker.z = t.cz
+  hud.banner('SUNSET', 'night falls — scavenge the village')
+  // The avatar starts at its START position: the village edge nearest its tower.
+  walker.x = village.ox + 3
+  walker.z = village.oz + village.sz / 2
   walker.y = solidGroundY(walker.x, walker.z, GY - 1) + 0.5
   walker.vy = 0
   walker.yaw = 0
@@ -634,6 +644,7 @@ const tasks: Task[] = []
 
 function crater(at: THREE.Vector3, r: number, fire: boolean): void {
   world.carve(at.x, at.y, at.z, r)
+  village.carveSphere(at.x, at.y, at.z, r)
   // Small blasts (the starting Baby Missile) only chip — no wall-toppling
   // shockwave. Real tower damage takes scavenged or purchased ordnance.
   if (fire && r >= 3) world.shockwave(at.x, at.y, at.z, r, Math.random)
@@ -979,16 +990,27 @@ function updateCamera(dt: number): void {
   let k = 3.5
 
   if (phase === 'night') {
-    // Third-person follow: behind and above the walker, mouse-steered.
+    // Third-person follow: behind and above the walker, mouse-steered. The
+    // boom shortens when walls (village or terrain) would block the view.
     const dir = new THREE.Vector3(
       Math.cos(walker.yaw) * Math.cos(walker.pitch),
       Math.sin(walker.pitch),
       Math.sin(walker.yaw) * Math.cos(walker.pitch)
     )
     const head = new THREE.Vector3(walker.x, walker.y + 1.9, walker.z)
-    desiredPos.copy(head).addScaledVector(dir, -7).add(new THREE.Vector3(0, 1.7, 0))
+    let boom = 7
+    for (let t = 1.2; t <= 7; t += 0.35) {
+      const px = head.x - dir.x * t
+      const py = head.y - dir.y * t + 0.24 * t
+      const pz = head.z - dir.z * t
+      if (solidBody(px, py, pz)) {
+        boom = Math.max(1.1, t - 0.5)
+        break
+      }
+    }
+    desiredPos.copy(head).addScaledVector(dir, -boom).add(new THREE.Vector3(0, 0.24 * boom, 0))
     const floor = solidGroundY(desiredPos.x, desiredPos.z, desiredPos.y)
-    if (desiredPos.y < floor + 1.4) desiredPos.y = floor + 1.4
+    if (desiredPos.y < floor + 1.2) desiredPos.y = floor + 1.2
     desiredLook.copy(head).addScaledVector(dir, 8)
     k = 18
   } else if (phase === 'aim' || phase === 'charge') {
@@ -1408,6 +1430,8 @@ function lootArsenal(winner: number, loser: number): void {
 // the armory adds it to the already-visible terrain.
 function rebuildRoundWorld(): void {
   world.generate(roundSeed, forti)
+  // The village island sits dead center; layout + identities reshuffle per round.
+  village.generate(GX / 2 - 30, GZ / 2 - 23, world.waterY + 2, roundSeed)
   for (let s = 0; s < 2; s++) {
     const st = sides[s]
     const seat = world.cannonSeat(s)
@@ -1775,7 +1799,14 @@ renderer.setAnimationLoop(tick)
 // (e.g. headless preview tabs). Harmless in normal play.
 declare global {
   interface Window {
-    __sv?: { pump: (seconds: number) => void; state: () => object; world: World; newMatch: () => void; sunset: () => void }
+    __sv?: {
+      pump: (seconds: number) => void
+      state: () => object
+      world: World
+      village: Village
+      newMatch: () => void
+      sunset: () => void
+    }
   }
 }
 let fakeNow = 0
@@ -1807,6 +1838,7 @@ window.__sv = {
       : null,
   }),
   world,
+  village,
   newMatch: fullReset,
   sunset: () => {
     dayT = DAY_LEN // testing: force the next quiet moment to trigger nightfall

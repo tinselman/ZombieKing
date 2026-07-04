@@ -322,6 +322,16 @@ export class World {
             h = f.pad * (1 - t) + h * t
           }
         }
+        // The village island: a flat plateau dead center, ringed by open water
+        // (applied last so it always wins over mountains, rivers and pads).
+        const ir = Math.hypot((x - GX / 2) / 32, (z - GZ / 2) / 26)
+        if (ir < 1) {
+          const beach = smoothstep(Math.min(1, Math.max(0, (ir - 0.88) / 0.12)))
+          h = (waterY + 2) * (1 - beach) + (waterY + 0.6) * beach
+        } else if (ir < 1.3) {
+          const t = smoothstep((ir - 1) / 0.3)
+          h = (waterY - 3.5) * (1 - t) + h * t
+        }
         const hi = Math.max(2, Math.min(GY - 26, Math.round(h)))
         for (let y = 0; y <= hi; y++) this.grid[this.idx(x, y, z)] = TERRAIN
         // Basins and river cuts below the water table fill with water.
@@ -341,90 +351,9 @@ export class World {
       this.forts.push(fort)
     }
 
-    // Ruined city in the lowlands between the forts: hollow gray shells with
-    // doorways and window holes. Night-phase scavenging ground; daytime cover
-    // that artillery can level.
-    const cityX0 = Math.min(cxA, cxB) + 20
-    const cityX1 = Math.max(cxA, cxB) - 20
-    const ruins: { x: number; z: number; r: number }[] = []
-    const ruinTarget = 10 + Math.floor(rand() * 6)
-    for (let attempt = 0; attempt < 70 && ruins.length < ruinTarget; attempt++) {
-      const w = 2 + Math.floor(rand() * 3) // half-extents: footprint 5..9
-      const d = 2 + Math.floor(rand() * 3)
-      const hgt = 5 + Math.floor(rand() * 10)
-      const bx = Math.round(cityX0 + rand() * (cityX1 - cityX0))
-      const bz = Math.round(6 + rand() * (GZ - 12))
-      const r = Math.max(w, d) + 3
-      if (ruins.some(p => Math.hypot(p.x - bx, p.z - bz) < p.r + r)) continue
-      // Survey the footprint: skip water and steep slopes.
-      let gmin = GY
-      let gmax = -1
-      let bad = false
-      for (let x = bx - w; x <= bx + w && !bad; x++) {
-        for (let z = bz - d; z <= bz + d && !bad; z++) {
-          if (x < 1 || x >= GX - 1 || z < 1 || z >= GZ - 1) {
-            bad = true
-            break
-          }
-          const sy = this.surfaceY(x, z)
-          if (this.cellAt(x, sy, z) === WATER) {
-            bad = true
-            break
-          }
-          gmin = Math.min(gmin, sy)
-          gmax = Math.max(gmax, sy)
-        }
-      }
-      if (bad || gmax - gmin > 5) continue
-      this.buildRuin(bx, bz, w, d, hgt, gmax, rand)
-      ruins.push({ x: bx, z: bz, r })
-    }
-
+    // (The old flat-roofed gray ruins are gone — the Victorian village on the
+    // island, built by the Village module at quarter scale, is the city now.)
     this.rebuild()
-  }
-
-  // One hollow building shell: perimeter walls with a doorway and window
-  // holes, flat roof, walls rooted down to the terrain.
-  private buildRuin(bx: number, bz: number, hw: number, hd: number, hgt: number, groundTop: number, rand: () => number): void {
-    const floorY = groundTop + 1
-    const doorSide = Math.floor(rand() * 4) // 0:+x 1:-x 2:+z 3:-z
-    const put = (x: number, y: number, z: number) => {
-      if (this.inBounds(x, y, z) && this.grid[this.idx(x, y, z)] === EMPTY) this.grid[this.idx(x, y, z)] = CITY
-    }
-    for (let dx = -hw; dx <= hw; dx++) {
-      for (let dz = -hd; dz <= hd; dz++) {
-        const onWall = Math.abs(dx) === hw || Math.abs(dz) === hd
-        const x = bx + dx
-        const z = bz + dz
-        for (let dy = 0; dy < hgt; dy++) {
-          const y = floorY + dy
-          if (y >= GY) break
-          const isRoof = dy === hgt - 1
-          if (!onWall && !isRoof) continue
-          if (onWall && !isRoof) {
-            // Doorway: 2 wide, 3 tall, on the chosen side.
-            const inDoor =
-              dy <= 2 &&
-              ((doorSide === 0 && dx === hw && Math.abs(dz) <= 1) ||
-                (doorSide === 1 && dx === -hw && Math.abs(dz) <= 1) ||
-                (doorSide === 2 && dz === hd && Math.abs(dx) <= 1) ||
-                (doorSide === 3 && dz === -hd && Math.abs(dx) <= 1))
-            if (inDoor) continue
-            // Window holes on upper floors.
-            if (dy > 2 && dy % 3 === 1 && ((dx + dz) & 1) === 0) continue
-          }
-          put(x, y, z)
-        }
-        // Root walls to the terrain so buildings hug slopes.
-        if (onWall) {
-          let fy = floorY - 1
-          while (fy >= 0 && this.cellAt(x, fy, z) === EMPTY) {
-            put(x, fy, z)
-            fy--
-          }
-        }
-      }
-    }
   }
 
   // Build one tower; returns the voxel count above its rubble line.
