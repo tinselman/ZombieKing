@@ -134,8 +134,10 @@ function placeAvatars(): void {
   }
 }
 
-// The Zombie King: a hulking green figure with a golden crown.
-const kingAvatar = makeAvatar(0x3ed06a)
+// The Zombie King: a hulking dull-blue figure with a golden crown. He sleeps
+// in the cemetery until a flashlight beam lands on him.
+const KING_BLUE = 0x3a5170
+const kingAvatar = makeAvatar(KING_BLUE)
 kingAvatar.scale.setScalar(1.45)
 {
   const crownMat = new THREE.MeshLambertMaterial({ color: 0xe8c437 })
@@ -155,6 +157,28 @@ kingAvatar.scale.setScalar(1.45)
 }
 kingAvatar.visible = false
 scene.add(kingAvatar)
+
+// "Zzz" snore sprite that floats over the sleeping King.
+const snoreSprite = (() => {
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 64
+  const g = c.getContext('2d')!
+  g.fillStyle = '#cdd6e0'
+  g.font = 'bold 30px Helvetica, Arial, sans-serif'
+  g.textBaseline = 'middle'
+  g.fillText('z', 8, 46)
+  g.font = 'bold 40px Helvetica, Arial, sans-serif'
+  g.fillText('z', 40, 36)
+  g.font = 'bold 52px Helvetica, Arial, sans-serif'
+  g.fillText('Z', 80, 26)
+  const tex = new THREE.CanvasTexture(c)
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }))
+  sp.scale.set(1.6, 0.8, 1)
+  sp.visible = false
+  scene.add(sp)
+  return sp
+})()
 
 // Repaint an avatar's body (used for zombification; eyes stay black).
 function tintAvatar(av: THREE.Group, hex: number): void {
@@ -252,13 +276,15 @@ function applyLighting(): void {
   else _sky.copy(SKY_DUSK).lerp(SKY_NIGHT, (b - 0.5) * 2)
   ;(scene.background as THREE.Color).copy(_sky)
   ;(scene.fog as THREE.Fog).color.copy(_sky)
-  hemi.intensity = 1.2 - b * 1.17
+  // Night is nearly absolute dark — barely any ambient, so the flashlight is
+  // genuinely your only world.
+  hemi.intensity = 1.2 - b * 1.185
   sun.intensity = 1.7 * (1 - b)
   world.setNightBlend(b)
   village.setNightBlend(b)
   flashlight.visible = b > 0.55 && !walker.zombie
   lantern.visible = b > 0.55
-  kingGlow.intensity = KING_ENABLED && b > 0.55 ? 90 : 0
+  kingGlow.intensity = 0 // the King does not glow; he sleeps in the dark
 }
 
 // Night is TURN-BASED: you → the enemy avatar → the Zombie King, round and
@@ -282,22 +308,29 @@ const KING_SPEED = WALK_SPEED / 4
 const BURST_SPEED = WALK_SPEED * 2
 const ZOMBIE_PLAYER_SPEED = WALK_SPEED / 2
 
-type KingMood = 'idle' | 'rushing' | 'resting'
-let kingMood: KingMood = 'idle'
-let kingMoodT = 0
-let kingSeesYou = false
-let kingSeenT = 0
-let kingLastSeen: { x: number; z: number } | null = null
-let kingWander: { x: number; z: number } | null = null
-let foeTarget: { x: number; z: number } | null = null
-let foeStepDir: { x: number; z: number } | null = null
-let foeRepathT = 0
-// The King sits this version out (his code sleeps behind this flag).
-const KING_ENABLED = false
+// The King sleeps in the cemetery until a flashlight beam lands on him; then he
+// wakes and charges the light. He can't enter houses. Catch a player outdoors
+// and their night haul is dumped in the cemetery and that player is jailed
+// there — freed only when someone else grabs the deposited loot.
+type KingMood = 'asleep' | 'chasing' | 'returning'
+let kingMood: KingMood = 'asleep'
+let kingHuntT = 0 // grace seconds still hunting after losing the light
+let kingChaseGoal: { x: number; z: number } | null = null
+let kingSeesYou = false // he's awake and coming for YOU (drives the banner)
+let snoreT = 0
+// Cemetery jail: which player (if any) is imprisoned there.
+let jailed: 'you' | 'foe' | null = null
+// Deposited loot that lives in the cemetery and PERSISTS across nights until
+// someone dares to take it.
+type Stash = { kind: 'cash' | 'weapon'; value: number; weaponId?: string }
+let cemeteryStash: Stash[] = []
 // Flashlight is the night's whole game: space toggles it. Off = hidden but
 // blind; on = you can see — and be seen. Catch the other player in your beam
 // and they freeze for 4 seconds and drop half their haul.
 let flashlightOn = true
+let foeTarget: { x: number; z: number } | null = null
+let foeStepDir: { x: number; z: number } | null = null
+let foeRepathT = 0
 const stunImmune = new Map<NightActor, number>()
 let foeCashGain = 0
 const foeItemsGain: { id: string; qty: number }[] = []
@@ -305,7 +338,9 @@ const look = { yaw: 0, pitch: 0 } // eased arrow-key view velocity
 let nightCashGain = 0
 const nightItemsGain: { id: string; qty: number }[] = []
 
-const flashlight = new THREE.SpotLight(0xfff1cf, 950, 60, 0.42, 0.5, 1.55)
+// Crisp-edged beam: low penumbra so there's no soft ambient halo bleeding
+// past the cone — just a hard circle of light in the dark.
+const flashlight = new THREE.SpotLight(0xfff1cf, 1050, 60, 0.4, 0.12, 1.7)
 flashlight.visible = false
 flashlight.castShadow = true // walls really block the beam — interiors stay black
 flashlight.shadow.mapSize.set(1024, 1024)
@@ -314,8 +349,9 @@ flashlight.shadow.camera.far = 55
 flashlight.shadow.bias = -0.002
 scene.add(flashlight)
 scene.add(flashlight.target)
-// Soft lantern glow around the active actor so the figure reads in the dark.
-const lantern = new THREE.PointLight(0xffe4b0, 26, 14, 1.6)
+// A tight, dim glow hugging the avatar so its body reads — small enough that it
+// doesn't pool ambient light on the ground around you.
+const lantern = new THREE.PointLight(0xffe4b0, 6, 4.5, 2.2)
 lantern.visible = false
 scene.add(lantern)
 // The King's green aura.
@@ -340,6 +376,7 @@ type Loot = {
   baseY: number
   bob: number
   bId: number | null // inside this building — invisible until it's revealed
+  cemetery?: boolean // deposited by the King; grabbing it frees the prisoner
 }
 const loot: Loot[] = []
 
@@ -425,18 +462,27 @@ function clearArrows(): void {
 // Money bags (gold) and weapon crates (pale blue), scattered through the
 // village streets and interiors. Lambert materials: they emit NO light —
 // you find them with the flashlight.
-function dropLoot(x: number, z: number, kind: 'cash' | 'weapon', value: number, weaponId?: string): void {
+function dropLoot(x: number, z: number, kind: 'cash' | 'weapon', value: number, weaponId?: string, cemetery = false): void {
   const gy = solidGroundY(x, z, GY - 1)
   const mesh =
     kind === 'cash'
       ? new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ color: 0xffd34d }))
       : new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.75, 0.75), new THREE.MeshLambertMaterial({ color: 0xaef0ff }))
-  const b = village.buildingAt(x, z)
-  const l: Loot = { mesh, kind, value, weaponId, baseY: gy + 1.1, bob: Math.random() * 6, bId: b ? b.id : null }
-  mesh.visible = !b || b.revealed // items in dark rooms can't be seen at all
+  const b = cemetery ? null : village.buildingAt(x, z)
+  const l: Loot = { mesh, kind, value, weaponId, baseY: gy + 1.1, bob: Math.random() * 6, bId: b ? b.id : null, cemetery }
+  mesh.visible = cemetery || !b || b.revealed // items in dark rooms can't be seen at all
   mesh.position.set(x, l.baseY, z)
   scene.add(mesh)
   loot.push(l)
+}
+
+// A deposited offering, scattered around the cemetery's grave plots.
+function dropCemeteryLoot(s: Stash): void {
+  const cx = (village.cemetery.x0 + village.cemetery.x1) / 2
+  const cz = (village.cemetery.z0 + village.cemetery.z1) / 2
+  const x = Math.round(cx + (Math.random() - 0.5) * 6)
+  const z = Math.round(cz + (Math.random() - 0.5) * 4)
+  dropLoot(x, z, s.kind, s.value, s.weaponId, true)
 }
 
 function spawnLoot(): void {
@@ -457,6 +503,8 @@ function spawnLoot(): void {
       dropLoot(x, z, 'weapon', def.pack ?? 1, id)
     }
   }
+  // The cemetery's persistent hoard reappears wherever it was left.
+  for (const s of cemeteryStash) dropCemeteryLoot(s)
 }
 
 // The enemy scavenges by its own flashlight — a visible beam you can track
@@ -652,6 +700,83 @@ function canSee(a: NightActor, b: NightActor): boolean {
   return los(a.x, a.y + 1.8, a.z, b.x, b.y + 1.8, b.z)
 }
 
+// Does a beam from (src, dir) land on the sleeping/standing King? Generous
+// cone (he's a big target) with a wall-blocking line of sight.
+function beamOnKing(sx: number, sy: number, sz: number, dx: number, dy: number, dz: number): boolean {
+  const kx = king.x
+  const ky = king.y + 0.7
+  const kz = king.z
+  const vx = kx - sx
+  const vy = ky - sy
+  const vz = kz - sz
+  const dist = Math.hypot(vx, vy, vz)
+  if (dist > 24 || dist < 0.5) return false
+  if ((vx * dx + vy * dy + vz * dz) / dist < 0.9) return false // ~25° cone
+  return los(sx, sy, sz, kx, ky, kz, 26)
+}
+
+// The King moves toward a point but NEVER steps inside a house (its interior
+// footprint) and cannot climb — so stairs and second floors are safe from him.
+function kingStepToward(tx: number, tz: number, speed: number, dt: number): void {
+  const s = speed * dt
+  const dxT = tx - king.x
+  const dzT = tz - king.z
+  const stepX = Math.sign(dxT) * Math.min(s, Math.abs(dxT))
+  const stepZ = Math.sign(dzT) * Math.min(s, Math.abs(dzT))
+  const nx = king.x + stepX
+  if (!village.buildingAt(nx, king.z)) walkAxis(king, nx, king.z, 1.05, village.baseY + 1.6)
+  const nz = king.z + stepZ
+  if (!village.buildingAt(king.x, nz)) walkAxis(king, king.x, nz, 1.05, village.baseY + 1.6)
+  if (dxT || dzT) {
+    king.face = Math.atan2(dzT, dxT)
+    king.yaw = king.face
+  }
+}
+
+// Deposit a player's whole night haul into the cemetery hoard (persists across
+// nights) and jail them there until someone else grabs the offering.
+function kingAttack(who: 'you' | 'foe'): void {
+  const idx = who === 'you' ? 0 : 1
+  const cashGain = who === 'you' ? nightCashGain : foeCashGain
+  const items = who === 'you' ? nightItemsGain : foeItemsGain
+  if (cashGain > 0) {
+    money[idx] -= cashGain
+    const s: Stash = { kind: 'cash', value: cashGain }
+    cemeteryStash.push(s)
+    dropCemeteryLoot(s)
+  }
+  for (const it of items) {
+    if (it.qty <= 0) continue
+    const have = sides[idx].arsenal.get(it.id) ?? 0
+    sides[idx].arsenal.set(it.id, Math.max(0, have - it.qty))
+    const s: Stash = { kind: 'weapon', value: it.qty, weaponId: it.id }
+    cemeteryStash.push(s)
+    dropCemeteryLoot(s)
+  }
+  if (who === 'you') {
+    nightCashGain = 0
+    nightItemsGain.length = 0
+    updateWeaponHud()
+    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    hud.banner('DRAGGED TO THE CEMETERY', 'your haul is the King’s offering — someone must grab it to free you')
+  } else {
+    foeCashGain = 0
+    foeItemsGain.length = 0
+    hud.msg('the King seized the enemy — its haul lies in the cemetery')
+  }
+  // Cast the prisoner into the cemetery; the King lumbers back to sleep.
+  const a = actorOf(who)
+  const cx = (village.cemetery.x0 + village.cemetery.x1) / 2
+  const cz = (village.cemetery.z0 + village.cemetery.z1) / 2
+  a.x = cx + (who === 'you' ? -2 : 2)
+  a.z = cz
+  a.y = solidGroundY(a.x, a.z, GY - 1) + 0.5
+  jailed = who
+  kingMood = 'returning'
+  kingSeesYou = false
+  sfx.rumble()
+}
+
 // Can an actor hop from (fromX,fromZ) onto cell (tx,tz)? Checks the target
 // cell AND the midpoint of the hop, so wall planes sitting on cell boundaries
 // really do block — houses can only be entered through their doorways.
@@ -761,45 +886,6 @@ function pickFoeTarget(): { x: number; z: number } {
 }
 
 
-// Zombification -----------------------------------------------------------
-
-function zombify(t: 'you' | 'foe'): void {
-  const a = actorOf(t)
-  if (a.zombie) return
-  a.zombie = true
-  sfx.rumble()
-  if (t === 'you') {
-    // All of tonight's loot is forfeit.
-    money[0] = Math.max(0, money[0] - nightCashGain)
-    for (const it of nightItemsGain) {
-      const have = sides[0].arsenal.get(it.id) ?? 0
-      sides[0].arsenal.set(it.id, Math.max(0, have - it.qty))
-    }
-    nightCashGain = 0
-    nightItemsGain.length = 0
-    updateWeaponHud()
-    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
-    tintAvatar(avatars[0], 0x3ed06a)
-    hud.banner('YOU HAVE BEEN TURNED', 'hunt the enemy alongside the King')
-  } else {
-    tintAvatar(avatars[1], 0x3ed06a)
-    hud.banner('THE ENEMY HAS BEEN TURNED', 'it hunts you now')
-  }
-  applyLighting()
-}
-
-function checkCatches(): void {
-  const catchDist = 1.1
-  if (!walker.zombie) {
-    if (Math.hypot(king.x - walker.x, king.z - walker.z) < catchDist && Math.abs(king.y - walker.y) < 1.5) zombify('you')
-    if (foe.zombie && Math.hypot(foe.x - walker.x, foe.z - walker.z) < catchDist && Math.abs(foe.y - walker.y) < 1.5) zombify('you')
-  }
-  if (!foe.zombie) {
-    if (Math.hypot(king.x - foe.x, king.z - foe.z) < catchDist && Math.abs(king.y - foe.y) < 1.5) zombify('foe')
-    if (walker.zombie && Math.hypot(walker.x - foe.x, walker.z - foe.z) < catchDist && Math.abs(walker.y - foe.y) < 1.5) zombify('foe')
-  }
-}
-
 // Continuous sensing: reveal buildings you enter, pick up loot you touch,
 // travel tunnels you step on.
 function senseActor(t: NightTag): void {
@@ -845,6 +931,15 @@ function senseActor(t: NightTag): void {
         hud.msg('the enemy grabbed something')
       } else {
         continue // zombies don't loot
+      }
+      // Grabbing a cemetery offering frees the prisoner and unbanks that item.
+      if (l.cemetery) {
+        const si = cemeteryStash.findIndex(s => s.kind === l.kind && s.value === l.value && s.weaponId === l.weaponId)
+        if (si >= 0) cemeteryStash.splice(si, 1)
+        if (jailed && jailed !== t) {
+          hud.banner('FREED', 'the prisoner is released from the cemetery')
+          jailed = null
+        }
       }
       sfx.pop()
       scene.remove(l.mesh)
@@ -897,8 +992,8 @@ function updateNight(dt: number): void {
   walker.yaw += look.yaw * dt
   walker.pitch = THREE.MathUtils.clamp(walker.pitch + look.pitch * dt, -1.1, 0.75)
 
-  // ---- you: smooth WASD walking, camera-relative
-  if ((frozen.get(walker) ?? 0) <= 0 && cycleMode !== 'dawn') {
+  // ---- you: smooth WASD walking, camera-relative (locked while jailed)
+  if ((frozen.get(walker) ?? 0) <= 0 && cycleMode !== 'dawn' && jailed !== 'you') {
     const fx = Math.cos(walker.yaw)
     const fz = Math.sin(walker.yaw)
     let mx = 0
@@ -928,8 +1023,8 @@ function updateNight(dt: number): void {
   }
   actorGravity(walker, dt, fallVel.you)
 
-  // ---- the enemy: same speed, loot-seeking (or hunting you, if turned)
-  if ((frozen.get(foe) ?? 0) <= 0) {
+  // ---- the enemy: same speed, loot-seeking (locked while jailed)
+  if ((frozen.get(foe) ?? 0) <= 0 && jailed !== 'foe') {
     foeRepathT -= dt
     if (foeRepathT <= 0) {
       foeRepathT = 0.5
@@ -951,69 +1046,80 @@ function updateNight(dt: number): void {
   }
   actorGravity(foe, dt, fallVel.foe)
 
-  // ---- the King: shambles at quarter speed — unless he SEES you. Then he
-  // BURSTS: double human speed for 1.5s, rests 2s, bursts again. He cannot
-  // climb stairs (nothing above ground level +1.5 for him).
-  // (Benched for now behind KING_ENABLED — his night will come again.)
-  const kingPrey = KING_ENABLED
-    ? (!walker.zombie && canSee(king, walker) && 'you') || (!foe.zombie && canSee(king, foe) && 'foe') || null
-    : null
-  // Debounced: sight lines flicker as he charges past corners.
-  if (kingPrey === 'you') kingSeenT = 0.7
-  else kingSeenT = Math.max(0, kingSeenT - dt)
-  kingSeesYou = kingSeenT > 0
-  if (kingPrey) kingLastSeen = { x: actorOf(kingPrey).x, z: actorOf(kingPrey).z }
-  kingMoodT -= dt
-  if (kingPrey && kingMood === 'idle') {
-    kingMood = 'rushing'
-    kingMoodT = 1.5
-    sfx.rumble()
-  } else if (kingMood === 'rushing' && kingMoodT <= 0) {
-    kingMood = 'resting'
-    kingMoodT = 2
-  } else if (kingMood === 'resting' && kingMoodT <= 0) {
-    kingMood = kingPrey ? 'rushing' : 'idle'
-    kingMoodT = kingPrey ? 1.5 : 0
-  } else if (!kingPrey && kingMood === 'rushing' && kingMoodT <= 0) {
-    kingMood = 'idle'
-  }
-  let kingSpeed = KING_SPEED
-  if (kingMood === 'rushing') kingSpeed = kingPrey ? BURST_SPEED : KING_SPEED * 2
-  else if (kingMood === 'resting') kingSpeed = 0
-  let kingGoal: { x: number; z: number } | null = kingLastSeen
-  if (!kingGoal) {
-    if (!kingWander || Math.hypot(kingWander.x - king.x, kingWander.z - king.z) < 2) {
-      kingWander = {
-        x: village.ox + 4 + Math.random() * (village.sx - 8),
-        z: village.oz + 4 + Math.random() * (village.sz - 8),
-      }
-    }
-    kingGoal = kingWander
-  } else if (Math.hypot(kingGoal.x - king.x, kingGoal.z - king.z) < 1.2 && !kingPrey) {
-    kingLastSeen = null // reached where he last saw them; the trail is cold
-  }
-  if (KING_ENABLED && kingSpeed > 0 && kingGoal) {
-    const step = kingPrey
-      ? { dx: Math.sign(kingGoal.x - king.x), dz: Math.sign(kingGoal.z - king.z) } // direct rush
-      : bfsStep(king, kingGoal)
-    if (step) {
-      const s = kingSpeed * dt
-      const dl = Math.hypot(step.dx, step.dz) || 1
-      moveActor(king, (step.dx / dl) * s, (step.dz / dl) * s, 1.05, village.baseY + 1.6)
-      king.yaw = king.face
-    }
-  }
-  if (KING_ENABLED) actorGravity(king, dt, fallVel.king)
-  checkCatches()
-  hud.setBurst(KING_ENABLED && kingSeesYou && kingMood !== 'idle' && cycleMode === 'night')
-
-  // ---- flashlight duels: catch the other player in your cone and they
-  // freeze for 4 seconds, spilling half their haul at their feet.
+  // Beam directions (used by both the King's wake check and the duels).
   const beamDir = new THREE.Vector3(
     Math.cos(walker.yaw) * Math.cos(walker.pitch),
     Math.sin(walker.pitch),
     Math.sin(walker.yaw) * Math.cos(walker.pitch)
   )
+  const youBeamOn = flashlightOn && cycleMode === 'night' && !walker.zombie && nightBlend > 0.55
+  const foeBeamOn = cycleMode === 'night' && !foe.zombie && nightBlend > 0.55 && (frozen.get(foe) ?? 0) <= 0
+  const foeBeamDir = { x: Math.cos(foe.face), y: -0.05, z: Math.sin(foe.face) }
+
+  // ---- the Zombie King: asleep in the cemetery, dull and snoring, until a
+  // flashlight beam lands on him. Then he wakes and charges the light. He can
+  // never enter a house. Catch a player in the open and their night haul is
+  // dumped in the cemetery and that player is jailed there.
+  if (cycleMode === 'night') {
+    // A jailed player's beam can't provoke the King (they're already his).
+    let litBy: 'you' | 'foe' | null = null
+    if (youBeamOn && jailed !== 'you' && beamOnKing(walker.x, walker.y + 1.9, walker.z, beamDir.x, beamDir.y, beamDir.z)) litBy = 'you'
+    else if (foeBeamOn && jailed !== 'foe' && beamOnKing(foe.x, foe.y + 1.9, foe.z, foeBeamDir.x, foeBeamDir.y, foeBeamDir.z)) litBy = 'foe'
+
+    if (kingMood === 'asleep') {
+      snoreT += dt
+      if (litBy) {
+        kingMood = 'chasing'
+        kingHuntT = 6
+        kingSeesYou = litBy === 'you'
+        kingChaseGoal = { x: actorOf(litBy).x, z: actorOf(litBy).z }
+        sfx.rumble()
+        hud.msg('the Zombie King wakes!')
+      }
+    } else if (kingMood === 'chasing') {
+      if (litBy && jailed !== litBy) {
+        kingHuntT = 6
+        kingChaseGoal = { x: actorOf(litBy).x, z: actorOf(litBy).z }
+        kingSeesYou = litBy === 'you'
+      } else {
+        kingHuntT -= dt
+        if (kingHuntT <= 0) {
+          kingMood = 'returning'
+          kingSeesYou = false
+        }
+      }
+      if (kingChaseGoal) kingStepToward(kingChaseGoal.x, kingChaseGoal.z, BURST_SPEED, dt)
+      // Attack: seize an outdoor, un-jailed player he's reached.
+      for (const who of ['you', 'foe'] as const) {
+        const a = actorOf(who)
+        if (jailed === who) continue
+        if (village.buildingAt(a.x, a.z)) continue // safe indoors
+        if (Math.hypot(a.x - king.x, a.z - king.z) < 1.6) kingAttack(who)
+      }
+    } else {
+      // returning to his grave
+      kingSeesYou = false
+      const cx = (village.cemetery.x0 + village.cemetery.x1) / 2
+      const cz = (village.cemetery.z0 + village.cemetery.z1) / 2
+      kingStepToward(cx, cz, KING_SPEED * 2, dt)
+      if (Math.hypot(king.x - cx, king.z - cz) < 1.4) {
+        kingMood = 'asleep'
+        snoreT = 0
+      }
+      // Re-woken en route.
+      if (litBy && jailed !== litBy) {
+        kingMood = 'chasing'
+        kingHuntT = 6
+        kingSeesYou = litBy === 'you'
+        kingChaseGoal = { x: actorOf(litBy).x, z: actorOf(litBy).z }
+      }
+    }
+  }
+  actorGravity(king, dt, fallVel.king)
+  hud.setBurst(kingSeesYou && cycleMode === 'night')
+
+  // ---- flashlight duels: catch the other player in your cone and they
+  // freeze for 4 seconds, spilling half their haul at their feet.
   if (
     flashlightOn && cycleMode === 'night' && !walker.zombie &&
     (frozen.get(foe) ?? 0) <= 0 && (stunImmune.get(foe) ?? 0) <= 0 &&
@@ -1029,13 +1135,25 @@ function updateNight(dt: number): void {
     beamStun('you')
   }
 
-  // Drive bodies and lights.
+  // Drive bodies and lights. Your avatar faces the way you're aiming to go
+  // (the view heading), so turning with the arrows spins it to face the
+  // direction it will walk.
   avatars[0].position.set(walker.x, walker.y + 1.5, walker.z)
-  avatars[0].rotation.y = -walker.face
+  avatars[0].rotation.y = -walker.yaw
   avatars[1].position.set(foe.x, foe.y + 1.5, foe.z)
   avatars[1].rotation.y = -foe.face
-  kingAvatar.position.set(king.x, king.y + 1.9, king.z)
-  kingAvatar.rotation.y = -king.face
+  // The King lies down when asleep (tipped onto his back, low to the ground),
+  // and rises to his feet the moment he wakes.
+  const asleep = kingMood === 'asleep'
+  kingAvatar.rotation.set(asleep ? -Math.PI / 2 : 0, -king.face, 0)
+  kingAvatar.position.set(king.x, king.y + (asleep ? 0.7 : 1.9), king.z)
+  // Snoring "Zzz" bob above the sleeping King.
+  snoreSprite.visible = asleep && cycleMode === 'night'
+  if (snoreSprite.visible) {
+    snoreSprite.position.set(king.x + 0.6, king.y + 1.6 + Math.sin(snoreT * 2.2) * 0.15, king.z)
+    const s = 0.9 + 0.12 * Math.sin(snoreT * 4.4)
+    snoreSprite.scale.set(1.6 * s, 0.8 * s, 1)
+  }
   kingGlow.position.set(king.x, king.y + 2.6, king.z)
   zombGlowYou.position.set(walker.x, walker.y + 2.4, walker.z)
   zombGlowFoe.position.set(foe.x, foe.y + 2.4, foe.z)
@@ -1096,27 +1214,28 @@ function enterNight(): void {
   }
   tuck(walker, westB.x0 - 1.6, (westB.z0 + westB.z1) / 2, 0)
   tuck(foe, eastB.x1 + 1.6, (eastB.z0 + eastB.z1) / 2, Math.PI)
-  if (KING_ENABLED) placeNightActor(king, village.ox + village.sx / 2, village.oz + village.sz / 2, 0)
-  else placeNightActor(king, -500, -500, 0) // parked far offstage
+  // The King is asleep dead center in his cemetery.
+  placeNightActor(king, (village.cemetery.x0 + village.cemetery.x1) / 2, (village.cemetery.z0 + village.cemetery.z1) / 2, 0)
   nightCashGain = 0
   nightItemsGain.length = 0
   foeCashGain = 0
   foeItemsGain.length = 0
   flashlightOn = true
-  kingAvatar.visible = KING_ENABLED
+  kingAvatar.visible = true
   look.yaw = 0
   look.pitch = 0
-  kingMood = 'idle'
-  kingMoodT = 0
+  kingMood = 'asleep'
+  kingHuntT = 0
+  kingChaseGoal = null
   kingSeesYou = false
-  kingLastSeen = null
-  kingWander = null
+  snoreT = 0
+  jailed = null
   foeTarget = null
   foeStepDir = null
   frozen.clear()
   tunnelCooldown.clear()
   stunImmune.clear()
-  spawnLoot()
+  spawnLoot() // scatters fresh loot AND re-drops the cemetery's persistent hoard
   spawnTunnels()
   hud.setNightHint(true)
   hud.setCross(true)
@@ -1137,7 +1256,11 @@ function exitNight(): void {
   hud.setNightTurn(null)
   hud.setBurst(false)
   kingAvatar.visible = false
-  // Cure the zombies at dawn and repaint them.
+  snoreSprite.visible = false
+  // Dawn releases the prisoner back to their tower — but the cemetery hoard
+  // they lost stays put (it persists until someone grabs it another night).
+  jailed = null
+  kingMood = 'asleep'
   walker.zombie = false
   foe.zombie = false
   tintAvatar(avatars[0], 0xc0392b)
@@ -1626,8 +1749,6 @@ function updateCamera(dt: number): void {
   let k = 3.5
 
   if (phase === 'night') {
-    // Third-person follow of your avatar. The boom shortens when walls
-    // (village or terrain) would block the view.
     const act = walker
     const dir = new THREE.Vector3(
       Math.cos(act.yaw) * Math.cos(act.pitch),
@@ -1635,21 +1756,43 @@ function updateCamera(dt: number): void {
       Math.sin(act.yaw) * Math.cos(act.pitch)
     )
     const head = new THREE.Vector3(act.x, act.y + 1.9, act.z)
-    let boom = 7
-    for (let t = 1.2; t <= 7; t += 0.35) {
-      const px = head.x - dir.x * t
-      const py = head.y - dir.y * t + 0.24 * t
-      const pz = head.z - dir.z * t
-      if (solidBody(px, py, pz)) {
-        boom = Math.max(1.1, t - 0.5)
-        break
+    const indoors = !!village.buildingAt(act.x, act.z)
+    if (indoors) {
+      // Indoors the rooms are tight: keep the camera at head height just behind
+      // the avatar (horizontal boom only, so it never dives into the floor or
+      // pokes the roof), shortened if a wall is closer — you still see the
+      // avatar and the stairs it climbs.
+      const backH = new THREE.Vector3(Math.cos(act.yaw), 0, Math.sin(act.yaw))
+      let ib = 3.2
+      for (let t = 1.0; t <= 3.2; t += 0.3) {
+        if (solidBody(head.x - backH.x * t, head.y + 0.3, head.z - backH.z * t)) {
+          ib = Math.max(1.4, t - 0.35)
+          break
+        }
       }
+      desiredPos.set(head.x - backH.x * ib, head.y + 0.9, head.z - backH.z * ib)
+      // Never let the camera rise into the ceiling.
+      if (solidBody(desiredPos.x, desiredPos.y + 0.6, desiredPos.z)) desiredPos.y = head.y
+      desiredLook.set(head.x + backH.x * 2, act.y + 1.1, head.z + backH.z * 2)
+      k = 16
+    } else {
+      // Outdoors: normal chase boom, shortened when a wall would block it.
+      let boom = 7
+      for (let t = 1.2; t <= 7; t += 0.35) {
+        const px = head.x - dir.x * t
+        const py = head.y - dir.y * t + 0.24 * t
+        const pz = head.z - dir.z * t
+        if (solidBody(px, py, pz)) {
+          boom = Math.max(1.1, t - 0.5)
+          break
+        }
+      }
+      desiredPos.copy(head).addScaledVector(dir, -boom).add(new THREE.Vector3(0, 0.24 * boom, 0))
+      const floor = solidGroundY(desiredPos.x, desiredPos.z, desiredPos.y)
+      if (desiredPos.y < floor + 1.2) desiredPos.y = floor + 1.2
+      desiredLook.copy(head).addScaledVector(dir, 8)
+      k = 18
     }
-    desiredPos.copy(head).addScaledVector(dir, -boom).add(new THREE.Vector3(0, 0.24 * boom, 0))
-    const floor = solidGroundY(desiredPos.x, desiredPos.z, desiredPos.y)
-    if (desiredPos.y < floor + 1.2) desiredPos.y = floor + 1.2
-    desiredLook.copy(head).addScaledVector(dir, 8)
-    k = 18
   } else if (phase === 'aim' || phase === 'charge') {
     if (worldView) {
       desiredPos.set(GX / 2 - 115, 85, GZ / 2 + 70)
@@ -2236,6 +2379,8 @@ function fullReset(): void {
   money[0] = START_CASH
   money[1] = START_CASH
   lastRoundResult = ''
+  cemeteryStash = []
+  jailed = null
   for (let s = 0; s < 2; s++) {
     sides[s].arsenal = newArsenal()
     sides[s].wsel = 0
@@ -2439,8 +2584,13 @@ declare global {
       village: Village
       newMatch: () => void
       sunset: () => void
-      burstTest: () => void
+      wakeKing: () => void
+      attackKing: (who: 'you' | 'foe') => void
       stunTest: (who: 'you' | 'foe') => void
+      tp: (x: number, z: number, yaw?: number) => void
+      giveHaul: () => void
+      foeTp: (x: number, z: number) => void
+      kingMoodOf: () => string
     }
   }
 }
@@ -2473,7 +2623,9 @@ window.__sv = {
       t: nightRound,
       kingMood,
       kingSeesYou,
-      losKingYou: phase === 'night' ? canSee(king, walker) : null,
+      jailed,
+      stash: cemeteryStash.length,
+      cemLoot: loot.filter(l => l.cemetery).length,
       blend: nightBlend,
       loot: loot.length,
       walker: { ...walker },
@@ -2487,12 +2639,34 @@ window.__sv = {
   world,
   village,
   newMatch: fullReset,
-  burstTest: () => {
-    kingSeenT = 60
-    kingMood = 'rushing'
-    kingMoodT = 60
+  wakeKing: () => {
+    kingMood = 'chasing'
+    kingHuntT = 6
+    kingSeesYou = true
+    kingChaseGoal = { x: walker.x, z: walker.z }
   },
+  attackKing: (who: 'you' | 'foe') => kingAttack(who),
   stunTest: (who: 'you' | 'foe') => beamStun(who),
+  tp: (x: number, z: number, yaw?: number) => {
+    walker.x = x
+    walker.z = z
+    walker.y = solidGroundY(x, z, GY - 1) + 0.5
+    if (yaw !== undefined) walker.yaw = yaw
+  },
+  giveHaul: () => {
+    money[0] += 400
+    nightCashGain += 400
+    sides[0].arsenal.set('nuke', (sides[0].arsenal.get('nuke') ?? 0) + 2)
+    nightItemsGain.push({ id: 'nuke', qty: 2 })
+    updateWeaponHud()
+  },
+  foeTp: (x: number, z: number) => {
+    foe.x = x
+    foe.z = z
+    foe.y = solidGroundY(x, z, GY - 1) + 0.5
+    senseActor('foe')
+  },
+  kingMoodOf: () => kingMood,
   sunset: () => {
     dayT = DAY_LEN // testing: force the next quiet moment to trigger nightfall
   },

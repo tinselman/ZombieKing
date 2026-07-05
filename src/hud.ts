@@ -98,7 +98,7 @@ export function createHud(
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
     <div class="panel" id="sc-time"><div class="tlabel"><span id="sc-timeMode">day</span><span>time</span></div><div id="sc-timeTrack"><div id="sc-timeFill"></div></div></div>
     <div id="sc-cross"></div>
-    <div id="sc-nightHint">WASD = move &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; SPACE = flashlight on / off &nbsp;·&nbsp; catch the enemy in your beam to stun them</div>
+    <div id="sc-nightHint">WASD = move &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; SPACE = flashlight on / off &nbsp;·&nbsp; don't shine it on the sleeping King &nbsp;·&nbsp; hide indoors</div>
     <div id="sc-burst">ZOMBIE BURST!</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">

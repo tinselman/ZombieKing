@@ -88,7 +88,7 @@ export class Village {
     this.mesh.count = 0
     scene.add(this.mesh)
     // The cemetery's sickly green glow (bright at night).
-    this.glowLight = new THREE.PointLight(0x51e87c, 0, 26, 1.4)
+    this.glowLight = new THREE.PointLight(0x51e87c, 0, 13, 1.8)
     scene.add(this.glowLight)
   }
 
@@ -478,16 +478,16 @@ export class Village {
     const hd = 4 * F
     const cx = ccx * F
     const cz = ccz * F
-    // Iron fence: posts every 4 fine cells with a top rail, gate on +x.
+    // Low iron kerb: a knee-high border (3 fine ≈ 0.75u) so the King and the
+    // players can step over it in any direction — the cemetery is open ground,
+    // not a cage. Slightly taller corner posts for the look.
     for (let fx = -hw; fx <= hw; fx++) {
       for (let fz = -hd; fz <= hd; fz++) {
         const onEdge = Math.abs(fx) === hw || Math.abs(fz) === hd
         if (!onEdge) continue
-        const gate = fx === hw && Math.abs(fz) <= 3
-        if (gate) continue
-        const post = (fx + hw) % 4 === 0 && (fz + hd) % 4 === 0
-        if (post) for (let fy = 0; fy < 5; fy++) this.put(cx + fx, fy, cz + fz, T_FENCE, 0)
-        this.put(cx + fx, 4, cz + fz, T_FENCE, 0) // rail
+        const corner = Math.abs(fx) === hw && Math.abs(fz) === hd
+        const top = corner ? 3 : 2
+        for (let fy = 0; fy < top; fy++) this.put(cx + fx, fy, cz + fz, T_FENCE, 0)
       }
     }
     // Headstones.
@@ -567,11 +567,13 @@ export class Village {
     g.shadowBlur = 14
     g.fillStyle = 'rgba(255,255,255,0.96)'
     g.fillText(b.name.toUpperCase(), 256, 64)
+    // A modest label hovering low inside the room — depth-tested so walls hide
+    // it from outside and it never fills the screen up close.
     const sprite = new THREE.Sprite(
-      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false })
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false })
     )
-    sprite.scale.set(6.4, 1.6, 1)
-    sprite.position.set(b.cx, this.baseY + 3.6, b.cz)
+    sprite.scale.set(3.2, 0.8, 1)
+    sprite.position.set(b.cx, this.baseY + 2.4, b.cz)
     this.scene.add(sprite)
     this.nameSprites.push(sprite)
     this.rebuild()
@@ -582,8 +584,10 @@ export class Village {
 
   // Night dial: the cemetery glow and revealed windows burn brightest after dark.
   setNightBlend(blend: number): void {
-    this.glowLight.intensity = 10 + blend * 120
-    if (this.glow) (this.glow.material as THREE.MeshBasicMaterial).opacity = 0.25 + blend * 0.5
+    // A tight green pool right at the cemetery — a marker in the dark, not a
+    // town-wide floodlight.
+    this.glowLight.intensity = 4 + blend * 26
+    if (this.glow) (this.glow.material as THREE.MeshBasicMaterial).opacity = 0.2 + blend * 0.45
     for (const l of this.buildingLights) l.intensity = 6 + blend * 44
   }
 
