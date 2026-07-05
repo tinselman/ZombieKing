@@ -230,7 +230,7 @@ const keys = new Set<string>()
 // ---------------------------------------------------------------- day/night cycle
 
 const DAY_LEN = 70 // seconds of daylight combat before sunset
-const NIGHT_ROUNDS = 10 // full turn rounds (you → enemy → King) per night
+const NIGHT_LEN = 150 // seconds of real-time night scavenging
 const TRANS_LEN = 3.5 // rapid sunset / dawn
 
 type CycleMode = 'day' | 'sunset' | 'night' | 'dawn'
@@ -273,13 +273,26 @@ const walker: NightActor = { x: 0, y: 0, z: 0, yaw: 0, face: 0, pitch: -0.15, zo
 const foe: NightActor = { x: 0, y: 0, z: 0, yaw: Math.PI, face: Math.PI, pitch: -0.3, zombie: false, stunned: false }
 const king: NightActor = { x: 0, y: 0, z: 0, yaw: 0, face: 0, pitch: -0.3, zombie: false, stunned: false }
 
-type NightTurn = 'you' | 'foe' | 'king'
-let nightTurn: NightTurn = 'you'
-let hopsLeft = 4
-let acted = false // shot fired this turn
-let turnDelay = 0 // pause before the next actor goes
-let hopAnim: { actor: NightTurn; fx: number; fy: number; fz: number; tx: number; ty: number; tz: number; t: number } | null = null
+// Real-time night. Everyone moves at once: you and the enemy at full walking
+// speed, the King shambling at a quarter of it — until he SEES someone, when
+// he BURSTS at double human speed for 1.5s, rests 2s, and bursts again.
+// Hunters only know where you are while they have line of sight.
+const WALK_SPEED = 6
+const KING_SPEED = WALK_SPEED / 4
+const BURST_SPEED = WALK_SPEED * 2
+const ZOMBIE_PLAYER_SPEED = WALK_SPEED / 2
+
+type KingMood = 'idle' | 'rushing' | 'resting'
+let kingMood: KingMood = 'idle'
+let kingMoodT = 0
+let kingSeesYou = false
+let kingSeenT = 0
+let kingLastSeen: { x: number; z: number } | null = null
+let kingWander: { x: number; z: number } | null = null
 let foeTarget: { x: number; z: number } | null = null
+let foeStepDir: { x: number; z: number } | null = null
+let foeRepathT = 0
+let bowCooldown = 0
 const look = { yaw: 0, pitch: 0 } // eased arrow-key view velocity
 let nightCashGain = 0
 const nightItemsGain: { id: string; qty: number }[] = []
@@ -306,16 +319,10 @@ const zombGlowFoe = new THREE.PointLight(0x46e07a, 0, 10, 1.5)
 scene.add(zombGlowYou)
 scene.add(zombGlowFoe)
 
-// The movement grid: tiles marking every space your remaining hops can reach.
-const MOVE_TILE_CAP = 100
-const moveTiles = new THREE.InstancedMesh(
-  new THREE.PlaneGeometry(0.92, 0.92),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.17, side: THREE.DoubleSide, depthWrite: false }),
-  MOVE_TILE_CAP
-)
-moveTiles.frustumCulled = false
-moveTiles.count = 0
-scene.add(moveTiles)
+// Actors also carry a freeze timer (arrow stuns) and a tunnel cooldown —
+// kept outside the type via maps.
+const frozen = new Map<NightActor, number>()
+const tunnelCooldown = new Map<NightActor, number>()
 
 type Loot = {
   mesh: THREE.Mesh
@@ -344,34 +351,31 @@ function clearTunnels(): void {
   tunnels.length = 0
 }
 
+// Tunnel mouths hide INSIDE buildings (the board's red dots sit in rooms):
+// four random buildings get a pad, linked crosswise — you won't find one
+// until you light the room up.
 function spawnTunnels(): void {
   clearTunnels()
   tunnelsUsed = false
-  const pad = (px: number, pz: number, to: number) => {
-    let x = px
-    let z = pz
-    for (let tries = 0; tries < 12; tries++) {
+  const picks = [...village.buildings].sort(() => Math.random() - 0.5).slice(0, 4)
+  picks.forEach((b, i) => {
+    let x = Math.round(b.cx)
+    let z = Math.round(b.cz)
+    for (let tries = 0; tries < 14; tries++) {
       if (hopWalkable(x, z, x, z, village.baseY + 0.5)) break
-      x = px + Math.round((Math.random() - 0.5) * 5)
-      z = pz + Math.round((Math.random() - 0.5) * 5)
+      x = Math.round(b.cx + (Math.random() - 0.5) * 4)
+      z = Math.round(b.cz + (Math.random() - 0.5) * 4)
     }
     const mesh = new THREE.Mesh(
       new THREE.CylinderGeometry(0.55, 0.55, 0.08, 20),
       new THREE.MeshBasicMaterial({ color: 0xef4444 })
     )
     mesh.position.set(x, solidGroundY(x, z, GY - 1) + 0.56, z)
+    mesh.visible = b.revealed // hidden until the room is active
     scene.add(mesh)
-    tunnels.push({ x, z, mesh, to })
-  }
-  const j = () => Math.round((Math.random() - 0.5) * 4)
-  const x0 = village.ox + 3
-  const x1 = village.ox + village.sx - 3
-  const z0 = village.oz + 3
-  const z1 = village.oz + village.sz - 3
-  pad(x0 + j(), z0 + j(), 1)
-  pad(x1 + j(), z1 + j(), 0) // NW ↔ SE
-  pad(x1 + j(), z0 + j(), 3)
-  pad(x0 + j(), z1 + j(), 2) // NE ↔ SW
+    // Pads link crosswise: 0↔2, 1↔3.
+    tunnels.push({ x, z, mesh, to: (i + 2) % 4 })
+  })
 }
 type Arrow = { mesh: THREE.Mesh; vel: THREE.Vector3; life: number; stuck: boolean }
 const arrows: Arrow[] = []
@@ -483,7 +487,7 @@ function updateArrows(dt: number): void {
     // Living targets first: the enemy avatar and the King.
     if (phase === 'night') {
       if (Math.hypot(p.x - foe.x, p.y - (foe.y + 1), p.z - foe.z) < 1.1) {
-        foe.stunned = true
+        frozen.set(foe, 1.5)
         dropLoot(Math.round(foe.x), Math.round(foe.z), 'cash', 150) // knocked loose
         hud.msg('hit! the enemy is stunned and drops loot')
         sfx.boom(1)
@@ -533,13 +537,65 @@ function solidBody(x: number, y: number, z: number): boolean {
   return c !== EMPTY && c !== WATER
 }
 
-function actorOf(t: NightTurn): NightActor {
+type NightTag = 'you' | 'foe' | 'king'
+
+function actorOf(t: NightTag): NightActor {
   return t === 'you' ? walker : t === 'foe' ? foe : king
 }
 
-function hopsPerTurn(t: NightTurn): number {
-  if (t === 'king') return 2
-  return actorOf(t).zombie ? 2 : 4
+// Smooth real-time movement with sliding collision. Axis-separated so walls
+// deflect rather than stop you. maxStep limits climbing: 1.05 for people
+// (stairs, terrain), 0.2-ish for the King (he cannot climb stairs).
+function walkAxis(a: NightActor, nx: number, nz: number, maxStep: number, maxFeetY: number): boolean {
+  if (nx < 3 || nx > GX - 4 || nz < 3 || nz > GZ - 4) return false
+  if (world.isWaterTop(nx, nz)) return false
+  const g = solidGroundY(nx, nz, a.y + maxStep + 0.3)
+  const feet = g + 0.5
+  if (feet - a.y > maxStep) return false
+  if (feet > maxFeetY) return false
+  if (solidBody(nx, Math.max(a.y, feet) + 0.6, nz) || solidBody(nx, Math.max(a.y, feet) + 1.6, nz)) return false
+  a.x = nx
+  a.z = nz
+  if (feet > a.y) a.y = feet // step / stair up
+  return true
+}
+
+function moveActor(a: NightActor, dx: number, dz: number, maxStep = 1.05, maxFeetY = 1e9): void {
+  if (dx !== 0) walkAxis(a, a.x + dx, a.z, maxStep, maxFeetY)
+  if (dz !== 0) walkAxis(a, a.x, a.z + dz, maxStep, maxFeetY)
+  if (dx !== 0 || dz !== 0) a.face = Math.atan2(dz, dx)
+}
+
+// Gravity: fall when there's air underfoot (balcony drops, roof edges).
+function actorGravity(a: NightActor, dt: number, vyRef: { v: number }): void {
+  const g = solidGroundY(a.x, a.z, a.y + 0.2)
+  const feet = g + 0.5
+  if (a.y > feet + 0.02) {
+    vyRef.v -= GRAVITY * dt
+    a.y = Math.max(feet, a.y + vyRef.v * dt)
+  } else {
+    a.y = feet
+    vyRef.v = 0
+  }
+}
+
+// Line of sight at eye height — walls block hunters' knowledge of you.
+function los(ax: number, ay: number, az: number, bx: number, by: number, bz: number, maxDist = 45): boolean {
+  const dx = bx - ax
+  const dy = by - ay
+  const dz = bz - az
+  const dist = Math.hypot(dx, dy, dz)
+  if (dist > maxDist) return false
+  const steps = Math.ceil(dist / 0.6)
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps
+    if (solidBody(ax + dx * t, ay + dy * t, az + dz * t)) return false
+  }
+  return true
+}
+
+function canSee(a: NightActor, b: NightActor): boolean {
+  return los(a.x, a.y + 1.8, a.z, b.x, b.y + 1.8, b.z)
 }
 
 // Can an actor hop from (fromX,fromZ) onto cell (tx,tz)? Checks the target
@@ -558,17 +614,6 @@ function hopWalkable(fromX: number, fromZ: number, tx: number, tz: number, fromY
   return true
 }
 
-function startHop(t: NightTurn, dx: number, dz: number): boolean {
-  const a = actorOf(t)
-  const tx = Math.round(a.x) + dx
-  const tz = Math.round(a.z) + dz
-  if (!hopWalkable(Math.round(a.x), Math.round(a.z), tx, tz, a.y)) return false
-  const ty = solidGroundY(tx, tz, a.y + 1.2) + 0.5
-  a.face = Math.atan2(dz, dx)
-  if (t !== 'you') a.yaw = a.face // AI actors look where they walk
-  hopAnim = { actor: t, fx: a.x, fy: a.y, fz: a.z, tx, ty, tz, t: 0 }
-  return true
-}
 
 // Breadth-first pathfinding on the hop grid (the King must find his way out
 // of the cemetery gate; the enemy must find doors). Returns the first step.
@@ -627,67 +672,6 @@ function bfsStep(a: NightActor, target: { x: number; z: number }): { dx: number;
   return { dx: cx2 - sx, dz: cz2 - sz }
 }
 
-// Turn housekeeping ------------------------------------------------------
-
-function nightTurnLabel(): void {
-  if (nightTurn === 'you') {
-    const what = walker.zombie ? 'you are a ZOMBIE — catch the enemy' : `${hopsLeft} move${hopsLeft === 1 ? '' : 's'} left · space = shoot`
-    hud.setNightTurn(`YOUR TURN · ${what}`)
-  } else if (nightTurn === 'foe') {
-    hud.setNightTurn('ENEMY TURN')
-  } else {
-    hud.setNightTurn('THE KING MOVES')
-  }
-}
-
-function beginTurn(t: NightTurn): void {
-  nightTurn = t
-  bowCharging = false
-  const a = actorOf(t)
-  if (a.stunned) {
-    a.stunned = false
-    hud.msg(t === 'you' ? 'you are stunned — turn skipped' : 'enemy is stunned — turn skipped')
-    turnDelay = 0.8
-    queueAdvance = true
-    return
-  }
-  hopsLeft = hopsPerTurn(t)
-  acted = false
-  if (t === 'foe') {
-    foeTarget = pickFoeTarget()
-    foeHopTimer = 0.45
-  } else if (t === 'king') {
-    foeHopTimer = 0.5
-  }
-  nightTurnLabel()
-}
-
-let queueAdvance = false
-let foeHopTimer = 0
-
-function advanceTurn(): void {
-  queueAdvance = false
-  if (nightTurn === 'you') beginTurn('foe')
-  else if (nightTurn === 'foe') beginTurn('king')
-  else {
-    nightRound++
-    if (nightRound >= NIGHT_ROUNDS) {
-      cycleMode = 'dawn'
-      hud.setNightTurn(null)
-      hud.banner('DAWN BREAKS', 'the night is over')
-      return
-    }
-    beginTurn('you')
-  }
-}
-
-function endPlayerTurn(): void {
-  hopsLeft = 0
-  turnDelay = 0.45
-  queueAdvance = true
-  hud.setNightTurn('...')
-}
-
 // AI ----------------------------------------------------------------------
 
 function pickFoeTarget(): { x: number; z: number } {
@@ -722,27 +706,6 @@ function pickFoeTarget(): { x: number; z: number } {
   return { x: village.ox + village.sx / 2, z: village.oz + village.sz / 2 }
 }
 
-// One pathfound hop toward a target; falls back to greedy, false if boxed in.
-function aiHop(t: NightTurn, target: { x: number; z: number }): boolean {
-  const a = actorOf(t)
-  const step = bfsStep(a, target)
-  if (step && startHop(t, step.dx, step.dz)) return true
-  const dirs = [
-    { dx: 1, dz: 0 },
-    { dx: -1, dz: 0 },
-    { dx: 0, dz: 1 },
-    { dx: 0, dz: -1 },
-  ]
-  dirs.sort((p, q) => {
-    const dp = Math.hypot(Math.round(a.x) + p.dx - target.x, Math.round(a.z) + p.dz - target.z)
-    const dq = Math.hypot(Math.round(a.x) + q.dx - target.x, Math.round(a.z) + q.dz - target.z)
-    return dp - dq
-  })
-  for (const d of dirs) {
-    if (startHop(t, d.dx, d.dz)) return true
-  }
-  return false
-}
 
 // Zombification -----------------------------------------------------------
 
@@ -763,26 +726,29 @@ function zombify(t: 'you' | 'foe'): void {
     updateWeaponHud()
     hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
     tintAvatar(avatars[0], 0x3ed06a)
-    hud.banner('YOU HAVE BEEN TURNED', 'hunt the enemy with the King — 2 moves per turn')
+    hud.banner('YOU HAVE BEEN TURNED', 'hunt the enemy alongside the King')
   } else {
     tintAvatar(avatars[1], 0x3ed06a)
     hud.banner('THE ENEMY HAS BEEN TURNED', 'it hunts you now')
   }
   applyLighting()
-  nightTurnLabel()
 }
 
-function checkCatches(t: NightTurn): void {
-  const a = actorOf(t)
-  const catchDist = 1.2
-  if (t === 'king' || (t === 'you' && walker.zombie) || (t === 'foe' && foe.zombie)) {
-    if (!walker.zombie && t !== 'you' && Math.hypot(a.x - walker.x, a.z - walker.z) < catchDist) zombify('you')
-    if (!foe.zombie && t !== 'foe' && Math.hypot(a.x - foe.x, a.z - foe.z) < catchDist) zombify('foe')
+function checkCatches(): void {
+  const catchDist = 1.1
+  if (!walker.zombie) {
+    if (Math.hypot(king.x - walker.x, king.z - walker.z) < catchDist && Math.abs(king.y - walker.y) < 1.5) zombify('you')
+    if (foe.zombie && Math.hypot(foe.x - walker.x, foe.z - walker.z) < catchDist && Math.abs(foe.y - walker.y) < 1.5) zombify('you')
+  }
+  if (!foe.zombie) {
+    if (Math.hypot(king.x - foe.x, king.z - foe.z) < catchDist && Math.abs(king.y - foe.y) < 1.5) zombify('foe')
+    if (walker.zombie && Math.hypot(walker.x - foe.x, walker.z - foe.z) < catchDist && Math.abs(walker.y - foe.y) < 1.5) zombify('foe')
   }
 }
 
-// Landing on a cell: reveal buildings, pick up loot, spring catches.
-function afterLand(t: NightTurn): void {
+// Continuous sensing: reveal buildings you enter, pick up loot you touch,
+// travel tunnels you step on.
+function senseActor(t: NightTag): void {
   const a = actorOf(t)
   if (t !== 'king') {
     const bld = village.buildingAt(a.x, a.z)
@@ -790,8 +756,11 @@ function afterLand(t: NightTurn): void {
       const name = village.reveal(bld)
       hud.banner(name.toUpperCase(), t === 'you' ? 'revealed — the lights stay on' : 'revealed by the enemy')
       sfx.pop()
-      // The room is active now: its items become visible.
+      // The room is active now: its items (and any tunnel mouth) become visible.
       for (const l of loot) if (l.bId === bld.id) l.mesh.visible = true
+      for (const tn of tunnels) {
+        if (Math.abs(tn.x - bld.cx) < 6 && Math.abs(tn.z - bld.cz) < 6) tn.mesh.visible = true
+      }
     }
     for (let i = loot.length - 1; i >= 0; i--) {
       const l = loot[i]
@@ -826,16 +795,19 @@ function afterLand(t: NightTurn): void {
       loot.splice(i, 1)
     }
   }
-  // Tunnels: land on a red pad and surface at the opposite corner. Zombies
-  // (and the King) may only follow once someone living has used them.
+  // Tunnels: step on a red pad and surface at the linked one. Zombies (and
+  // the King) may only follow once someone living has used them. A short
+  // cooldown stops instant ping-ponging at the destination pad.
+  const cd = tunnelCooldown.get(a) ?? 0
   const isZombieActor = t === 'king' || a.zombie
-  if (!isZombieActor || tunnelsUsed) {
+  if (cd <= 0 && (!isZombieActor || tunnelsUsed)) {
     for (const tn of tunnels) {
       if (Math.hypot(tn.x - a.x, tn.z - a.z) > 0.9) continue
       const dest = tunnels[tn.to]
       a.x = dest.x
       a.z = dest.z
       a.y = solidGroundY(dest.x, dest.z, GY - 1) + 0.5
+      tunnelCooldown.set(a, 1.6)
       if (!isZombieActor && !tunnelsUsed) {
         tunnelsUsed = true
         hud.msg('the tunnel is open now — for everyone')
@@ -846,86 +818,143 @@ function afterLand(t: NightTurn): void {
       break
     }
   }
-  checkCatches(t)
 }
 
 // Per-frame night update ---------------------------------------------------
 
-const easeHop = (t: number) => t * t * (3 - 2 * t)
+// Per-actor vertical velocity for falls (balcony drops, roof edges).
+const fallVel = { you: { v: 0 }, foe: { v: 0 }, king: { v: 0 } }
 
 function updateNight(dt: number): void {
-  if (phase !== 'night') {
-    moveTiles.count = 0
-    moveTiles.instanceMatrix.needsUpdate = true
-    return
-  }
+  if (phase !== 'night') return
+
+  bowCooldown = Math.max(0, bowCooldown - dt)
+  for (const [a, t] of frozen) frozen.set(a, Math.max(0, t - dt))
+  for (const [a, t] of tunnelCooldown) tunnelCooldown.set(a, Math.max(0, t - dt))
 
   // Arrow-key view: eased in and out ("slowing when starting and stopping").
-  if (nightTurn === 'you') {
-    const yawT = (keys.has('ArrowRight') ? 1 : 0) - (keys.has('ArrowLeft') ? 1 : 0)
-    const pitchT = (keys.has('ArrowUp') ? 1 : 0) - (keys.has('ArrowDown') ? 1 : 0)
-    look.yaw += (yawT * 2.1 - look.yaw) * Math.min(1, dt * 5)
-    look.pitch += (pitchT * 1.4 - look.pitch) * Math.min(1, dt * 5)
-    walker.yaw += look.yaw * dt
-    walker.pitch = THREE.MathUtils.clamp(walker.pitch + look.pitch * dt, -1.1, 0.75)
-    // Drawing the bow: the power meter runs exactly like the cannon's.
-    if (bowCharging) {
-      chargeT += dt
-      const cyc = (chargeT * 62) % 200
-      chargePower = cyc <= 100 ? cyc : 200 - cyc
-      hud.setPower(chargePower, null)
-    }
+  const yawT = (keys.has('ArrowRight') ? 1 : 0) - (keys.has('ArrowLeft') ? 1 : 0)
+  const pitchT = (keys.has('ArrowUp') ? 1 : 0) - (keys.has('ArrowDown') ? 1 : 0)
+  look.yaw += (yawT * 2.1 - look.yaw) * Math.min(1, dt * 5)
+  look.pitch += (pitchT * 1.4 - look.pitch) * Math.min(1, dt * 5)
+  walker.yaw += look.yaw * dt
+  walker.pitch = THREE.MathUtils.clamp(walker.pitch + look.pitch * dt, -1.1, 0.75)
+  // Drawing the bow: the power meter runs exactly like the cannon's.
+  if (bowCharging) {
+    chargeT += dt
+    const cyc = (chargeT * 62) % 200
+    chargePower = cyc <= 100 ? cyc : 200 - cyc
+    hud.setPower(chargePower, null)
   }
 
-  // Hop animation.
-  if (hopAnim) {
-    hopAnim.t += dt / 0.22
-    const a = actorOf(hopAnim.actor)
-    const e = easeHop(Math.min(1, hopAnim.t))
-    a.x = hopAnim.fx + (hopAnim.tx - hopAnim.fx) * e
-    a.z = hopAnim.fz + (hopAnim.tz - hopAnim.fz) * e
-    a.y = hopAnim.fy + (hopAnim.ty - hopAnim.fy) * e + Math.sin(Math.min(1, hopAnim.t) * Math.PI) * 0.22
-    if (hopAnim.t >= 1) {
-      const t = hopAnim.actor
-      a.x = hopAnim.tx
-      a.y = hopAnim.ty
-      a.z = hopAnim.tz
-      hopAnim = null
-      afterLand(t)
-      if (t === nightTurn) {
-        hopsLeft--
-        nightTurnLabel()
-        if (hopsLeft <= 0) {
-          turnDelay = 0.5
-          queueAdvance = true
-        }
-      }
+  // ---- you: smooth WASD walking, camera-relative
+  if ((frozen.get(walker) ?? 0) <= 0 && cycleMode !== 'dawn') {
+    const fx = Math.cos(walker.yaw)
+    const fz = Math.sin(walker.yaw)
+    let mx = 0
+    let mz = 0
+    if (keys.has('KeyW')) {
+      mx += fx
+      mz += fz
     }
-  } else if (turnDelay > 0) {
-    turnDelay -= dt
-    if (turnDelay <= 0 && queueAdvance) advanceTurn()
-  } else if (nightTurn === 'foe' || nightTurn === 'king') {
-    // AI actors hop on a metronome.
-    foeHopTimer -= dt
-    if (foeHopTimer <= 0) {
-      foeHopTimer = 0.42
-      const target = nightTurn === 'foe' ? (foeTarget ?? pickFoeTarget()) : kingTarget()
-      if (hopsLeft > 0) {
-        if (!aiHop(nightTurn, target)) {
-          hopsLeft = 0
-        }
-      }
-      if (hopsLeft <= 0 && !hopAnim) {
-        turnDelay = 0.4
-        queueAdvance = true
-      }
+    if (keys.has('KeyS')) {
+      mx -= fx
+      mz -= fz
     }
-  } else if (nightTurn === 'you' && acted) {
-    // Shot fired: the arrow is the turn — pass once it lands (stuck arrows linger).
-    if (!arrows.some(a => !a.stuck)) endPlayerTurn()
+    if (keys.has('KeyD')) {
+      mx += -fz
+      mz += fx
+    }
+    if (keys.has('KeyA')) {
+      mx -= -fz
+      mz -= fx
+    }
+    const len = Math.hypot(mx, mz)
+    if (len > 0) {
+      const speed = (walker.zombie ? ZOMBIE_PLAYER_SPEED : WALK_SPEED) * dt
+      moveActor(walker, (mx / len) * speed, (mz / len) * speed)
+      senseActor('you')
+    }
   }
+  actorGravity(walker, dt, fallVel.you)
 
-  // Drive bodies, lights, tiles.
+  // ---- the enemy: same speed, loot-seeking (or hunting you, if turned)
+  if ((frozen.get(foe) ?? 0) <= 0) {
+    foeRepathT -= dt
+    if (foeRepathT <= 0) {
+      foeRepathT = 0.5
+      if (foe.zombie) {
+        // Zombies only know where you are while they can see you.
+        foeTarget = canSee(foe, walker) ? { x: walker.x, z: walker.z } : foeTarget
+      } else {
+        foeTarget = pickFoeTarget()
+      }
+      const step = foeTarget ? bfsStep(foe, foeTarget) : null
+      foeStepDir = step ? { x: step.dx, z: step.dz } : null
+    }
+    if (foeStepDir) {
+      const speed = (foe.zombie ? ZOMBIE_PLAYER_SPEED : WALK_SPEED) * dt
+      moveActor(foe, foeStepDir.x * speed, foeStepDir.z * speed)
+      foe.yaw = foe.face
+      senseActor('foe')
+    }
+  }
+  actorGravity(foe, dt, fallVel.foe)
+
+  // ---- the King: shambles at quarter speed — unless he SEES you. Then he
+  // BURSTS: double human speed for 1.5s, rests 2s, bursts again. He cannot
+  // climb stairs (nothing above ground level +1.5 for him).
+  const kingPrey = (!walker.zombie && canSee(king, walker) && 'you') || (!foe.zombie && canSee(king, foe) && 'foe') || null
+  // Debounced: sight lines flicker as he charges past corners.
+  if (kingPrey === 'you') kingSeenT = 0.7
+  else kingSeenT = Math.max(0, kingSeenT - dt)
+  kingSeesYou = kingSeenT > 0
+  if (kingPrey) kingLastSeen = { x: actorOf(kingPrey).x, z: actorOf(kingPrey).z }
+  kingMoodT -= dt
+  if (kingPrey && kingMood === 'idle') {
+    kingMood = 'rushing'
+    kingMoodT = 1.5
+    sfx.rumble()
+  } else if (kingMood === 'rushing' && kingMoodT <= 0) {
+    kingMood = 'resting'
+    kingMoodT = 2
+  } else if (kingMood === 'resting' && kingMoodT <= 0) {
+    kingMood = kingPrey ? 'rushing' : 'idle'
+    kingMoodT = kingPrey ? 1.5 : 0
+  } else if (!kingPrey && kingMood === 'rushing' && kingMoodT <= 0) {
+    kingMood = 'idle'
+  }
+  let kingSpeed = KING_SPEED
+  if (kingMood === 'rushing') kingSpeed = kingPrey ? BURST_SPEED : KING_SPEED * 2
+  else if (kingMood === 'resting') kingSpeed = 0
+  let kingGoal: { x: number; z: number } | null = kingLastSeen
+  if (!kingGoal) {
+    if (!kingWander || Math.hypot(kingWander.x - king.x, kingWander.z - king.z) < 2) {
+      kingWander = {
+        x: village.ox + 4 + Math.random() * (village.sx - 8),
+        z: village.oz + 4 + Math.random() * (village.sz - 8),
+      }
+    }
+    kingGoal = kingWander
+  } else if (Math.hypot(kingGoal.x - king.x, kingGoal.z - king.z) < 1.2 && !kingPrey) {
+    kingLastSeen = null // reached where he last saw them; the trail is cold
+  }
+  if (kingSpeed > 0 && kingGoal) {
+    const step = kingPrey
+      ? { dx: Math.sign(kingGoal.x - king.x), dz: Math.sign(kingGoal.z - king.z) } // direct rush
+      : bfsStep(king, kingGoal)
+    if (step) {
+      const s = kingSpeed * dt
+      const dl = Math.hypot(step.dx, step.dz) || 1
+      moveActor(king, (step.dx / dl) * s, (step.dz / dl) * s, 1.05, village.baseY + 1.6)
+      king.yaw = king.face
+    }
+  }
+  actorGravity(king, dt, fallVel.king)
+  checkCatches()
+  hud.setBurst(kingSeesYou && kingMood !== 'idle' && cycleMode === 'night')
+
+  // Drive bodies and lights.
   avatars[0].position.set(walker.x, walker.y + 1.5, walker.z)
   avatars[0].rotation.y = -walker.face
   avatars[1].position.set(foe.x, foe.y + 1.5, foe.z)
@@ -938,44 +967,17 @@ function updateNight(dt: number): void {
   zombGlowYou.intensity = walker.zombie && nightBlend > 0.5 ? 55 : 0
   zombGlowFoe.intensity = foe.zombie && nightBlend > 0.5 ? 55 : 0
 
-  // The flashlight rides whoever is acting (zombies carry no light).
-  const active = actorOf(nightTurn)
-  const activeZombie = nightTurn === 'king' || active.zombie
-  flashlight.visible = nightBlend > 0.55 && !activeZombie
+  // Your flashlight (zombies carry no light).
+  flashlight.visible = nightBlend > 0.55 && !walker.zombie
   const dir = new THREE.Vector3(
-    Math.cos(active.yaw) * Math.cos(active.pitch),
-    Math.sin(active.pitch),
-    Math.sin(active.yaw) * Math.cos(active.pitch)
+    Math.cos(walker.yaw) * Math.cos(walker.pitch),
+    Math.sin(walker.pitch),
+    Math.sin(walker.yaw) * Math.cos(walker.pitch)
   )
-  flashlight.position.set(active.x, active.y + 1.9, active.z).addScaledVector(dir, 0.6)
+  flashlight.position.set(walker.x, walker.y + 1.9, walker.z).addScaledVector(dir, 0.6)
   flashlight.target.position.copy(flashlight.position).addScaledVector(dir, 14)
-  lantern.position.set(active.x, active.y + 2.4, active.z)
-  lantern.color.setHex(activeZombie ? 0x46e07a : 0xffe4b0)
-
-  // Movement grid: every space your remaining hops can reach.
-  let n = 0
-  if (nightTurn === 'you' && !walker.stunned && hopsLeft > 0 && cycleMode === 'night') {
-    const m = new THREE.Matrix4()
-    const cx = Math.round(walker.x)
-    const cz = Math.round(walker.z)
-    for (let dx = -hopsLeft; dx <= hopsLeft; dx++) {
-      for (let dz = -hopsLeft; dz <= hopsLeft; dz++) {
-        if (Math.abs(dx) + Math.abs(dz) > hopsLeft || (dx === 0 && dz === 0)) continue
-        const tx = cx + dx
-        const tz = cz + dz
-        if (!hopWalkable(tx, tz, tx, tz, walker.y)) continue
-        const g = solidGroundY(tx, tz, walker.y + 1.2)
-        m.makeRotationX(-Math.PI / 2)
-        m.setPosition(tx, g + 0.56, tz)
-        moveTiles.setMatrixAt(n, m)
-        n++
-        if (n >= MOVE_TILE_CAP) break
-      }
-      if (n >= MOVE_TILE_CAP) break
-    }
-  }
-  moveTiles.count = n
-  moveTiles.instanceMatrix.needsUpdate = true
+  lantern.position.set(walker.x, walker.y + 2.4, walker.z)
+  lantern.color.setHex(walker.zombie ? 0x46e07a : 0xffe4b0)
 
   // Loot: bob and spin (no light of their own — find them with the beam).
   lootT += dt
@@ -983,15 +985,6 @@ function updateNight(dt: number): void {
     l.mesh.position.y = l.baseY + Math.sin(lootT * 3 + l.bob) * 0.15
     l.mesh.rotation.y += dt * 2
   }
-}
-
-function kingTarget(): { x: number; z: number } {
-  const candidates = []
-  if (!walker.zombie) candidates.push({ x: walker.x, z: walker.z })
-  if (!foe.zombie) candidates.push({ x: foe.x, z: foe.z })
-  if (!candidates.length) return { x: village.ox + village.sx / 2, z: village.oz + village.sz / 2 }
-  candidates.sort((a, b) => Math.hypot(a.x - king.x, a.z - king.z) - Math.hypot(b.x - king.x, b.z - king.z))
-  return candidates[0]
 }
 
 function placeNightActor(a: NightActor, x: number, z: number, yaw: number): void {
@@ -1023,11 +1016,21 @@ function enterNight(): void {
   kingAvatar.visible = true
   look.yaw = 0
   look.pitch = 0
+  kingMood = 'idle'
+  kingMoodT = 0
+  kingSeesYou = false
+  kingLastSeen = null
+  kingWander = null
+  foeTarget = null
+  foeStepDir = null
+  bowCharging = false
+  bowCooldown = 0
+  frozen.clear()
+  tunnelCooldown.clear()
   spawnLoot()
   spawnTunnels()
   hud.setNightHint(true)
   hud.setCross(true)
-  beginTurn('you')
 }
 
 function exitNight(): void {
@@ -1043,6 +1046,7 @@ function exitNight(): void {
   hud.setNightHint(false)
   hud.setCross(false)
   hud.setNightTurn(null)
+  hud.setBurst(false)
   kingAvatar.visible = false
   // Cure the zombies at dawn and repaint them.
   walker.zombie = false
@@ -1069,7 +1073,12 @@ function updateCycle(dt: number): void {
     applyLighting()
     if (nightBlend >= 1) cycleMode = 'night'
   } else if (cycleMode === 'night') {
-    // Turn-based: dawn arrives after NIGHT_ROUNDS full rounds (see advanceTurn).
+    nightRound += dt // repurposed as elapsed night seconds
+    if (nightRound >= NIGHT_LEN) {
+      cycleMode = 'dawn'
+      hud.setBurst(false)
+      hud.banner('DAWN BREAKS', 'the night is over')
+    }
   } else {
     nightBlend = Math.max(0, nightBlend - dt / TRANS_LEN)
     applyLighting()
@@ -1079,7 +1088,7 @@ function updateCycle(dt: number): void {
     cycleMode === 'day'
       ? Math.min(1, dayT / DAY_LEN)
       : cycleMode === 'night'
-        ? Math.min(1, nightRound / NIGHT_ROUNDS)
+        ? Math.min(1, nightRound / NIGHT_LEN)
         : cycleMode === 'sunset'
           ? nightBlend
           : 1 - nightBlend
@@ -1528,9 +1537,9 @@ function updateCamera(dt: number): void {
   let k = 3.5
 
   if (phase === 'night') {
-    // Third-person follow of whoever is taking their turn. The boom shortens
-    // when walls (village or terrain) would block the view.
-    const act = actorOf(nightTurn)
+    // Third-person follow of your avatar. The boom shortens when walls
+    // (village or terrain) would block the view.
+    const act = walker
     const dir = new THREE.Vector3(
       Math.cos(act.yaw) * Math.cos(act.pitch),
       Math.sin(act.pitch),
@@ -2165,8 +2174,8 @@ window.addEventListener('keydown', e => {
     }
     // Night: drawing the bow works exactly like charging the cannon.
     if (
-      phase === 'night' && cycleMode === 'night' && nightTurn === 'you' &&
-      !hopAnim && turnDelay <= 0 && !acted && !walker.zombie && !bowCharging && !e.repeat
+      phase === 'night' && cycleMode === 'night' &&
+      !walker.zombie && !bowCharging && bowCooldown <= 0 && !e.repeat
     ) {
       bowCharging = true
       chargeT = 0
@@ -2174,22 +2183,8 @@ window.addEventListener('keydown', e => {
     }
   }
   if (e.code === 'KeyV') toggleWorldView()
-  // Night, your turn: WASD taps hop one space each; Enter passes.
-  if (phase === 'night' && cycleMode === 'night' && nightTurn === 'you' && !hopAnim && turnDelay <= 0 && !acted && !bowCharging && !e.repeat) {
-    const hopQuarter: Record<string, number> = { KeyW: 0, KeyD: 1, KeyS: 2, KeyA: 3 }
-    if (e.code in hopQuarter && hopsLeft > 0) {
-      const base = Math.round(walker.yaw / (Math.PI / 2))
-      const q = (((base + hopQuarter[e.code]) % 4) + 4) % 4
-      const cardinal = [
-        [1, 0],
-        [0, 1],
-        [-1, 0],
-        [0, -1],
-      ][q]
-      startHop('you', cardinal[0], cardinal[1])
-      hud.setNightHint(false)
-    }
-    if (e.code === 'Enter') endPlayerTurn()
+  if (phase === 'night' && (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' || e.code === 'KeyD')) {
+    hud.setNightHint(false)
   }
   if (/^Digit[1-9]$/.test(e.code)) {
     // Digits address the visible (owned) list, not the full roster.
@@ -2207,13 +2202,12 @@ window.addEventListener('keyup', e => {
     const weapon = WEAPONS[sides[0].wsel]
     fireShot(0, weapon, power)
   }
-  // Release the bowstring: the arrow is your whole turn.
+  // Release the bowstring.
   if (e.code === 'Space' && phase === 'night' && bowCharging) {
     bowCharging = false
+    bowCooldown = 1
     fireArrow(Math.max(8, chargePower))
-    acted = true
     hud.setPower(null, null)
-    hud.setNightTurn('...')
   }
 })
 
@@ -2367,6 +2361,7 @@ declare global {
       village: Village
       newMatch: () => void
       sunset: () => void
+      burstTest: () => void
     }
   }
 }
@@ -2396,9 +2391,10 @@ window.__sv = {
     cycle: {
       mode: cycleMode,
       dayT,
-      round: nightRound,
-      turn: nightTurn,
-      hops: hopsLeft,
+      t: nightRound,
+      kingMood,
+      kingSeesYou,
+      losKingYou: phase === 'night' ? canSee(king, walker) : null,
       blend: nightBlend,
       loot: loot.length,
       walker: { ...walker },
@@ -2412,6 +2408,11 @@ window.__sv = {
   world,
   village,
   newMatch: fullReset,
+  burstTest: () => {
+    kingSeenT = 60
+    kingMood = 'rushing'
+    kingMoodT = 60
+  },
   sunset: () => {
     dayT = DAY_LEN // testing: force the next quiet moment to trigger nightfall
   },

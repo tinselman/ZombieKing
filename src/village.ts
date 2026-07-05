@@ -128,6 +128,7 @@ export class Village {
     this.tint = new Uint8Array(this.solid.length)
     this.owner = new Uint8Array(this.solid.length)
     this.buildings = []
+    this.towerHeights.clear()
     for (const b of this.buildingLights) this.scene.remove(b)
     this.buildingLights.length = 0
     for (const s of this.nameSprites) {
@@ -159,26 +160,42 @@ export class Village {
       ;[pastels[i], pastels[p]] = [pastels[p], pastels[i]]
     }
 
-    // Twelve buildings on a tight rectangular ring — three per side, doors
-    // inward — with lanes just wide enough to walk (no city wall).
-    const slots: { x: number; z: number; ang: number }[] = []
+    // Twelve buildings, three per side, doors inward. On every side two of the
+    // three stand ADJACENT — sharing a wall with a connecting doorway carved
+    // through it, board-style. Some are two stories with stairs.
     const inset = 7
-    for (let i = 0; i < 3; i++) {
-      const tx = this.sx * (0.22 + 0.28 * i)
-      const tz = this.sz * (0.26 + 0.24 * i)
-      slots.push({ x: tx, z: inset, ang: -Math.PI / 2 }) // north row (door faces +z)
-      slots.push({ x: tx, z: this.sz - inset, ang: Math.PI / 2 }) // south row
-      slots.push({ x: inset, z: tz, ang: Math.PI }) // west column (door faces +x)
-      slots.push({ x: this.sx - inset, z: tz, ang: 0 }) // east column
-    }
-    for (let i = 0; i < 12; i++) {
-      const s = slots[i]
-      const bw = 7 + Math.floor(rand() * 2) // width (world units)
-      const bd = 6 + Math.floor(rand() * 2) // depth
-      const bh = 4 + Math.floor(rand() * 2) // wall height
-      const bx = Math.round(s.x + (rand() - 0.5) * 2)
-      const bz = Math.round(s.z + (rand() - 0.5) * 2)
-      this.buildHouse(i, names[i], paints[i], pastels[i], bx, bz, bw, bd, bh, s.ang, rand)
+    let id = 0
+    for (let side = 0; side < 4; side++) {
+      // Row geometry: north/south rows run along x, west/east columns along z.
+      const horizontal = side < 2
+      const rowLen = horizontal ? this.sx : this.sz
+      const fixed = side === 0 ? inset : side === 1 ? this.sz - inset : side === 2 ? inset : this.sx - inset
+      const ang = side === 0 ? -Math.PI / 2 : side === 1 ? Math.PI / 2 : side === 2 ? Math.PI : 0
+      // Three buildings: one standalone, then an adjacent pair.
+      const specs = [0, 1, 2].map(() => ({
+        w: 7 + Math.floor(rand() * 2),
+        d: 6 + Math.floor(rand() * 2),
+        h: 4 + Math.floor(rand() * 2),
+        twoStory: rand() < 0.45,
+      }))
+      // Along-the-row half sizes.
+      const halfAlong = (s: { w: number; d: number }) => (horizontal ? s.w : s.d) / 2
+      const aC = Math.round(rowLen * 0.2 + (rand() - 0.5) * 2)
+      const bC = Math.round(rowLen * 0.52 + halfAlong(specs[1]))
+      const cC = Math.round(bC + halfAlong(specs[1]) + halfAlong(specs[2])) // shares B's wall
+      const centers = [aC, bC, cC]
+      const ids: number[] = []
+      for (let k = 0; k < 3; k++) {
+        const along = Math.max(5, Math.min(rowLen - 5, centers[k]))
+        const bx = horizontal ? along : fixed
+        const bz = horizontal ? fixed : along
+        this.buildHouse(id, names[id], paints[id], pastels[id], bx, bz, specs[k].w, specs[k].d, specs[k].h, ang, specs[k].twoStory, rand)
+        ids.push(id)
+        id++
+      }
+      // Carve the connecting doorway between the adjacent pair (B ↔ C), and an
+      // upper escape door onto the neighbor's roof when heights allow.
+      this.connectPair(ids[1], ids[2], horizontal)
     }
 
     this.rebuild()
@@ -186,10 +203,61 @@ export class Village {
     this.glowLight.position.set(this.ox + ccx, baseY + 3, this.oz + ccz)
   }
 
+  // Doorway through the shared wall of two adjacent buildings — ground level
+  // always; plus an upper doorway onto the neighbor's roof if one is taller.
+  private connectPair(idA: number, idB: number, horizontal: boolean): void {
+    const A = this.buildings[idA]
+    const B = this.buildings[idB]
+    if (!A || !B) return
+    // Shared plane sits between the two centers, along the row axis.
+    const planeLo = horizontal ? Math.round(((A.x1 - this.ox) * F + (B.x0 - this.ox) * F) / 2) - 2 : Math.round(((A.z1 - this.oz) * F + (B.z0 - this.oz) * F) / 2) - 2
+    // Lateral overlap of the two interiors (the other axis).
+    const aLo = horizontal ? (A.z0 - this.oz) * F : (A.x0 - this.ox) * F
+    const aHi = horizontal ? (A.z1 - this.oz) * F : (A.x1 - this.ox) * F
+    const bLo = horizontal ? (B.z0 - this.oz) * F : (B.x0 - this.ox) * F
+    const bHi = horizontal ? (B.z1 - this.oz) * F : (B.x1 - this.ox) * F
+    const lo = Math.max(aLo, bLo) + 3
+    const hi = Math.min(aHi, bHi) - 3
+    if (hi - lo < 8) return
+    const mid = Math.round((lo + hi) / 2)
+    // Ground doorway: clear both wall layers, 9 fine wide, 9 tall.
+    for (let p = planeLo; p <= planeLo + 4; p++) {
+      for (let lat = mid - 4; lat <= mid + 4; lat++) {
+        for (let fy = 0; fy < 9; fy++) {
+          const x = horizontal ? p : lat
+          const z = horizontal ? lat : p
+          if (this.inFine(x, fy, z)) this.solid[this.fidx(x, fy, z)] = 0
+        }
+      }
+    }
+    // Escape door: a two-story building opens onto its shorter neighbor's roof.
+    const tall = this.tallness(idA) >= 8 ? A : this.tallness(idB) >= 8 ? B : null
+    const short = tall === A ? B : A
+    if (tall && this.tallness(tall === A ? idB : idA) < 8) {
+      void short
+      for (let p = planeLo; p <= planeLo + 4; p++) {
+        for (let lat = mid - 3; lat <= mid + 3; lat++) {
+          for (let fy = 17; fy < 25; fy++) {
+            const x = horizontal ? p : lat
+            const z = horizontal ? lat : p
+            if (this.inFine(x, fy, z)) this.solid[this.fidx(x, fy, z)] = 0
+          }
+        }
+      }
+    }
+  }
+
+  private towerHeights = new Map<number, number>()
+  private tallness(id: number): number {
+    return this.towerHeights.get(id) ?? 4
+  }
+
   private buildingLights: THREE.PointLight[] = []
 
-  // One Victorian house: fine-voxel walls with tall windows, an inward-facing
-  // door with a porch, a stepped gable roof with eaves, and a chimney.
+  // One Victorian house: fine-voxel walls, an inward-facing door with a porch,
+  // sparse windows on the door side only, a roof (gabled or flat), a chimney —
+  // and sometimes a second story with a staircase, upstairs floor, and a
+  // balcony escape door out the back.
   private buildHouse(
     id: number,
     name: string,
@@ -199,10 +267,13 @@ export class Village {
     bz: number,
     w: number,
     d: number,
-    wallH: number,
+    baseWallH: number,
     angToCenter: number,
+    twoStory: boolean,
     rand: () => number
   ): void {
+    const wallH = twoStory ? 8 : baseWallH
+    this.towerHeights.set(id, wallH)
     const owner = id + 1
     const hw = Math.floor((w * F) / 2)
     const hd = Math.floor((d * F) / 2)
@@ -235,10 +306,10 @@ export class Village {
           if (whichSide === side && !(onX && onZ)) {
             const along = onX ? fz + hd : fx + hw
             const inWindowBand = along % 10 >= 5 && along % 10 <= 7
-            if (inWindowBand && fy >= 5 && fy < 10) continue
+            if (inWindowBand && ((fy >= 5 && fy < 10) || (twoStory && fy >= 21 && fy < 26))) continue
           }
-          // White trim: a lintel course and the top course.
-          const trim = fy === 12 || fy === wallTop - 1
+          // White trim: a lintel course, the top course, the upstairs floor line.
+          const trim = fy === 12 || fy === wallTop - 1 || (twoStory && fy === 16)
           this.put(cx + fx, fy, cz + fz, trim ? T_TRIM : T_WALL, owner)
         }
       }
@@ -320,6 +391,57 @@ export class Village {
     }
 
     void roofTopY
+    // Second story: staircase up the back wall, an upstairs floor with a
+    // stairwell, and a balcony escape door out the back — drop to the street.
+    if (twoStory) {
+      const floorY = 16
+      const backIsX = side === 0 || side === 1
+      const backSign = side === 0 ? -1 : 1 // x-sign when backIsX, else z-sign
+      const stairCells = new Set<string>()
+      for (let s = 0; s <= 16; s++) {
+        for (let v = 1; v <= 5; v++) {
+          let x: number
+          let z: number
+          if (backIsX) {
+            x = cx + backSign * (hw - v)
+            z = cz - hd + 2 + s
+          } else {
+            z = cz + (side === 2 ? -1 : 1) * (hd - v)
+            x = cx - hw + 2 + s
+          }
+          for (let fy = 0; fy <= Math.min(s, floorY - 1); fy++) this.put(x, fy, z, T_TRIM, owner)
+          if (s >= 8) stairCells.add(`${x},${z}`)
+        }
+      }
+      // Upstairs floor (hole above the top half of the stairs).
+      for (let fx = -hw + 1; fx < hw; fx++) {
+        for (let fz = -hd + 1; fz < hd; fz++) {
+          if (stairCells.has(`${cx + fx},${cz + fz}`)) continue
+          this.put(cx + fx, floorY, cz + fz, T_FLOOR, owner)
+        }
+      }
+      // Balcony: carve the upper back doorway, lay a railed platform outside.
+      const bSign = backIsX ? backSign : side === 2 ? -1 : 1
+      for (let lat = -2; lat <= 2; lat++) {
+        for (let fy = floorY + 1; fy < floorY + 9; fy++) {
+          const x = backIsX ? cx + bSign * hw : cx + lat
+          const z = backIsX ? cz + lat : cz + bSign * hd
+          if (this.inFine(x, fy, z)) this.solid[this.fidx(x, fy, z)] = 0
+        }
+      }
+      for (let out = 1; out <= 4; out++) {
+        for (let lat = -3; lat <= 3; lat++) {
+          const x = backIsX ? cx + bSign * (hw + out) : cx + lat
+          const z = backIsX ? cz + lat : cz + bSign * (hd + out)
+          this.put(x, floorY, z, T_TRIM, owner)
+          if (out === 4 || Math.abs(lat) === 3) {
+            this.put(x, floorY + 1, z, T_FENCE, owner)
+            this.put(x, floorY + 2, z, T_FENCE, owner)
+          }
+        }
+      }
+    }
+
     const b: Building = {
       id,
       name,

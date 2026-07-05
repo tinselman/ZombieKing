@@ -66,6 +66,8 @@ const CSS = `
 #sc-timeFill { height: 100%; width: 0%; border-radius: 4px; background: #e8b84d; }
 #sc-cross { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: #fff; box-shadow: 0 0 5px rgba(0,0,0,0.7); display: none; pointer-events: none; }
 #sc-nightHint { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); font-size: 13px; font-weight: 600; color: #fff; background: rgba(20,26,38,0.82); border: 1px solid #3a4a6b; border-radius: 10px; padding: 10px 18px; display: none; pointer-events: none; text-align: center; }
+#sc-burst { position: fixed; left: 50%; top: 38%; transform: translate(-50%, -50%); font-family: Helvetica, Arial, sans-serif; font-size: 54px; font-weight: 900; letter-spacing: 0.04em; color: #3ed06a; text-shadow: 0 0 18px rgba(62,208,106,0.8), 0 2px 6px rgba(0,0,0,0.9); display: none; pointer-events: none; animation: sc-wiggle 0.14s infinite; }
+@keyframes sc-wiggle { 0% { transform: translate(-50%, -50%) rotate(-2.5deg) scale(1); } 50% { transform: translate(-48%, -52%) rotate(2.5deg) scale(1.05); } 100% { transform: translate(-50%, -50%) rotate(-2.5deg) scale(1); } }
 #sc-shopStart { margin-top: 18px; width: 100%; font-size: 15px; font-weight: 800; letter-spacing: 0.08em; padding: 12px 0; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shopStart:hover { background: #454c55; }
 `
@@ -96,7 +98,8 @@ export function createHud(
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
     <div class="panel" id="sc-time"><div class="tlabel"><span id="sc-timeMode">day</span><span>time</span></div><div id="sc-timeTrack"><div id="sc-timeFill"></div></div></div>
     <div id="sc-cross"></div>
-    <div id="sc-nightHint">WASD = hop one space (4 per turn) &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; hold SPACE = draw bow, release to shoot (ends turn) &nbsp;·&nbsp; enter = pass</div>
+    <div id="sc-nightHint">WASD = move &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; hold SPACE = draw bow, release to shoot &nbsp;·&nbsp; stairs up, roofs across, red pads = tunnels</div>
+    <div id="sc-burst">ZOMBIE BURST!</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
       <h2>THE ARMORY</h2>
@@ -139,6 +142,7 @@ export function createHud(
   const timeFill = q<HTMLElement>('#sc-timeFill')
   const crossEl = q<HTMLElement>('#sc-cross')
   const hintEl = q<HTMLElement>('#sc-nightHint')
+  const burstEl = q<HTMLElement>('#sc-burst')
   worldBtn.addEventListener('click', () => handlers.onWorldToggle?.())
   const banner = q<HTMLElement>('#sc-banner')
   const msgEl = q<HTMLElement>('#sc-msg')
@@ -278,6 +282,9 @@ export function createHud(
     },
     setNightHint(show: boolean) {
       hintEl.style.display = show ? 'block' : 'none'
+    },
+    setBurst(show: boolean) {
+      burstEl.style.display = show ? 'block' : 'none'
     },
     // Whose turn it is at night (null hides the panel).
     setNightTurn(text: string | null) {
