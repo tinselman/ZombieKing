@@ -53,6 +53,7 @@ const CSS = `
 #sc-manage button.fire:hover { background: #454c55; }
 #sc-manage button:disabled { opacity: 0.4; cursor: default; }
 #sc-manage button small { display: block; font-weight: 400; font-size: 11px; letter-spacing: 0.04em; opacity: 0.7; margin-top: 2px; }
+#sc-buildHint { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); display: none; font-size: 13px; font-weight: 600; color: #2c3138; background: rgba(255,255,255,0.85); border: 1px solid #d8dde3; border-radius: 8px; padding: 8px 16px; pointer-events: none; }
 #sc-shop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(244,246,248,0.82); backdrop-filter: blur(8px); pointer-events: auto; }
 #sc-shop .box { background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 14px; padding: 24px 28px; width: 780px; max-height: 88vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(40,50,60,0.12); color: #2c3138; }
 #sc-shopList { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
@@ -110,8 +111,10 @@ export function createHud(
     <div id="sc-manage">
       <button class="fire" data-a="fire">FIRE <small>[F] hold space</small></button>
       <button data-a="repair">REPAIR <small class="rc">castle</small></button>
+      <button data-a="build">BUILD <small class="bc">[C]</small></button>
       <button data-a="buy">BUY <small>[B] armory</small></button>
     </div>
+    <div id="sc-buildHint">arrows = move &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; Enter = place &nbsp;·&nbsp; Esc = cancel</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
       <h2>THE ARMORY</h2>
@@ -161,10 +164,13 @@ export function createHud(
   const manageEl = q<HTMLElement>('#sc-manage')
   const manageRepairSmall = q<HTMLElement>('#sc-manage .rc')
   const manageRepairBtn = q<HTMLButtonElement>('#sc-manage button[data-a="repair"]')
-  let onManage: (a: 'fire' | 'repair' | 'buy') => void = () => {}
+  const manageBuildSmall = q<HTMLElement>('#sc-manage .bc')
+  const manageBuildBtn = q<HTMLButtonElement>('#sc-manage button[data-a="build"]')
+  const buildHintEl = q<HTMLElement>('#sc-buildHint')
+  let onManage: (a: 'fire' | 'repair' | 'buy' | 'build') => void = () => {}
   manageEl.addEventListener('click', e => {
     const btn = (e.target as HTMLElement).closest('button') as HTMLElement | null
-    if (btn && btn.dataset.a) onManage(btn.dataset.a as 'fire' | 'repair' | 'buy')
+    if (btn && btn.dataset.a) onManage(btn.dataset.a as 'fire' | 'repair' | 'buy' | 'build')
   })
   const end = q<HTMLElement>('#sc-end')
   const endTitle = q<HTMLElement>('#sc-end h1')
@@ -358,15 +364,23 @@ export function createHud(
       shop.style.display = 'none'
     },
     // The manage-or-fire action menu shown at the start of your turn.
-    showManage(data: { cash: number; repairCost: number; integrity: number }, on: (a: 'fire' | 'repair' | 'buy') => void) {
+    showManage(
+      data: { cash: number; repairCost: number; integrity: number; buildCost: number },
+      on: (a: 'fire' | 'repair' | 'buy' | 'build') => void
+    ) {
       onManage = on
       const full = data.repairCost <= 0
       manageRepairSmall.textContent = full ? 'full strength' : `$${data.repairCost.toLocaleString()} · ${Math.round(data.integrity * 100)}%`
       manageRepairBtn.disabled = full || data.cash < data.repairCost
+      manageBuildSmall.textContent = `[C] $${data.buildCost.toLocaleString()}`
+      manageBuildBtn.disabled = data.cash < data.buildCost
       manageEl.style.display = 'flex'
     },
     hideManage() {
       manageEl.style.display = 'none'
+    },
+    setBuildHint(show: boolean) {
+      buildHintEl.style.display = show ? 'block' : 'none'
     },
     showEnd(title: string, sub: string, onRematch: () => void) {
       endTitle.textContent = title

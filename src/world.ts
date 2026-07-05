@@ -12,6 +12,8 @@ export const EMPTY = 0
 export const TERRAIN = 1
 export const FORT_A = 2 // player fort voxel
 export const FORT_B = 3 // enemy fort voxel
+export const BLD_A = 6 // player-built shield building
+export const BLD_B = 7 // enemy-built shield building
 export const WATER = 4 // lakes & rivers — solid light blue, stylized
 export const CITY = 5 // ruined city buildings between the forts — night scavenging ground
 
@@ -106,6 +108,21 @@ export type FortInfo = {
 // Purchasable, match-persistent structure upgrades per side.
 export type Fortifications = { height: number; towers: number }
 
+// A player-placed shield building: a tall block that soaks up shells meant for
+// the fort. Destructible (like the fort) and repairable from its snapshot.
+export type BuildingInfo = {
+  cell: number
+  side: number
+  cx: number
+  cz: number
+  baseY: number
+  w: number
+  d: number
+  h: number
+  origCount: number
+  voxels: number[]
+}
+
 export type ShotResult = { hit: boolean; pos: Vec3; t: number }
 
 const FORT_HALF = 4 // 9x9 footprint
@@ -114,6 +131,7 @@ const FORT_HEIGHT = 17
 export class World {
   grid: Uint8Array
   forts: FortInfo[] = []
+  buildings: BuildingInfo[] = []
   mesh: THREE.InstancedMesh
   debrisMesh: THREE.InstancedMesh
   debris: Debris[] = []
@@ -231,6 +249,7 @@ export class World {
     this.debris.length = 0
     this.debrisMesh.count = 0
     this.forts = []
+    this.buildings = []
     this.colorSeed = seed & 0xffff
     const rand = mulberry32(seed)
 
@@ -453,6 +472,105 @@ export class World {
       if (restored >= budget) break
       if (this.grid[i] !== EMPTY) continue
       this.grid[i] = f.cell
+      restored++
+    }
+    if (restored) this.dirty = true
+    return restored
+  }
+
+  // ---------------------------------------------------------------- buildings
+
+  // Can a w×d building footprint centred on (cx,cz) be placed? Needs dry, fairly
+  // level ground, clear of forts/other buildings/existing structure.
+  canPlaceBuilding(cx: number, cz: number, w: number, d: number): boolean {
+    const hw = Math.floor(w / 2)
+    const hd = Math.floor(d / 2)
+    if (cx - hw < 2 || cx + hw > GX - 3 || cz - hd < 2 || cz + hd > GZ - 3) return false
+    let gmin = GY
+    let gmax = -1
+    for (let x = cx - hw; x <= cx + hw; x++) {
+      for (let z = cz - hd; z <= cz + hd; z++) {
+        const sy = this.surfaceY(x, z)
+        if (sy < 0) return false
+        const top = this.cellAt(x, sy, z)
+        if (top === WATER) return false
+        // Don't build on top of a fort or another building.
+        if (top === FORT_A || top === FORT_B || top === BLD_A || top === BLD_B) return false
+        gmin = Math.min(gmin, sy)
+        gmax = Math.max(gmax, sy)
+      }
+    }
+    return gmax - gmin <= 9 // buildings root to the terrain, so tolerate slopes
+  }
+
+  // Build a tall shield building: solid tower with a narrower setback near the
+  // top for silhouette variation, rooted to the terrain.
+  placeBuilding(cx: number, cz: number, w: number, d: number, h: number, side: number): BuildingInfo {
+    const cell = side === 0 ? BLD_A : BLD_B
+    const hw = Math.floor(w / 2)
+    const hd = Math.floor(d / 2)
+    let baseY = 0
+    for (let x = cx - hw; x <= cx + hw; x++) {
+      for (let z = cz - hd; z <= cz + hd; z++) baseY = Math.max(baseY, this.surfaceY(x, z))
+    }
+    baseY += 1
+    const setback = h - Math.floor(h * 0.32) // where the tower narrows
+    const put = (x: number, y: number, z: number) => {
+      if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
+    }
+    let origCount = 0
+    for (let dy = 0; dy < h; dy++) {
+      const narrow = dy >= setback ? 1 : 0
+      for (let dx = -hw + narrow; dx <= hw - narrow; dx++) {
+        for (let dz = -hd + narrow; dz <= hd - narrow; dz++) {
+          put(cx + dx, baseY + dy, cz + dz)
+          origCount++
+        }
+      }
+    }
+    // Fill any gap down to the terrain so it doesn't float over a slope.
+    for (let dx = -hw; dx <= hw; dx++) {
+      for (let dz = -hd; dz <= hd; dz++) {
+        let fy = baseY - 1
+        while (fy >= 0 && this.cellAt(cx + dx, fy, cz + dz) === EMPTY) {
+          put(cx + dx, fy, cz + dz)
+          fy--
+        }
+      }
+    }
+    // Snapshot just this building's footprint volume (same-side buildings share
+    // a cell type, so we scan this building's own column range, not the whole grid).
+    const voxels: number[] = []
+    for (let dy = -6; dy < h + 2; dy++) {
+      const y = baseY + dy
+      if (y < 0 || y >= GY) continue
+      for (let dx = -hw; dx <= hw; dx++) {
+        for (let dz = -hd; dz <= hd; dz++) {
+          const i = this.idx(cx + dx, y, cz + dz)
+          if (this.grid[i] === cell) voxels.push(i)
+        }
+      }
+    }
+    const b: BuildingInfo = { cell, side, cx, cz, baseY, w, d, h, origCount: voxels.length, voxels }
+    this.buildings.push(b)
+    this.dirty = true
+    return b
+  }
+
+  // Fraction of a building still standing (0..1).
+  buildingIntegrity(b: BuildingInfo): number {
+    let count = 0
+    for (const i of b.voxels) if (this.grid[i] === b.cell) count++
+    return Math.min(1, count / Math.max(1, b.origCount))
+  }
+
+  // Repair a building from its snapshot (avatars will drive this in M4).
+  repairBuilding(b: BuildingInfo, budget: number): number {
+    let restored = 0
+    for (const i of b.voxels) {
+      if (restored >= budget) break
+      if (this.grid[i] !== EMPTY) continue
+      this.grid[i] = b.cell
       restored++
     }
     if (restored) this.dirty = true
@@ -842,6 +960,14 @@ export class World {
             // Player castle: light red.
             const v = 0.92 + h * 0.05
             col.setRGB(Math.min(1, v + 0.06), v * 0.86, v * 0.82)
+          } else if (c === BLD_A) {
+            // Player building: tall, dark red.
+            const v = 0.34 + 0.16 * (y / 40) + h * 0.06
+            col.setRGB(v + 0.14, v * 0.5, v * 0.52)
+          } else if (c === BLD_B) {
+            // Enemy building: tall, dark blue.
+            const v = 0.32 + 0.16 * (y / 40) + h * 0.06
+            col.setRGB(v * 0.5, v * 0.58, v + 0.16)
           } else {
             // Enemy castle: light blue.
             const v = 0.92 + h * 0.05

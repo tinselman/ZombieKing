@@ -213,7 +213,7 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'night' | 'manage' | 'aiManage'
+type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'night' | 'manage' | 'aiManage' | 'build'
 
 // Match economy: a match is best-of-ROUNDS; damage earns cash each turn.
 const ROUNDS = 5
@@ -1724,7 +1724,13 @@ function updateCamera(dt: number): void {
   const desiredLook = new THREE.Vector3()
   let k = 3.5
 
-  if (phase === 'night') {
+  if (phase === 'build') {
+    // Elevated angled view over your half, following the ghost so you can see
+    // where it will sit (the "above view" reward on your first building).
+    desiredPos.set(build.cx - 26, 62, build.cz + 30)
+    desiredLook.set(build.cx + 4, 6, build.cz)
+    k = 3
+  } else if (phase === 'night') {
     const act = walker
     const dir = new THREE.Vector3(
       Math.cos(act.yaw) * Math.cos(act.pitch),
@@ -2027,13 +2033,137 @@ function openManage(): void {
       cash: money[0],
       repairCost: repairCost(),
       integrity: world.integrity(0),
+      buildCost: buildingCost(),
     },
     manageAction
   )
 }
 
-function manageAction(a: 'fire' | 'repair' | 'buy'): void {
+// ---------------------------------------------------------------- buildings (M3)
+
+const BUILD_BASE_COST = 700 // escalates with each building you own
+function buildingCost(): number {
+  const owned = world.buildings.filter(b => b.side === 0).length
+  return BUILD_BASE_COST + owned * 300
+}
+
+let overheadUnlocked = false // set true after your first building — the "city view" reward
+const ghost = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshBasicMaterial({ color: 0x2ec26a, transparent: true, opacity: 0.4, depthWrite: false })
+)
+ghost.visible = false
+scene.add(ghost)
+const build = { cx: 0, cz: 0, w: 7, d: 6, h: 16 }
+
+function enterBuildMode(): void {
+  phase = 'build'
+  // Roll a building silhouette with variation.
+  build.w = 5 + Math.floor(Math.random() * 5) // 5..9
+  build.d = 5 + Math.floor(Math.random() * 4) // 5..8
+  build.h = 12 + Math.floor(Math.random() * 12) // 12..23
+  // Start it at a valid spot near your main tower (search outward toward the
+  // enemy for clear ground; near an existing building if you have one).
+  const anchor = world.buildings.filter(b => b.side === 0).slice(-1)[0]
+  const ax = anchor ? anchor.cx : world.forts[0].towers[0].cx
+  const az = anchor ? anchor.cz : world.forts[0].towers[0].cz
+  build.cx = Math.min(GX / 2 - 4, ax + 8)
+  build.cz = az
+  for (let r = 4; r <= 28; r += 2) {
+    let found = false
+    for (const [dx, dz] of [[r, 0], [r, -r], [r, r], [0, -r], [0, r]]) {
+      const cx = Math.min(GX / 2 - 4, ax + dx)
+      const cz = Math.max(4, Math.min(GZ - 4, az + dz))
+      if (cx > GX / 2 - 3) continue
+      if (world.canPlaceBuilding(cx, cz, build.w, build.d)) {
+        build.cx = cx
+        build.cz = cz
+        found = true
+        break
+      }
+    }
+    if (found) break
+  }
+  hud.setBuildHint(true)
+  hud.banner('BUILD', 'move with arrows · Enter to place · Esc to cancel')
+}
+
+function cancelBuild(): void {
+  ghost.visible = false
+  hud.setBuildHint(false)
+  openManage()
+}
+
+// Player's build territory: their own half.
+function buildValid(): boolean {
+  if (build.cx > GX / 2 - 3) return false
+  if (!world.canPlaceBuilding(build.cx, build.cz, build.w, build.d)) return false
+  // 2nd+ building must sit within 10 voxels of an existing one (network seed).
+  const mine = world.buildings.filter(b => b.side === 0)
+  if (mine.length > 0) {
+    const near = mine.some(b => Math.hypot(b.cx - build.cx, b.cz - build.cz) <= 10 + Math.max(b.w, build.w) / 2)
+    if (!near) return false
+  }
+  return true
+}
+
+function placeGhostBuilding(): void {
+  if (!buildValid()) {
+    hud.msg('can’t build here')
+    return
+  }
+  const cost = buildingCost()
+  if (money[0] < cost) {
+    hud.msg('not enough cash')
+    return
+  }
+  money[0] -= cost
+  world.placeBuilding(build.cx, build.cz, build.w, build.d, build.h, 0)
+  world.rebuild()
+  ghost.visible = false
+  hud.setBuildHint(false)
+  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  const first = !overheadUnlocked
+  if (first) {
+    overheadUnlocked = true
+    hud.banner('CITY VIEW UNLOCKED', 'your first building rises — behold the field')
+  } else {
+    hud.banner('BUILDING RAISED', `–$${cost.toLocaleString()}`)
+  }
+  endPlayerManage()
+}
+
+function updateBuild(dt: number): void {
+  if (phase !== 'build') return
+  const rate = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 6 : 16) * dt
+  // Arrows slide the footprint: up/down = toward/away from the enemy (x),
+  // left/right = across (z).
+  if (keys.has('ArrowUp')) build.cx += rate
+  if (keys.has('ArrowDown')) build.cx -= rate
+  if (keys.has('ArrowLeft')) build.cz -= rate
+  if (keys.has('ArrowRight')) build.cz += rate
+  build.cx = Math.max(6, Math.min(GX / 2 - 3, build.cx))
+  build.cz = Math.max(4, Math.min(GZ - 4, build.cz))
+  const gy = world.surfaceY(Math.round(build.cx), Math.round(build.cz))
+  ghost.scale.set(build.w, build.h, build.d)
+  ghost.position.set(build.cx, gy + build.h / 2, build.cz)
+  const ok = buildValid() && money[0] >= buildingCost()
+  ;(ghost.material as THREE.MeshBasicMaterial).color.setHex(ok ? 0x2ec26a : 0xd0453a)
+  ghost.visible = true
+}
+
+function manageAction(a: 'fire' | 'repair' | 'buy' | 'build'): void {
   if (phase !== 'manage') return
+  if (a === 'build') {
+    const cost = buildingCost()
+    if (money[0] < cost) {
+      hud.msg(`a building costs $${cost.toLocaleString()} — not enough cash`)
+      return
+    }
+    hud.hideManage()
+    enterBuildMode()
+    return
+  }
   if (a === 'fire') {
     hud.hideManage()
     phase = 'aim'
@@ -2482,6 +2612,16 @@ window.addEventListener('keydown', e => {
     if (e.code === 'KeyF') manageAction('fire')
     else if (e.code === 'KeyR') manageAction('repair')
     else if (e.code === 'KeyB') manageAction('buy')
+    else if (e.code === 'KeyC') manageAction('build')
+  }
+  // Build mode: Enter/Space places, Escape cancels.
+  if (phase === 'build' && !e.repeat) {
+    if (e.code === 'Enter' || e.code === 'Space') {
+      e.preventDefault()
+      placeGhostBuilding()
+    } else if (e.code === 'Escape') {
+      cancelBuild()
+    }
   }
   if (phase === 'night' && (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' || e.code === 'KeyD')) {
     hud.setNightHint(false)
@@ -2562,6 +2702,7 @@ function tick(now: number): void {
   last = now
 
   updatePlayerAim(dt)
+  updateBuild(dt)
   updateAi(dt)
   // Enemy spent its turn repairing — brief pause, then back to you.
   if (phase === 'aiManage') {
