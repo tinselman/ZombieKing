@@ -160,42 +160,52 @@ export class Village {
       ;[pastels[i], pastels[p]] = [pastels[p], pastels[i]]
     }
 
-    // Twelve buildings, three per side, doors inward. On every side two of the
-    // three stand ADJACENT — sharing a wall with a connecting doorway carved
-    // through it, board-style. Some are two stories with stairs.
+    // Twelve buildings, board-style: one anchoring each CORNER of the ring,
+    // plus an adjacent pair (shared wall, connecting doorway) mid-way along
+    // every side. Corners filled, lanes tight, doors inward.
     const inset = 7
     let id = 0
+    const spec = () => ({
+      w: 7 + Math.floor(rand() * 2),
+      d: 6 + Math.floor(rand() * 2),
+      h: 4 + Math.floor(rand() * 2),
+      twoStory: rand() < 0.45,
+    })
+    // Corner buildings — the door faces inward along one of the two axes.
+    const cornersDef = [
+      { x: inset + 1, z: inset, angs: [Math.PI, -Math.PI / 2] }, // NW: door east or south
+      { x: this.sx - inset - 1, z: inset, angs: [0, -Math.PI / 2] }, // NE: door west or south
+      { x: inset + 1, z: this.sz - inset, angs: [Math.PI, Math.PI / 2] }, // SW: door east or north
+      { x: this.sx - inset - 1, z: this.sz - inset, angs: [0, Math.PI / 2] }, // SE: door west or north
+    ]
+    for (const c of cornersDef) {
+      const s = spec()
+      this.buildHouse(id, names[id], paints[id], pastels[id], Math.round(c.x), Math.round(c.z), s.w, s.d, s.h, c.angs[Math.floor(rand() * 2)], s.twoStory, rand)
+      id++
+    }
+    // Mid-side adjacent pairs.
     for (let side = 0; side < 4; side++) {
-      // Row geometry: north/south rows run along x, west/east columns along z.
       const horizontal = side < 2
       const rowLen = horizontal ? this.sx : this.sz
       const fixed = side === 0 ? inset : side === 1 ? this.sz - inset : side === 2 ? inset : this.sx - inset
       const ang = side === 0 ? -Math.PI / 2 : side === 1 ? Math.PI / 2 : side === 2 ? Math.PI : 0
-      // Three buildings: one standalone, then an adjacent pair.
-      const specs = [0, 1, 2].map(() => ({
-        w: 7 + Math.floor(rand() * 2),
-        d: 6 + Math.floor(rand() * 2),
-        h: 4 + Math.floor(rand() * 2),
-        twoStory: rand() < 0.45,
-      }))
-      // Along-the-row half sizes.
+      const s1 = spec()
+      const s2 = spec()
       const halfAlong = (s: { w: number; d: number }) => (horizontal ? s.w : s.d) / 2
-      const aC = Math.round(rowLen * 0.2 + (rand() - 0.5) * 2)
-      const bC = Math.round(rowLen * 0.52 + halfAlong(specs[1]))
-      const cC = Math.round(bC + halfAlong(specs[1]) + halfAlong(specs[2])) // shares B's wall
-      const centers = [aC, bC, cC]
+      const bC = Math.round(rowLen * 0.5 - halfAlong(s1) + (rand() - 0.5) * 2)
+      const cC = Math.round(bC + halfAlong(s1) + halfAlong(s2)) // shares the wall
       const ids: number[] = []
-      for (let k = 0; k < 3; k++) {
-        const along = Math.max(5, Math.min(rowLen - 5, centers[k]))
+      for (const [s, along] of [
+        [s1, bC],
+        [s2, cC],
+      ] as const) {
         const bx = horizontal ? along : fixed
         const bz = horizontal ? fixed : along
-        this.buildHouse(id, names[id], paints[id], pastels[id], bx, bz, specs[k].w, specs[k].d, specs[k].h, ang, specs[k].twoStory, rand)
+        this.buildHouse(id, names[id], paints[id], pastels[id], bx, bz, s.w, s.d, s.h, ang, s.twoStory, rand)
         ids.push(id)
         id++
       }
-      // Carve the connecting doorway between the adjacent pair (B ↔ C), and an
-      // upper escape door onto the neighbor's roof when heights allow.
-      this.connectPair(ids[1], ids[2], horizontal)
+      this.connectPair(ids[0], ids[1], horizontal)
     }
 
     this.rebuild()

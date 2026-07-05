@@ -1006,10 +1006,21 @@ function enterNight(): void {
   worldView = false
   hud.setWorldView(false)
   hud.banner('SUNSET', 'night falls on the village')
-  // START positions: you at the west gate, the enemy at the east gate,
-  // and the King rises from his cemetery.
-  placeNightActor(walker, village.ox + 1, village.oz + village.sz / 2, 0)
-  placeNightActor(foe, village.ox + village.sx - 1, village.oz + village.sz / 2, Math.PI)
+  // START positions: each player tucked BEHIND a building on their own side
+  // (the house screens them from the cemetery), the King rising at its center.
+  const westB = village.buildings.reduce((a, b) => (b.x0 < a.x0 ? b : a))
+  const eastB = village.buildings.reduce((a, b) => (b.x1 > a.x1 ? b : a))
+  const tuck = (a: NightActor, bx: number, bz: number, yaw: number) => {
+    let x = bx
+    let z = bz
+    for (let i = 0; i < 14 && !hopWalkable(Math.round(x), Math.round(z), Math.round(x), Math.round(z), village.baseY + 0.5); i++) {
+      x = bx + (Math.random() - 0.5) * 4
+      z = bz + (Math.random() - 0.5) * 6
+    }
+    placeNightActor(a, x, z, yaw)
+  }
+  tuck(walker, westB.x0 - 1.6, (westB.z0 + westB.z1) / 2, 0)
+  tuck(foe, eastB.x1 + 1.6, (eastB.z0 + eastB.z1) / 2, Math.PI)
   placeNightActor(king, village.ox + village.sx / 2, village.oz + village.sz / 2, 0)
   nightCashGain = 0
   nightItemsGain.length = 0
