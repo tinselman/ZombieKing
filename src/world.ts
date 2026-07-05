@@ -322,16 +322,6 @@ export class World {
             h = f.pad * (1 - t) + h * t
           }
         }
-        // The village island: a flat plateau dead center, ringed by open water
-        // (applied last so it always wins over mountains, rivers and pads).
-        const ir = Math.hypot((x - GX / 2) / 32, (z - GZ / 2) / 26)
-        if (ir < 1) {
-          const beach = smoothstep(Math.min(1, Math.max(0, (ir - 0.88) / 0.12)))
-          h = (waterY + 2) * (1 - beach) + (waterY + 0.6) * beach
-        } else if (ir < 1.3) {
-          const t = smoothstep((ir - 1) / 0.3)
-          h = (waterY - 3.5) * (1 - t) + h * t
-        }
         const hi = Math.max(2, Math.min(GY - 26, Math.round(h)))
         for (let y = 0; y <= hi; y++) this.grid[this.idx(x, y, z)] = TERRAIN
         // Basins and river cuts below the water table fill with water.

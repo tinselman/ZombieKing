@@ -1271,41 +1271,9 @@ function exitNight(): void {
   hud.banner('DAWN', 'back to your cannon')
 }
 
-function updateCycle(dt: number): void {
-  const combat =
-    phase === 'aim' || phase === 'charge' || phase === 'fly' || phase === 'resolve' || phase === 'aiThink' || phase === 'aiAim'
-  if (cycleMode === 'day') {
-    if (combat) {
-      dayT += dt
-      // Sunset waits for a quiet moment — never mid-flight or mid-AI-turn.
-      if (dayT >= DAY_LEN && phase === 'aim') enterNight()
-    }
-  } else if (cycleMode === 'sunset') {
-    nightBlend = Math.min(1, nightBlend + dt / TRANS_LEN)
-    applyLighting()
-    if (nightBlend >= 1) cycleMode = 'night'
-  } else if (cycleMode === 'night') {
-    nightRound += dt // repurposed as elapsed night seconds
-    if (nightRound >= NIGHT_LEN) {
-      cycleMode = 'dawn'
-      hud.setBurst(false)
-      hud.banner('DAWN BREAKS', 'the night is over')
-    }
-  } else {
-    nightBlend = Math.max(0, nightBlend - dt / TRANS_LEN)
-    applyLighting()
-    if (nightBlend <= 0) exitNight()
-  }
-  const frac =
-    cycleMode === 'day'
-      ? Math.min(1, dayT / DAY_LEN)
-      : cycleMode === 'night'
-        ? Math.min(1, nightRound / NIGHT_LEN)
-        : cycleMode === 'sunset'
-          ? nightBlend
-          : 1 - nightBlend
-  hud.setTime(cycleMode, frac)
-}
+// City redesign: the day/night cycle and the whole village night phase are
+// retired. It's a continuous artillery + city-building match in daylight.
+function updateCycle(_dt: number): void {}
 
 // ---------------------------------------------------------------- projectiles
 
@@ -2210,8 +2178,6 @@ function lootArsenal(winner: number, loser: number): void {
 // the armory adds it to the already-visible terrain.
 function rebuildRoundWorld(): void {
   world.generate(roundSeed, forti)
-  // The village island sits dead center; layout + identities reshuffle per round.
-  village.generate(GX / 2 - village.sx / 2, GZ / 2 - village.sz / 2, world.waterY + 2, roundSeed)
   for (let s = 0; s < 2; s++) {
     const st = sides[s]
     const seat = world.cannonSeat(s)
@@ -2326,9 +2292,8 @@ function refreshShop(): void {
     buyFort,
     () => {
       hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
-      // Every round opens at night.
-      hud.banner(`ROUND ${round}`, 'night falls')
-      enterNight()
+      hud.banner(`ROUND ${round}`, 'take the field')
+      startTurn(0)
     }
   )
 }
@@ -2364,12 +2329,8 @@ function buyFort(index: number): void {
 function nextRound(): void {
   round++
   setupRoundWorld()
-  if (round === 1) {
-    // The match opens at night: nothing to spend, everything to find.
-    enterNight()
-  } else {
-    openShop()
-  }
+  if (round === 1) startTurn(0)
+  else openShop()
 }
 
 function fullReset(): void {
@@ -2553,8 +2514,6 @@ function tick(now: number): void {
     m.color.setHex(readying ? 0xd5473a : 0x8a929b)
   }
 
-  updateCycle(dt)
-  updateNight(dt)
   updateArrows(dt)
   updateHint()
   updateCamera(dt)

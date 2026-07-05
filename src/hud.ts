@@ -60,7 +60,7 @@ const CSS = `
 #sc-shop .srow button { font-size: 12px; font-weight: 700; padding: 4px 0; border-radius: 6px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shop .srow button:disabled { opacity: 0.25; cursor: default; }
 #sc-shop .slabel { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin: 12px 0 2px; }
-#sc-time { position: fixed; left: 16px; bottom: 240px; box-sizing: border-box; padding: 7px 12px 8px; background: rgba(255,255,255,0.78); backdrop-filter: blur(6px); border: 1px solid #d8dde3; border-radius: 10px; box-shadow: 0 2px 10px rgba(40,50,60,0.08); pointer-events: none; }
+#sc-time { display: none; position: fixed; left: 16px; bottom: 240px; box-sizing: border-box; padding: 7px 12px 8px; background: rgba(255,255,255,0.78); backdrop-filter: blur(6px); border: 1px solid #d8dde3; border-radius: 10px; box-shadow: 0 2px 10px rgba(40,50,60,0.08); pointer-events: none; }
 #sc-time .tlabel { display: flex; justify-content: space-between; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin-bottom: 4px; }
 #sc-timeTrack { height: 8px; background: #e8ebef; border-radius: 4px; overflow: hidden; }
 #sc-timeFill { height: 100%; width: 0%; border-radius: 4px; background: #e8b84d; }
