@@ -213,13 +213,21 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'night'
+type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'night' | 'manage' | 'aiManage'
 
-// Match economy: a match is best-of-ROUNDS; damage earns cash, spent in the armory.
+// Match economy: a match is best-of-ROUNDS; damage earns cash each turn.
 const ROUNDS = 5
-const START_CASH = 0 // wealth comes from the night scavenge
+const START_CASH = 500 // a small seed; the rest is earned by bombarding the enemy
 const WIN_BONUS = 2500
 const DMG_PAY = 4000 // pay for demolishing 100% of the enemy fort
+// City redesign — per-turn income: a base stipend plus pay scaled by the damage
+// your shot dealt to the enemy fort this turn.
+const TURN_STIPEND = 150
+const TURN_DMG_PAY = 5000 // per full enemy-fort integrity destroyed in one turn
+// Castle repair: full restore priced by how damaged you are.
+const REPAIR_FULL_COST = 1400
+let preShotFoeIntegrity = 1 // enemy fort integrity captured when a shell is fired
+let preShotYouIntegrity = 1
 
 let phase: Phase = 'aim'
 let turn = 0
@@ -1761,7 +1769,7 @@ function updateCamera(dt: number): void {
       desiredLook.copy(head).addScaledVector(dir, 8)
       k = 18
     }
-  } else if (phase === 'aim' || phase === 'charge') {
+  } else if (phase === 'aim' || phase === 'charge' || phase === 'manage') {
     if (worldView) {
       desiredPos.set(GX / 2 - 115, 85, GZ / 2 + 70)
       desiredLook.set(GX / 2 + 8, 6, GZ / 2)
@@ -1956,6 +1964,9 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
     clearLastTrails()
   }
   applyCannonPose(side)
+  // Snapshot both forts so the resolve can pay the shooter for the damage dealt.
+  preShotFoeIntegrity = world.integrity(1)
+  preShotYouIntegrity = world.integrity(0)
   const muzzle = muzzleOf(side)
   sfx.shot()
   spawnFlash(muzzle, 14, 0xffe0b0)
@@ -1978,15 +1989,87 @@ function startTurn(s: number): void {
       st.wsel = 0 // out of the fancy stuff — back to missiles
       updateWeaponHud()
     }
-    phase = 'aim'
-    hud.banner('YOUR TURN', 'wind has shifted')
+    // Manage OR fire: open the action menu; the player picks one action.
+    phase = 'manage'
+    openManage()
+    hud.banner('YOUR TURN', 'manage or fire')
     hud.setPower(null, shotThisRound ? lastPlayerPower : null)
   } else {
-    phase = 'aiThink'
-    aiT = 0
-    aiPlanned = null
-    hud.banner('ENEMY TURN')
+    // Enemy also manages OR fires: repair when battered and flush, else bombard.
+    const rc = Math.round((1 - world.integrity(1)) * REPAIR_FULL_COST)
+    if (world.integrity(1) < 0.6 && money[1] >= rc && rc > 0 && Math.random() < 0.5) {
+      money[1] -= rc
+      world.repairFort(1, 100000)
+      world.rebuild()
+      hud.setIntegrity(world.integrity(0), world.integrity(1))
+      hud.banner('ENEMY TURN', 'the enemy repairs its castle')
+      phase = 'aiManage'
+      aiManageT = 1.3
+    } else {
+      phase = 'aiThink'
+      aiT = 0
+      aiPlanned = null
+      hud.banner('ENEMY TURN')
+    }
   }
+}
+let aiManageT = 0
+
+// The player's turn is one action: FIRE, REPAIR the castle, or BUY weapons.
+function repairCost(): number {
+  return Math.round((1 - world.integrity(0)) * REPAIR_FULL_COST)
+}
+
+function openManage(): void {
+  phase = 'manage'
+  hud.showManage(
+    {
+      cash: money[0],
+      repairCost: repairCost(),
+      integrity: world.integrity(0),
+    },
+    manageAction
+  )
+}
+
+function manageAction(a: 'fire' | 'repair' | 'buy'): void {
+  if (phase !== 'manage') return
+  if (a === 'fire') {
+    hud.hideManage()
+    phase = 'aim'
+    hud.banner('AIM', 'hold space to fire')
+    hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+  } else if (a === 'repair') {
+    const cost = repairCost()
+    if (cost <= 0) {
+      hud.msg('your castle is already at full strength')
+      return
+    }
+    if (money[0] < cost) {
+      hud.msg(`repair costs $${cost.toLocaleString()} — not enough cash`)
+      return
+    }
+    money[0] -= cost
+    const restored = world.repairFort(0, 100000)
+    world.rebuild()
+    hud.setIntegrity(world.integrity(0), world.integrity(1))
+    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    hud.hideManage()
+    hud.banner('CASTLE REPAIRED', `+${restored} blocks · –$${cost.toLocaleString()}`)
+    endPlayerManage()
+  } else {
+    // Buy: reuse the armory overlay; closing it (DONE) ends the turn.
+    hud.hideManage()
+    perTurnBuy = true
+    phase = 'shop'
+    refreshShop()
+  }
+}
+
+// Spending a management action ends the player's turn — the enemy goes next.
+let perTurnBuy = false
+function endPlayerManage(): void {
+  startTurn(1)
 }
 
 function aiPickWeapon(): WeaponDef {
@@ -2107,6 +2190,20 @@ function finishResolve(): void {
   hud.setIntegrity(iYou, iFoe)
   const youDead = iYou < COLLAPSE_AT
   const foeDead = iFoe < COLLAPSE_AT
+
+  // Per-turn income to whoever just fired: a base stipend plus pay scaled by the
+  // integrity they knocked off the ENEMY fort this turn. (Skipped when the shot
+  // ends the round — the collapse payout below handles that.)
+  if (!youDead && !foeDead) {
+    const shooter = turn
+    const dmg = shooter === 0 ? Math.max(0, preShotFoeIntegrity - iFoe) : Math.max(0, preShotYouIntegrity - iYou)
+    const income = TURN_STIPEND + Math.round(dmg * TURN_DMG_PAY)
+    money[shooter] += income
+    if (shooter === 0) {
+      hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+      hud.banner(`+$${income.toLocaleString()}`, dmg > 0.001 ? `${Math.round(dmg * 100)}% damage dealt` : 'no damage — base pay')
+    }
+  }
   if (youDead || foeDead) {
     // Payout scales with damage dealt (measured before the collapse animation).
     const payYou = Math.round((1 - iFoe) * DMG_PAY) + (foeDead && !youDead ? WIN_BONUS : 0)
@@ -2287,13 +2384,19 @@ function shopForts() {
 function refreshShop(): void {
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
   hud.showShop(
-    { round, rounds: ROUNDS, scoreYou, scoreFoe, money: money[0], result: lastRoundResult, items: shopItems(), forts: shopForts() },
+    { round, rounds: ROUNDS, scoreYou, scoreFoe, money: money[0], result: perTurnBuy ? 'Spend, then take your turn.' : lastRoundResult, items: shopItems(), forts: shopForts() },
     buyWeapon,
     buyFort,
     () => {
       hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
-      hud.banner(`ROUND ${round}`, 'take the field')
-      startTurn(0)
+      if (perTurnBuy) {
+        // Per-turn buy: the purchase was this turn's action — enemy goes next.
+        perTurnBuy = false
+        endPlayerManage()
+      } else {
+        hud.banner(`ROUND ${round}`, 'take the field')
+        startTurn(0)
+      }
     }
   )
 }
@@ -2374,6 +2477,12 @@ window.addEventListener('keydown', e => {
     }
   }
   if (e.code === 'KeyV') toggleWorldView()
+  // Manage-or-fire shortcuts.
+  if (phase === 'manage' && !e.repeat) {
+    if (e.code === 'KeyF') manageAction('fire')
+    else if (e.code === 'KeyR') manageAction('repair')
+    else if (e.code === 'KeyB') manageAction('buy')
+  }
   if (phase === 'night' && (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' || e.code === 'KeyD')) {
     hud.setNightHint(false)
   }
@@ -2454,6 +2563,11 @@ function tick(now: number): void {
 
   updatePlayerAim(dt)
   updateAi(dt)
+  // Enemy spent its turn repairing — brief pause, then back to you.
+  if (phase === 'aiManage') {
+    aiManageT -= dt
+    if (aiManageT <= 0) startTurn(0)
+  }
 
   acc += dt
   while (acc >= STEP) {

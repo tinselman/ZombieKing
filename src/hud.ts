@@ -46,6 +46,13 @@ const CSS = `
 #sc-end p { font-size: 16px; color: #7a838d; margin: 0 0 28px; }
 #sc-end button { pointer-events: auto; font-size: 16px; font-weight: 700; letter-spacing: 0.08em; padding: 12px 36px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-end button:hover { background: #454c55; }
+#sc-manage { position: fixed; left: 50%; bottom: 210px; transform: translateX(-50%); display: none; gap: 10px; pointer-events: auto; }
+#sc-manage button { pointer-events: auto; font-family: inherit; font-size: 14px; font-weight: 700; letter-spacing: 0.06em; padding: 12px 20px; border-radius: 10px; border: 1px solid #2c3138; background: rgba(255,255,255,0.9); color: #2c3138; cursor: pointer; box-shadow: 0 2px 10px rgba(40,50,60,0.1); }
+#sc-manage button:hover { background: #2c3138; color: #fff; }
+#sc-manage button.fire { background: #2c3138; color: #fff; }
+#sc-manage button.fire:hover { background: #454c55; }
+#sc-manage button:disabled { opacity: 0.4; cursor: default; }
+#sc-manage button small { display: block; font-weight: 400; font-size: 11px; letter-spacing: 0.04em; opacity: 0.7; margin-top: 2px; }
 #sc-shop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(244,246,248,0.82); backdrop-filter: blur(8px); pointer-events: auto; }
 #sc-shop .box { background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 14px; padding: 24px 28px; width: 780px; max-height: 88vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(40,50,60,0.12); color: #2c3138; }
 #sc-shopList { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
@@ -100,6 +107,11 @@ export function createHud(
     <div id="sc-cross"></div>
     <div id="sc-nightHint">WASD = move &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; SPACE = flashlight on / off &nbsp;·&nbsp; don't shine it on the sleeping King &nbsp;·&nbsp; hide indoors</div>
     <div id="sc-burst">ZOMBIE BURST!</div>
+    <div id="sc-manage">
+      <button class="fire" data-a="fire">FIRE <small>[F] hold space</small></button>
+      <button data-a="repair">REPAIR <small class="rc">castle</small></button>
+      <button data-a="buy">BUY <small>[B] armory</small></button>
+    </div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
       <h2>THE ARMORY</h2>
@@ -146,6 +158,14 @@ export function createHud(
   worldBtn.addEventListener('click', () => handlers.onWorldToggle?.())
   const banner = q<HTMLElement>('#sc-banner')
   const msgEl = q<HTMLElement>('#sc-msg')
+  const manageEl = q<HTMLElement>('#sc-manage')
+  const manageRepairSmall = q<HTMLElement>('#sc-manage .rc')
+  const manageRepairBtn = q<HTMLButtonElement>('#sc-manage button[data-a="repair"]')
+  let onManage: (a: 'fire' | 'repair' | 'buy') => void = () => {}
+  manageEl.addEventListener('click', e => {
+    const btn = (e.target as HTMLElement).closest('button') as HTMLElement | null
+    if (btn && btn.dataset.a) onManage(btn.dataset.a as 'fire' | 'repair' | 'buy')
+  })
   const end = q<HTMLElement>('#sc-end')
   const endTitle = q<HTMLElement>('#sc-end h1')
   const endSub = q<HTMLElement>('#sc-end p')
@@ -336,6 +356,17 @@ export function createHud(
     },
     hideShop() {
       shop.style.display = 'none'
+    },
+    // The manage-or-fire action menu shown at the start of your turn.
+    showManage(data: { cash: number; repairCost: number; integrity: number }, on: (a: 'fire' | 'repair' | 'buy') => void) {
+      onManage = on
+      const full = data.repairCost <= 0
+      manageRepairSmall.textContent = full ? 'full strength' : `$${data.repairCost.toLocaleString()} · ${Math.round(data.integrity * 100)}%`
+      manageRepairBtn.disabled = full || data.cash < data.repairCost
+      manageEl.style.display = 'flex'
+    },
+    hideManage() {
+      manageEl.style.display = 'none'
     },
     showEnd(title: string, sub: string, onRematch: () => void) {
       endTitle.textContent = title

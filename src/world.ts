@@ -100,6 +100,7 @@ export type FortInfo = {
   cell: number
   towers: Tower[] // towers[0] is the main tower
   origCount: number
+  voxels: number[] // grid indices of every cell as originally built — for repair
 }
 
 // Purchasable, match-persistent structure upgrades per side.
@@ -333,11 +334,13 @@ export class World {
     for (let side = 0; side < 2; side++) {
       const cell = side === 0 ? FORT_A : FORT_B
       const sites = side === 0 ? sitesA : sitesB
-      const fort: FortInfo = { cell, towers: [], origCount: 0 }
+      const fort: FortInfo = { cell, towers: [], origCount: 0, voxels: [] }
       for (let ti = 0; ti < sites.length; ti++) {
         const extraH = ti === 0 ? forti[side].height : 0
         fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
       }
+      // Snapshot every cell of the finished fort so repair can restore it.
+      for (let i = 0; i < this.grid.length; i++) if (this.grid[i] === cell) fort.voxels.push(i)
       this.forts.push(fort)
     }
 
@@ -437,6 +440,23 @@ export class World {
       }
     }
     return Math.min(1, count / Math.max(1, f.origCount))
+  }
+
+  // Repair: re-add missing fort cells from the original snapshot wherever the
+  // space is now EMPTY (never overwrite terrain, water or debris). A magic
+  // reconstruction — restores the castle to full. Up to `budget` cells.
+  repairFort(side: number, budget: number): number {
+    const f = this.forts[side]
+    if (!f) return 0
+    let restored = 0
+    for (const i of f.voxels) {
+      if (restored >= budget) break
+      if (this.grid[i] !== EMPTY) continue
+      this.grid[i] = f.cell
+      restored++
+    }
+    if (restored) this.dirty = true
+    return restored
   }
 
   // Where the cannon rests: always on top of the castle — never down inside a
