@@ -557,6 +557,26 @@ export class World {
     return b
   }
 
+  // Nearest open-water cell to (x,z) within radius r — a waterway endpoint.
+  nearestWater(x: number, z: number, r = 60): { x: number; z: number } | null {
+    let best: { x: number; z: number } | null = null
+    let bd = r * r
+    for (let dz = -r; dz <= r; dz += 2) {
+      for (let dx = -r; dx <= r; dx += 2) {
+        const nx = Math.round(x + dx)
+        const nz = Math.round(z + dz)
+        if (nx < 0 || nx >= GX || nz < 0 || nz >= GZ) continue
+        if (!this.isWaterTop(nx, nz)) continue
+        const d = dx * dx + dz * dz
+        if (d < bd) {
+          bd = d
+          best = { x: nx, z: nz }
+        }
+      }
+    }
+    return best
+  }
+
   // Fraction of a building still standing (0..1).
   buildingIntegrity(b: BuildingInfo): number {
     let count = 0

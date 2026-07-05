@@ -112,6 +112,7 @@ export function createHud(
       <button class="fire" data-a="fire">FIRE <small>[F] hold space</small></button>
       <button data-a="repair">REPAIR <small class="rc">castle</small></button>
       <button data-a="build">BUILD <small class="bc">[C]</small></button>
+      <button data-a="road">ROAD <small class="gc">[G]</small></button>
       <button data-a="buy">BUY <small>[B] armory</small></button>
     </div>
     <div id="sc-buildHint">arrows = move &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; Enter = place &nbsp;·&nbsp; Esc = cancel</div>
@@ -166,8 +167,10 @@ export function createHud(
   const manageRepairBtn = q<HTMLButtonElement>('#sc-manage button[data-a="repair"]')
   const manageBuildSmall = q<HTMLElement>('#sc-manage .bc')
   const manageBuildBtn = q<HTMLButtonElement>('#sc-manage button[data-a="build"]')
+  const manageRoadSmall = q<HTMLElement>('#sc-manage .gc')
+  const manageRoadBtn = q<HTMLButtonElement>('#sc-manage button[data-a="road"]')
   const buildHintEl = q<HTMLElement>('#sc-buildHint')
-  let onManage: (a: 'fire' | 'repair' | 'buy' | 'build') => void = () => {}
+  let onManage: (a: 'fire' | 'repair' | 'buy' | 'build' | 'road') => void = () => {}
   manageEl.addEventListener('click', e => {
     const btn = (e.target as HTMLElement).closest('button') as HTMLElement | null
     if (btn && btn.dataset.a) onManage(btn.dataset.a as 'fire' | 'repair' | 'buy' | 'build')
@@ -365,15 +368,26 @@ export function createHud(
     },
     // The manage-or-fire action menu shown at the start of your turn.
     showManage(
-      data: { cash: number; repairCost: number; integrity: number; buildCost: number },
-      on: (a: 'fire' | 'repair' | 'buy' | 'build') => void
+      data: {
+        cash: number
+        repairCost: number
+        integrity: number
+        buildCost: number
+        buildOk: boolean
+        roadCost: number
+        roadOk: boolean
+        network: string
+      },
+      on: (a: 'fire' | 'repair' | 'buy' | 'build' | 'road') => void
     ) {
       onManage = on
       const full = data.repairCost <= 0
       manageRepairSmall.textContent = full ? 'full strength' : `$${data.repairCost.toLocaleString()} · ${Math.round(data.integrity * 100)}%`
       manageRepairBtn.disabled = full || data.cash < data.repairCost
       manageBuildSmall.textContent = `[C] $${data.buildCost.toLocaleString()}`
-      manageBuildBtn.disabled = data.cash < data.buildCost
+      manageBuildBtn.disabled = !data.buildOk || data.cash < data.buildCost
+      manageRoadSmall.textContent = data.network
+      manageRoadBtn.disabled = !data.roadOk || data.cash < data.roadCost
       manageEl.style.display = 'flex'
     },
     hideManage() {
