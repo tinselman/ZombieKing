@@ -258,7 +258,7 @@ function applyLighting(): void {
   village.setNightBlend(b)
   flashlight.visible = b > 0.55 && !walker.zombie
   lantern.visible = b > 0.55
-  kingGlow.intensity = b > 0.55 ? 90 : 0
+  kingGlow.intensity = KING_ENABLED && b > 0.55 ? 90 : 0
 }
 
 // Night is TURN-BASED: you → the enemy avatar → the Zombie King, round and
@@ -292,7 +292,15 @@ let kingWander: { x: number; z: number } | null = null
 let foeTarget: { x: number; z: number } | null = null
 let foeStepDir: { x: number; z: number } | null = null
 let foeRepathT = 0
-let bowCooldown = 0
+// The King sits this version out (his code sleeps behind this flag).
+const KING_ENABLED = false
+// Flashlight is the night's whole game: space toggles it. Off = hidden but
+// blind; on = you can see — and be seen. Catch the other player in your beam
+// and they freeze for 4 seconds and drop half their haul.
+let flashlightOn = true
+const stunImmune = new Map<NightActor, number>()
+let foeCashGain = 0
+const foeItemsGain: { id: string; qty: number }[] = []
 const look = { yaw: 0, pitch: 0 } // eased arrow-key view velocity
 let nightCashGain = 0
 const nightItemsGain: { id: string; qty: number }[] = []
@@ -451,21 +459,67 @@ function spawnLoot(): void {
   }
 }
 
-// Drawn like the cannon: hold space to charge, release to loose the arrow.
-let bowCharging = false
+// The enemy scavenges by its own flashlight — a visible beam you can track
+// (and sneak around) in the dark. No shadows on it, for performance.
+const foeLight = new THREE.SpotLight(0xfff1cf, 650, 40, 0.45, 0.55, 1.6)
+foeLight.visible = false
+scene.add(foeLight)
+scene.add(foeLight.target)
 
-function fireArrow(power: number): void {
-  const dir = new THREE.Vector3(
-    Math.cos(walker.yaw) * Math.cos(walker.pitch),
-    Math.sin(walker.pitch),
-    Math.sin(walker.yaw) * Math.cos(walker.pitch)
-  )
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 1.0), projMat)
-  mesh.position.set(walker.x, walker.y + 1.9, walker.z).addScaledVector(dir, 0.9)
-  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir)
-  scene.add(mesh)
-  arrows.push({ mesh, vel: dir.multiplyScalar(16 + 0.38 * power), life: 8, stuck: false })
-  sfx.tick()
+// Is `dst` caught in a beam shone from src's eye along `dir`? Tight cone,
+// limited reach, and walls block it.
+function inBeam(srcX: number, srcY: number, srcZ: number, dirX: number, dirY: number, dirZ: number, dst: NightActor): boolean {
+  const dx = dst.x - srcX
+  const dy = dst.y + 1 - srcY
+  const dz = dst.z - srcZ
+  const dist = Math.hypot(dx, dy, dz)
+  if (dist > 20 || dist < 0.5) return false
+  const dot = (dx * dirX + dy * dirY + dz * dirZ) / dist
+  if (dot < 0.94) return false // ~20° cone
+  return los(srcX, srcY, srcZ, dst.x, dst.y + 1, dst.z, 22)
+}
+
+// Caught in the light: 4 seconds frozen, half the night's haul spilled.
+function beamStun(victim: 'you' | 'foe'): void {
+  const a = actorOf(victim)
+  frozen.set(a, 4)
+  stunImmune.set(a, 9) // 4s stun + 5s grace before they can be caught again
+  sfx.boom(1.2)
+  if (victim === 'you') {
+    const dropCash = Math.floor(nightCashGain / 2)
+    if (dropCash > 0) {
+      money[0] -= dropCash
+      nightCashGain -= dropCash
+      dropLoot(Math.round(walker.x), Math.round(walker.z), 'cash', dropCash)
+    }
+    for (const it of nightItemsGain) {
+      const half = Math.floor(it.qty / 2)
+      if (half <= 0) continue
+      const have = sides[0].arsenal.get(it.id) ?? 0
+      sides[0].arsenal.set(it.id, Math.max(0, have - half))
+      it.qty -= half
+      dropLoot(Math.round(walker.x + (Math.random() - 0.5) * 3), Math.round(walker.z + (Math.random() - 0.5) * 3), 'weapon', half, it.id)
+    }
+    updateWeaponHud()
+    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    hud.banner('CAUGHT IN THE LIGHT', 'stunned — you dropped half your haul')
+  } else {
+    const dropCash = Math.floor(foeCashGain / 2)
+    if (dropCash > 0) {
+      money[1] -= dropCash
+      foeCashGain -= dropCash
+      dropLoot(Math.round(foe.x), Math.round(foe.z), 'cash', dropCash)
+    }
+    for (const it of foeItemsGain) {
+      const half = Math.floor(it.qty / 2)
+      if (half <= 0) continue
+      const have = sides[1].arsenal.get(it.id) ?? 0
+      sides[1].arsenal.set(it.id, Math.max(0, have - half))
+      it.qty -= half
+      dropLoot(Math.round(foe.x + (Math.random() - 0.5) * 3), Math.round(foe.z + (Math.random() - 0.5) * 3), 'weapon', half, it.id)
+    }
+    hud.msg('you caught the enemy in your beam — it dropped loot!')
+  }
 }
 
 function updateArrows(dt: number): void {
@@ -780,10 +834,13 @@ function senseActor(t: NightTag): void {
           hud.msg(`+${l.value} ${def.name}`)
         }
       } else if (t === 'foe' && !foe.zombie) {
-        if (l.kind === 'cash') money[1] += l.value
-        else {
+        if (l.kind === 'cash') {
+          money[1] += l.value
+          foeCashGain += l.value
+        } else {
           const def = WEAPONS.find(v => v.id === l.weaponId)!
           sides[1].arsenal.set(def.id, (sides[1].arsenal.get(def.id) ?? 0) + l.value)
+          foeItemsGain.push({ id: def.id, qty: l.value })
         }
         hud.msg('the enemy grabbed something')
       } else {
@@ -828,9 +885,9 @@ const fallVel = { you: { v: 0 }, foe: { v: 0 }, king: { v: 0 } }
 function updateNight(dt: number): void {
   if (phase !== 'night') return
 
-  bowCooldown = Math.max(0, bowCooldown - dt)
   for (const [a, t] of frozen) frozen.set(a, Math.max(0, t - dt))
   for (const [a, t] of tunnelCooldown) tunnelCooldown.set(a, Math.max(0, t - dt))
+  for (const [a, t] of stunImmune) stunImmune.set(a, Math.max(0, t - dt))
 
   // Arrow-key view: eased in and out ("slowing when starting and stopping").
   const yawT = (keys.has('ArrowRight') ? 1 : 0) - (keys.has('ArrowLeft') ? 1 : 0)
@@ -839,13 +896,6 @@ function updateNight(dt: number): void {
   look.pitch += (pitchT * 1.4 - look.pitch) * Math.min(1, dt * 5)
   walker.yaw += look.yaw * dt
   walker.pitch = THREE.MathUtils.clamp(walker.pitch + look.pitch * dt, -1.1, 0.75)
-  // Drawing the bow: the power meter runs exactly like the cannon's.
-  if (bowCharging) {
-    chargeT += dt
-    const cyc = (chargeT * 62) % 200
-    chargePower = cyc <= 100 ? cyc : 200 - cyc
-    hud.setPower(chargePower, null)
-  }
 
   // ---- you: smooth WASD walking, camera-relative
   if ((frozen.get(walker) ?? 0) <= 0 && cycleMode !== 'dawn') {
@@ -904,7 +954,10 @@ function updateNight(dt: number): void {
   // ---- the King: shambles at quarter speed — unless he SEES you. Then he
   // BURSTS: double human speed for 1.5s, rests 2s, bursts again. He cannot
   // climb stairs (nothing above ground level +1.5 for him).
-  const kingPrey = (!walker.zombie && canSee(king, walker) && 'you') || (!foe.zombie && canSee(king, foe) && 'foe') || null
+  // (Benched for now behind KING_ENABLED — his night will come again.)
+  const kingPrey = KING_ENABLED
+    ? (!walker.zombie && canSee(king, walker) && 'you') || (!foe.zombie && canSee(king, foe) && 'foe') || null
+    : null
   // Debounced: sight lines flicker as he charges past corners.
   if (kingPrey === 'you') kingSeenT = 0.7
   else kingSeenT = Math.max(0, kingSeenT - dt)
@@ -939,7 +992,7 @@ function updateNight(dt: number): void {
   } else if (Math.hypot(kingGoal.x - king.x, kingGoal.z - king.z) < 1.2 && !kingPrey) {
     kingLastSeen = null // reached where he last saw them; the trail is cold
   }
-  if (kingSpeed > 0 && kingGoal) {
+  if (KING_ENABLED && kingSpeed > 0 && kingGoal) {
     const step = kingPrey
       ? { dx: Math.sign(kingGoal.x - king.x), dz: Math.sign(kingGoal.z - king.z) } // direct rush
       : bfsStep(king, kingGoal)
@@ -950,9 +1003,31 @@ function updateNight(dt: number): void {
       king.yaw = king.face
     }
   }
-  actorGravity(king, dt, fallVel.king)
+  if (KING_ENABLED) actorGravity(king, dt, fallVel.king)
   checkCatches()
-  hud.setBurst(kingSeesYou && kingMood !== 'idle' && cycleMode === 'night')
+  hud.setBurst(KING_ENABLED && kingSeesYou && kingMood !== 'idle' && cycleMode === 'night')
+
+  // ---- flashlight duels: catch the other player in your cone and they
+  // freeze for 4 seconds, spilling half their haul at their feet.
+  const beamDir = new THREE.Vector3(
+    Math.cos(walker.yaw) * Math.cos(walker.pitch),
+    Math.sin(walker.pitch),
+    Math.sin(walker.yaw) * Math.cos(walker.pitch)
+  )
+  if (
+    flashlightOn && cycleMode === 'night' && !walker.zombie &&
+    (frozen.get(foe) ?? 0) <= 0 && (stunImmune.get(foe) ?? 0) <= 0 &&
+    inBeam(walker.x, walker.y + 1.9, walker.z, beamDir.x, beamDir.y, beamDir.z, foe)
+  ) {
+    beamStun('foe')
+  }
+  if (
+    cycleMode === 'night' && !foe.zombie && (frozen.get(foe) ?? 0) <= 0 &&
+    (frozen.get(walker) ?? 0) <= 0 && (stunImmune.get(walker) ?? 0) <= 0 &&
+    inBeam(foe.x, foe.y + 1.9, foe.z, Math.cos(foe.face), -0.05, Math.sin(foe.face), walker)
+  ) {
+    beamStun('you')
+  }
 
   // Drive bodies and lights.
   avatars[0].position.set(walker.x, walker.y + 1.5, walker.z)
@@ -967,17 +1042,17 @@ function updateNight(dt: number): void {
   zombGlowYou.intensity = walker.zombie && nightBlend > 0.5 ? 55 : 0
   zombGlowFoe.intensity = foe.zombie && nightBlend > 0.5 ? 55 : 0
 
-  // Your flashlight (zombies carry no light).
-  flashlight.visible = nightBlend > 0.55 && !walker.zombie
-  const dir = new THREE.Vector3(
-    Math.cos(walker.yaw) * Math.cos(walker.pitch),
-    Math.sin(walker.pitch),
-    Math.sin(walker.yaw) * Math.cos(walker.pitch)
-  )
-  flashlight.position.set(walker.x, walker.y + 1.9, walker.z).addScaledVector(dir, 0.6)
-  flashlight.target.position.copy(flashlight.position).addScaledVector(dir, 14)
+  // Your flashlight — space toggles it; off means hidden but blind.
+  flashlight.visible = nightBlend > 0.55 && !walker.zombie && flashlightOn
+  flashlight.position.set(walker.x, walker.y + 1.9, walker.z).addScaledVector(beamDir, 0.6)
+  flashlight.target.position.copy(flashlight.position).addScaledVector(beamDir, 14)
+  lantern.visible = nightBlend > 0.55 && flashlightOn
   lantern.position.set(walker.x, walker.y + 2.4, walker.z)
   lantern.color.setHex(walker.zombie ? 0x46e07a : 0xffe4b0)
+  // The enemy's beam, tracking its facing — watch for it in the dark.
+  foeLight.visible = nightBlend > 0.55 && !foe.zombie && (frozen.get(foe) ?? 0) <= 0
+  foeLight.position.set(foe.x + Math.cos(foe.face) * 0.6, foe.y + 1.9, foe.z + Math.sin(foe.face) * 0.6)
+  foeLight.target.position.set(foe.x + Math.cos(foe.face) * 14, foe.y + 1.2, foe.z + Math.sin(foe.face) * 14)
 
   // Loot: bob and spin (no light of their own — find them with the beam).
   lootT += dt
@@ -1021,10 +1096,14 @@ function enterNight(): void {
   }
   tuck(walker, westB.x0 - 1.6, (westB.z0 + westB.z1) / 2, 0)
   tuck(foe, eastB.x1 + 1.6, (eastB.z0 + eastB.z1) / 2, Math.PI)
-  placeNightActor(king, village.ox + village.sx / 2, village.oz + village.sz / 2, 0)
+  if (KING_ENABLED) placeNightActor(king, village.ox + village.sx / 2, village.oz + village.sz / 2, 0)
+  else placeNightActor(king, -500, -500, 0) // parked far offstage
   nightCashGain = 0
   nightItemsGain.length = 0
-  kingAvatar.visible = true
+  foeCashGain = 0
+  foeItemsGain.length = 0
+  flashlightOn = true
+  kingAvatar.visible = KING_ENABLED
   look.yaw = 0
   look.pitch = 0
   kingMood = 'idle'
@@ -1034,10 +1113,9 @@ function enterNight(): void {
   kingWander = null
   foeTarget = null
   foeStepDir = null
-  bowCharging = false
-  bowCooldown = 0
   frozen.clear()
   tunnelCooldown.clear()
+  stunImmune.clear()
   spawnLoot()
   spawnTunnels()
   hud.setNightHint(true)
@@ -1053,7 +1131,7 @@ function exitNight(): void {
   clearLoot()
   clearArrows()
   clearTunnels()
-  bowCharging = false
+  foeLight.visible = false
   hud.setNightHint(false)
   hud.setCross(false)
   hud.setNightTurn(null)
@@ -2183,14 +2261,10 @@ window.addEventListener('keydown', e => {
       chargeT = 0
       chargePower = 0
     }
-    // Night: drawing the bow works exactly like charging the cannon.
-    if (
-      phase === 'night' && cycleMode === 'night' &&
-      !walker.zombie && !bowCharging && bowCooldown <= 0 && !e.repeat
-    ) {
-      bowCharging = true
-      chargeT = 0
-      chargePower = 0
+    // Night: space flicks the flashlight on and off. Dark = hidden but blind.
+    if (phase === 'night' && !walker.zombie && !e.repeat) {
+      flashlightOn = !flashlightOn
+      sfx.tick()
     }
   }
   if (e.code === 'KeyV') toggleWorldView()
@@ -2212,13 +2286,6 @@ window.addEventListener('keyup', e => {
     lastPlayerPower = power
     const weapon = WEAPONS[sides[0].wsel]
     fireShot(0, weapon, power)
-  }
-  // Release the bowstring.
-  if (e.code === 'Space' && phase === 'night' && bowCharging) {
-    bowCharging = false
-    bowCooldown = 1
-    fireArrow(Math.max(8, chargePower))
-    hud.setPower(null, null)
   }
 })
 
@@ -2373,6 +2440,7 @@ declare global {
       newMatch: () => void
       sunset: () => void
       burstTest: () => void
+      stunTest: (who: 'you' | 'foe') => void
     }
   }
 }
@@ -2424,6 +2492,7 @@ window.__sv = {
     kingMood = 'rushing'
     kingMoodT = 60
   },
+  stunTest: (who: 'you' | 'foe') => beamStun(who),
   sunset: () => {
     dayT = DAY_LEN // testing: force the next quiet moment to trigger nightfall
   },
