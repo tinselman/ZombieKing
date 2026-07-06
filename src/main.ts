@@ -1728,10 +1728,14 @@ function updateCamera(dt: number): void {
   let k = 3.5
 
   if (phase === 'build' || phase === 'road' || phase === 'grow') {
-    // Elevated angled view over your half, following the ghost / road preview.
-    desiredPos.set(build.cx - 26, 62, build.cz + 30)
-    desiredLook.set(build.cx + 4, 6, build.cz)
-    k = 3
+    // Far-back isometric-style view framing your whole half of the board, centred
+    // on your fort's build area. The ghost / road preview moves within the frame.
+    const t = world.forts[0].towers[0]
+    const hx = Math.min(GX / 2 - 12, t.cx + 20)
+    const hz = t.cz
+    desiredPos.set(hx - 130, 140, hz + 130)
+    desiredLook.set(hx, 6, hz)
+    k = 2.4
   } else if (phase === 'king') {
     // Orbit the crumbling city as the King stomps it (whichever side was razed).
     const t = world.forts[kingFortSide].towers[0]
@@ -2091,6 +2095,25 @@ const ghost = new THREE.Mesh(
 )
 ghost.visible = false
 scene.add(ghost)
+
+// Hairline arrows on all four sides of the ghost — a hint that it can be slid
+// around with the arrow keys. outward = the direction each one points.
+const ghostArrowDirs = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+]
+const ghostArrows = new THREE.Group()
+for (const [dx, dz] of ghostArrowDirs) {
+  const a = new THREE.ArrowHelper(new THREE.Vector3(dx, 0, dz), new THREE.Vector3(), 6, 0x2c3138, 2.4, 1.5)
+  ;(a.line.material as THREE.LineBasicMaterial).transparent = true
+  ;(a.line.material as THREE.LineBasicMaterial).opacity = 0.85
+  ghostArrows.add(a)
+}
+ghostArrows.visible = false
+scene.add(ghostArrows)
+
 const build = { cx: 0, cz: 0, w: 7, d: 6, stories: 2, slot: 0 }
 
 // Victorian house types — one is announced each time you raise a building.
@@ -2138,6 +2161,7 @@ function enterBuildMode(): void {
 
 function cancelBuild(): void {
   ghost.visible = false
+  ghostArrows.visible = false
   hud.setBuildHint(false)
   openManage()
 }
@@ -2168,6 +2192,7 @@ function placeGhostBuilding(): void {
   }
   money[0] -= cost
   ghost.visible = false
+  ghostArrows.visible = false
   hud.setBuildHint(false)
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
   if (!overheadUnlocked) {
@@ -2229,6 +2254,17 @@ function updateBuild(dt: number): void {
   const ok = buildValid() && money[0] >= buildingCost()
   ;(ghost.material as THREE.MeshBasicMaterial).color.setHex(ok ? 0x2ec26a : 0xd0453a)
   ghost.visible = true
+  // Park a hairline arrow just off each face of the footprint, pointing outward.
+  const hw = build.w / 2 + 1.5
+  const hd = build.d / 2 + 1.5
+  const edges = [
+    [hw, 0],
+    [-hw, 0],
+    [0, hd],
+    [0, -hd],
+  ]
+  ghostArrows.children.forEach((a, i) => a.position.set(build.cx + edges[i][0], gy + 2, build.cz + edges[i][1]))
+  ghostArrows.visible = true
 }
 
 // ---------------------------------------------------------------- roads & network (M4)
