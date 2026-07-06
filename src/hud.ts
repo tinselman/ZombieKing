@@ -25,7 +25,7 @@ const CSS = `
 #sc-weapons .w.sel { background: #2c3138; color: #fff; font-weight: 600; }
 #sc-weapons .w.sel:hover { background: #2c3138; }
 #sc-weapons .w.empty { opacity: 0.35; cursor: default; }
-#sc-power { bottom: 16px; left: 50%; transform: translateX(-50%); width: 260px; text-align: center; }
+#sc-power { display: none; bottom: 16px; left: 50%; transform: translateX(-50%); width: 260px; text-align: center; }
 #sc-powerBar { position: relative; height: 14px; background: #e8ebef; border-radius: 7px; }
 #sc-powerBar > div.fill { height: 100%; width: 0%; background: linear-gradient(90deg, #7db4e8, #d5473a); border-radius: 7px; }
 #sc-powerMark { position: absolute; top: -3px; bottom: -3px; width: 3px; margin-left: -1px; background: #2c3138; border-radius: 2px; display: none; }
@@ -46,8 +46,8 @@ const CSS = `
 #sc-end p { font-size: 16px; color: #7a838d; margin: 0 0 28px; }
 #sc-end button { pointer-events: auto; font-size: 16px; font-weight: 700; letter-spacing: 0.08em; padding: 12px 36px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-end button:hover { background: #454c55; }
-#sc-manage { position: fixed; left: 50%; bottom: 210px; transform: translateX(-50%); display: none; gap: 10px; pointer-events: auto; }
-#sc-manage button { pointer-events: auto; font-family: inherit; font-size: 14px; font-weight: 700; letter-spacing: 0.06em; padding: 12px 20px; border-radius: 10px; border: 1px solid #2c3138; background: rgba(255,255,255,0.9); color: #2c3138; cursor: pointer; box-shadow: 0 2px 10px rgba(40,50,60,0.1); }
+#sc-manage { position: fixed; left: 16px; bottom: 200px; display: none; gap: 6px; pointer-events: auto; }
+#sc-manage button { pointer-events: auto; font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; padding: 8px 12px; border-radius: 9px; border: 1px solid #2c3138; background: rgba(255,255,255,0.9); color: #2c3138; cursor: pointer; box-shadow: 0 2px 10px rgba(40,50,60,0.1); text-align: center; }
 #sc-manage button:hover { background: #2c3138; color: #fff; }
 #sc-manage button.fire { background: #2c3138; color: #fff; }
 #sc-manage button.fire:hover { background: #454c55; }
@@ -149,6 +149,7 @@ export function createHud(
   const powerBar = q<HTMLElement>('#sc-powerBar > div.fill')
   const powerMark = q<HTMLElement>('#sc-powerMark')
   const powerNum = q<HTMLElement>('#sc-powerNum')
+  const powerPanel = q<HTMLElement>('#sc-power')
   const angles = q<HTMLElement>('#sc-angles')
   const sideEl = q<HTMLElement>('#sc-side')
   const worldBtn = q<HTMLButtonElement>('#sc-worldBtn')
@@ -388,10 +389,16 @@ export function createHud(
       manageBuildBtn.disabled = !data.buildOk || data.cash < data.buildCost
       manageRoadSmall.textContent = data.network
       manageRoadBtn.disabled = !data.roadOk || data.cash < data.roadCost
+      // Dock the row just above the weapon list on the left.
+      const wr = weaponsPanel.getBoundingClientRect()
+      manageEl.style.bottom = `${window.innerHeight - wr.top + 10}px`
       manageEl.style.display = 'flex'
     },
     hideManage() {
       manageEl.style.display = 'none'
+    },
+    setPowerVisible(v: boolean) {
+      powerPanel.style.display = v ? 'block' : 'none'
     },
     setBuildHint(show: boolean) {
       buildHintEl.style.display = show ? 'block' : 'none'

@@ -213,7 +213,7 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'night' | 'manage' | 'aiManage' | 'build' | 'road' | 'king'
+type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'night' | 'manage' | 'aiManage' | 'build' | 'road' | 'king' | 'grow'
 
 // Match economy: a match is best-of-ROUNDS; damage earns cash each turn.
 const ROUNDS = 5
@@ -1692,6 +1692,7 @@ let flyHold: THREE.Vector3 | null = null
 let shakeAmp = 0
 let endOrbit = 0
 let kingOrbit = 0
+let kingFortSide = 1 // which fort the King is razing (1 = enemy, 0 = you)
 // "World View": pulled-back angled vantage over the whole battlefield from the
 // player's side. You can still aim and fire from here; firing snaps back.
 let worldView = false
@@ -1725,14 +1726,14 @@ function updateCamera(dt: number): void {
   const desiredLook = new THREE.Vector3()
   let k = 3.5
 
-  if (phase === 'build' || phase === 'road') {
+  if (phase === 'build' || phase === 'road' || phase === 'grow') {
     // Elevated angled view over your half, following the ghost / road preview.
     desiredPos.set(build.cx - 26, 62, build.cz + 30)
     desiredLook.set(build.cx + 4, 6, build.cz)
     k = 3
   } else if (phase === 'king') {
-    // Orbit the enemy's crumbling city as the King stomps it.
-    const t = world.forts[1].towers[0]
+    // Orbit the crumbling city as the King stomps it (whichever side was razed).
+    const t = world.forts[kingFortSide].towers[0]
     kingOrbit += dt * 0.5
     desiredPos.set(t.cx + Math.cos(kingOrbit) * 46, 44, t.cz + Math.sin(kingOrbit) * 46)
     desiredLook.set(t.cx, 10, t.cz)
@@ -1989,6 +1990,7 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
   worldView = false
   hud.setWorldView(false)
   phase = 'fly'
+  hud.setPowerVisible(false)
   hud.setPower(null, shotThisRound ? lastPlayerPower : null)
 }
 
@@ -2002,15 +2004,25 @@ function startTurn(s: number): void {
       st.wsel = 0 // out of the fancy stuff — back to missiles
       updateWeaponHud()
     }
+    // Commerce: your road-linked city pays you at the start of each turn.
+    const cb = commerceBuildingCount(0)
+    if (cb >= 2) {
+      const inc = cb * 130
+      money[0] += inc
+      hud.msg(`commerce +$${inc.toLocaleString()} (${cb} linked buildings)`)
+    }
     // Manage OR fire: open the action menu; the player picks one action.
     phase = 'manage'
     openManage()
     hud.banner('YOUR TURN', 'manage or fire')
     hud.setPower(null, shotThisRound ? lastPlayerPower : null)
   } else {
-    // Enemy also manages OR fires: repair when battered and flush, else bombard.
+    // Enemy also manages OR fires (symmetric): commerce income, then repair when
+    // battered, else grow its city/roads, else bombard.
+    const fcb = commerceBuildingCount(1)
+    if (fcb >= 2) money[1] += fcb * 130
     const rc = Math.round((1 - world.integrity(1)) * REPAIR_FULL_COST)
-    if (world.integrity(1) < 0.6 && money[1] >= rc && rc > 0 && Math.random() < 0.5) {
+    if (world.integrity(1) < 0.55 && money[1] >= rc && rc > 0 && Math.random() < 0.45) {
       money[1] -= rc
       world.repairFort(1, 100000)
       world.rebuild()
@@ -2018,6 +2030,8 @@ function startTurn(s: number): void {
       hud.banner('ENEMY TURN', 'the enemy repairs its castle')
       phase = 'aiManage'
       aiManageT = 1.3
+    } else if (Math.random() < 0.5 && enemyEconomyTurn()) {
+      // Economy action taken — banner/phase already set (or the King is rising).
     } else {
       phase = 'aiThink'
       aiT = 0
@@ -2035,6 +2049,7 @@ function repairCost(): number {
 
 function openManage(): void {
   phase = 'manage'
+  hud.setPowerVisible(false)
   const nB = world.buildings.filter(b => b.side === 0).length
   const buildOk = nB < 2 || roads.length >= nB - 1 // linear gating
   const roadOk = nB >= 2
@@ -2058,8 +2073,8 @@ function openManage(): void {
 // ---------------------------------------------------------------- buildings (M3)
 
 const BUILD_BASE_COST = 700 // escalates with each building you own
-function buildingCost(): number {
-  const owned = world.buildings.filter(b => b.side === 0).length
+function buildingCost(side = 0): number {
+  const owned = world.buildings.filter(b => b.side === side).length
   return BUILD_BASE_COST + owned * 300
 }
 
@@ -2134,8 +2149,6 @@ function placeGhostBuilding(): void {
     return
   }
   money[0] -= cost
-  world.placeBuilding(build.cx, build.cz, build.w, build.d, build.h, 0)
-  world.rebuild()
   ghost.visible = false
   hud.setBuildHint(false)
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
@@ -2146,7 +2159,37 @@ function placeGhostBuilding(): void {
   } else {
     hud.banner('BUILDING RAISED', `–$${cost.toLocaleString()}`)
   }
-  endPlayerManage()
+  // Quick-grow-brick: raise the building layer by layer, then hand off the turn.
+  startGrow(Math.round(build.cx), Math.round(build.cz), build.w, build.d, build.h, 0, endPlayerManage)
+  phase = 'grow'
+}
+
+// Building growth animation — one brick-layer at a time.
+type GrowJob = { cx: number; cz: number; w: number; d: number; h: number; side: number; baseY: number; dy: number; t: number; done: () => void }
+let growJob: GrowJob | null = null
+
+function startGrow(cx: number, cz: number, w: number, d: number, h: number, side: number, done: () => void): void {
+  const baseY = world.buildingBaseYAt(cx, cz, w, d)
+  growJob = { cx, cz, w, d, h, side, baseY, dy: 0, t: 0, done }
+}
+
+function updateGrow(dt: number): void {
+  if (!growJob) return
+  growJob.t += dt
+  // ~2 layers per 0.05s → a fast rise.
+  while (growJob.t >= 0.03 && growJob.dy < growJob.h) {
+    growJob.t -= 0.03
+    world.writeBuildingLayer(growJob.cx, growJob.cz, growJob.w, growJob.d, growJob.h, growJob.side, growJob.baseY, growJob.dy)
+    growJob.dy++
+    sfx.tick()
+  }
+  world.rebuild()
+  if (growJob.dy >= growJob.h) {
+    world.registerBuilding(growJob.cx, growJob.cz, growJob.w, growJob.d, growJob.h, growJob.side, growJob.baseY)
+    const done = growJob.done
+    growJob = null
+    done()
+  }
 }
 
 function updateBuild(dt: number): void {
@@ -2174,7 +2217,7 @@ const ROAD_COST = 400
 // A road connects two network nodes: the castle, a building ('b<i>'), or a
 // waterway tile ('w<x>_<z>'). Roads let avatars walk between buildings and,
 // once the castle links to 7 buildings and a waterway, wake the King.
-type Road = { a: string; b: string; ax: number; az: number; bx: number; bz: number }
+type Road = { a: string; b: string; ax: number; az: number; bx: number; bz: number; side: number; path: { x: number; z: number; y: number }[] }
 const roads: Road[] = []
 let networkTriggered = false
 
@@ -2204,14 +2247,15 @@ function roadExists(a: string, b: string): boolean {
   return roads.some(r => (r.a === a && r.b === b) || (r.a === b && r.b === a))
 }
 
-// Everything reachable from the castle over roads.
-function castleComponent(): Set<string> {
+// Everything reachable from a side's castle over that side's roads.
+function castleComponent(side = 0): Set<string> {
   const adj = new Map<string, string[]>()
   const link = (u: string, v: string) => {
     if (!adj.has(u)) adj.set(u, [])
     adj.get(u)!.push(v)
   }
   for (const r of roads) {
+    if (r.side !== side) continue
     link(r.a, r.b)
     link(r.b, r.a)
   }
@@ -2227,75 +2271,53 @@ function castleComponent(): Set<string> {
   return seen
 }
 
-function connectedBuildingCount(): number {
-  const comp = castleComponent()
-  return [...comp].filter(k => k[0] === 'b').length
+function connectedBuildingCount(side = 0): number {
+  const comp = castleComponent(side)
+  return [...comp].filter(k => k[0] === 'b' && world.buildings[+k.slice(1)]?.side === side).length
 }
-function waterConnected(): boolean {
-  return [...castleComponent()].some(k => k[0] === 'w')
+
+// Commerce: buildings earn only once at least two are linked by roads. Counts
+// buildings sitting in any road-connected group that has 2+ buildings.
+function commerceBuildingCount(side: number): number {
+  const mine = roads.filter(r => r.side === side)
+  const adj = new Map<string, string[]>()
+  const link = (u: string, v: string) => {
+    if (!adj.has(u)) adj.set(u, [])
+    adj.get(u)!.push(v)
+  }
+  const keys = new Set<string>()
+  for (const r of mine) {
+    link(r.a, r.b)
+    link(r.b, r.a)
+    keys.add(r.a)
+    keys.add(r.b)
+  }
+  const seen = new Set<string>()
+  let total = 0
+  for (const k of keys) {
+    if (seen.has(k)) continue
+    const comp: string[] = []
+    const q = [k]
+    seen.add(k)
+    while (q.length) {
+      const n = q.shift()!
+      comp.push(n)
+      for (const m of adj.get(n) ?? []) if (!seen.has(m)) {
+        seen.add(m)
+        q.push(m)
+      }
+    }
+    const bCount = comp.filter(x => x[0] === 'b').length
+    if (bCount >= 2) total += bCount
+  }
+  return total
+}
+function waterConnected(side = 0): boolean {
+  return [...castleComponent(side)].some(k => k[0] === 'w')
 }
 
 // Ordered list of sensible roads to suggest (Tab cycles them).
-function roadCandidates(): Road[] {
-  const nodes = playerNodeKeys().map(k => ({ k, ...nodePos(k) }))
-  const comp = castleComponent()
-  const cands: (Road & { score: number })[] = []
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i]
-      const b = nodes[j]
-      if (roadExists(a.k, b.k)) continue
-      const dist = Math.hypot(a.x - b.x, a.z - b.z)
-      if (dist > 40) continue
-      // Prefer roads that grow the castle's network.
-      const grows = comp.has(a.k) !== comp.has(b.k) ? 0 : 1
-      cands.push({ a: a.k, b: b.k, ax: a.x, az: a.z, bx: b.x, bz: b.z, score: grows * 1000 + dist })
-    }
-  }
-  // Once 7+ buildings hang off the castle, offer the waterway link.
-  if (connectedBuildingCount() >= 7 && !waterConnected()) {
-    for (const n of nodes) {
-      if (!comp.has(n.k) || n.k === 'castle') continue
-      const w = world.nearestWater(n.x, n.z, 60)
-      if (w) cands.push({ a: n.k, b: `w${w.x}_${w.z}`, ax: n.x, az: n.z, bx: w.x, bz: w.z, score: -1 })
-    }
-  }
-  cands.sort((p, q) => p.score - q.score)
-  return cands
-}
-
-// Road rendering: dark tiles laid along each path, hugging the terrain.
-const MAX_ROAD_TILES = 4000
-const roadTiles = new THREE.InstancedMesh(
-  new THREE.PlaneGeometry(1.4, 1.4),
-  new THREE.MeshLambertMaterial({ color: 0x3b3f47 }),
-  MAX_ROAD_TILES
-)
-roadTiles.frustumCulled = false
-roadTiles.count = 0
-scene.add(roadTiles)
-
-function rebuildRoadTiles(): void {
-  const m = new THREE.Matrix4()
-  let n = 0
-  for (const r of roads) {
-    const len = Math.hypot(r.bx - r.ax, r.bz - r.az)
-    const steps = Math.max(2, Math.round(len))
-    for (let s = 0; s <= steps && n < MAX_ROAD_TILES; s++) {
-      const t = s / steps
-      const x = r.ax + (r.bx - r.ax) * t
-      const z = r.az + (r.bz - r.az) * t
-      const y = world.surfaceY(Math.round(x), Math.round(z)) + 0.56
-      m.makeRotationX(-Math.PI / 2)
-      m.setPosition(x, y, z)
-      roadTiles.setMatrixAt(n++, m)
-    }
-  }
-  roadTiles.count = n
-  roadTiles.instanceMatrix.needsUpdate = true
-}
-
-// One avatar patrols each road, repairing a damaged endpoint building as it passes.
+// One avatar patrols each road, repairing the buildings at its ends.
 type RoadWalker = { group: THREE.Group; road: number; t: number; dir: number }
 const roadWalkers: RoadWalker[] = []
 
@@ -2305,7 +2327,7 @@ function clearRoadWalkers(): void {
 }
 
 function spawnRoadWalker(roadIdx: number): void {
-  const g = makeAvatar(0xc0392b)
+  const g = makeAvatar(roads[roadIdx].side === 0 ? 0xc0392b : 0x2f6fd6)
   g.scale.setScalar(0.6)
   scene.add(g)
   roadWalkers.push({ group: g, road: roadIdx, t: Math.random(), dir: 1 })
@@ -2314,22 +2336,27 @@ function spawnRoadWalker(roadIdx: number): void {
 function updateRoadWalkers(dt: number): void {
   for (const w of roadWalkers) {
     const r = roads[w.road]
-    if (!r) continue
-    const len = Math.max(1, Math.hypot(r.bx - r.ax, r.bz - r.az))
-    w.t += (w.dir * dt * 4) / len
-    if (w.t > 1) {
+    if (!r || r.path.length < 2) continue
+    w.t += (w.dir * dt * 0.14) / Math.max(1, r.path.length / 8)
+    if (w.t >= 1) {
       w.t = 1
       w.dir = -1
-    } else if (w.t < 0) {
+    } else if (w.t <= 0) {
       w.t = 0
       w.dir = 1
     }
-    const x = r.ax + (r.bx - r.ax) * w.t
-    const z = r.az + (r.bz - r.az) * w.t
-    const y = world.surfaceY(Math.round(x), Math.round(z))
-    w.group.position.set(x, y + 1.4, z)
-    w.group.rotation.y = -Math.atan2(r.bz - r.az, r.bx - r.ax) * w.dir
-    // Repair the endpoint buildings this road touches.
+    // Walk the stored voxel path.
+    const fi = w.t * (r.path.length - 1)
+    const i = Math.min(r.path.length - 2, Math.floor(fi))
+    const f = fi - i
+    const p0 = r.path[i]
+    const p1 = r.path[i + 1]
+    const x = p0.x + (p1.x - p0.x) * f
+    const z = p0.z + (p1.z - p0.z) * f
+    const y = p0.y + (p1.y - p0.y) * f
+    w.group.position.set(x, y + 0.9, z)
+    w.group.rotation.y = -Math.atan2(p1.z - p0.z, p1.x - p0.x)
+    // Repair the endpoint buildings.
     for (const key of [r.a, r.b]) {
       if (key[0] !== 'b') continue
       const b = world.buildings[+key.slice(1)]
@@ -2340,58 +2367,103 @@ function updateRoadWalkers(dt: number): void {
   }
 }
 
-// Road placement mode — a suggested road you confirm (Enter) or cycle (Tab).
-let roadCands: Road[] = []
-let roadPick = 0
+// ---- road placement: click-drag between nodes in the overhead view
+
+type PickNode = { key: string; x: number; z: number; y: number; kind: 'castle' | 'building' | 'water' }
+let pickNodes: PickNode[] = []
+const nodeMarkers = new THREE.Group()
+scene.add(nodeMarkers)
+let roadFrom: PickNode | null = null
 const roadPreview = new THREE.Line(
   new THREE.BufferGeometry(),
-  new THREE.LineBasicMaterial({ color: 0x2ec26a, linewidth: 2 })
+  new THREE.LineBasicMaterial({ color: 0x2ec26a })
 )
 roadPreview.frustumCulled = false
 roadPreview.visible = false
 scene.add(roadPreview)
 
+function buildPickNodes(): void {
+  pickNodes = []
+  const seat = world.cannonSeat(0)
+  pickNodes.push({ key: 'castle', x: seat.x, z: seat.z, y: seat.y, kind: 'castle' })
+  world.buildings.forEach((b, i) => {
+    if (b.side === 0) pickNodes.push({ key: 'b' + i, x: b.cx, z: b.cz, y: world.surfaceY(b.cx, b.cz) + b.h, kind: 'building' })
+  })
+  // Water endpoints: the nearest water tile to each building.
+  const seen = new Set<string>()
+  for (const b of world.buildings.filter(bb => bb.side === 0)) {
+    const wtr = world.nearestWater(b.cx, b.cz, 60)
+    if (!wtr) continue
+    const k = `w${wtr.x}_${wtr.z}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    pickNodes.push({ key: k, x: wtr.x, z: wtr.z, y: world.waterY, kind: 'water' })
+  }
+  // Markers.
+  nodeMarkers.clear()
+  for (const n of pickNodes) {
+    const color = n.kind === 'castle' ? 0xe8c437 : n.kind === 'water' ? 0x4aa0e0 : 0xd0453a
+    const mk = new THREE.Mesh(new THREE.SphereGeometry(1.1, 12, 10), new THREE.MeshBasicMaterial({ color }))
+    mk.position.set(n.x, n.y + 2, n.z)
+    nodeMarkers.add(mk)
+  }
+}
+
+function nodeAtScreen(mx: number, my: number): PickNode | null {
+  const v = new THREE.Vector3()
+  let best: PickNode | null = null
+  let bd = 46 * 46
+  for (const n of pickNodes) {
+    v.set(n.x, n.y + 2, n.z).project(camera)
+    const sx = (v.x * 0.5 + 0.5) * window.innerWidth
+    const sy = (-v.y * 0.5 + 0.5) * window.innerHeight
+    const d = (sx - mx) ** 2 + (sy - my) ** 2
+    if (d < bd) {
+      bd = d
+      best = n
+    }
+  }
+  return best
+}
+
 function enterRoadMode(): void {
-  roadCands = roadCandidates()
-  if (!roadCands.length) {
-    hud.msg('no roads to build yet — place another building first')
+  buildPickNodes()
+  if (pickNodes.length < 2) {
+    hud.msg('place another building first')
     openManage()
     return
   }
-  roadPick = 0
   phase = 'road'
+  roadFrom = null
+  nodeMarkers.visible = true
+  roadPreview.visible = false
+  // Centre the overhead camera on your buildings' spread.
+  const bs = world.buildings.filter(b => b.side === 0)
+  build.cx = bs.reduce((a, b) => a + b.cx, world.cannonSeat(0).x) / (bs.length + 1)
+  build.cz = bs.reduce((a, b) => a + b.cz, world.cannonSeat(0).z) / (bs.length + 1)
   hud.setBuildHint(true)
-  hud.banner('ROAD', 'Tab = pick a link · Enter = build · Esc = cancel')
+  hud.banner('ROAD', 'drag between two nodes to lay a road · Esc to cancel')
 }
 
-function updateRoadMode(): void {
-  if (phase !== 'road' || !roadCands.length) return
-  const r = roadCands[roadPick % roadCands.length]
-  const ay = world.surfaceY(Math.round(r.ax), Math.round(r.az)) + 1
-  const by = world.surfaceY(Math.round(r.bx), Math.round(r.bz)) + 1
-  roadPreview.geometry.setFromPoints([new THREE.Vector3(r.ax, ay, r.az), new THREE.Vector3(r.bx, by, r.bz)])
-  roadPreview.visible = true
-  build.cx = (r.ax + r.bx) / 2 // reuse build cursor for the road camera
-  build.cz = (r.az + r.bz) / 2
-}
-
-function placeRoad(): void {
-  const r = roadCands[roadPick % roadCands.length]
+function buildRoadBetween(from: PickNode, to: PickNode): void {
+  if (from.key === to.key || roadExists(from.key, to.key)) {
+    hud.msg('already linked')
+    return
+  }
   if (money[0] < ROAD_COST) {
     hud.msg(`a road costs $${ROAD_COST} — not enough cash`)
     return
   }
   money[0] -= ROAD_COST
-  roads.push({ a: r.a, b: r.b, ax: r.ax, az: r.az, bx: r.bx, bz: r.bz })
-  rebuildRoadTiles()
+  const path = world.buildVoxelRoad(from.x, from.z, to.x, to.z, 0)
+  roads.push({ a: from.key, b: to.key, ax: from.x, az: from.z, bx: to.x, bz: to.z, side: 0, path })
+  world.rebuild()
   spawnRoadWalker(roads.length - 1)
   roadPreview.visible = false
+  nodeMarkers.visible = false
   hud.setBuildHint(false)
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
-  // Income grows with your network — each road that hangs a building off the
-  // castle pays a bonus.
-  const connectedB = connectedBuildingCount()
-  const bonus = 100 + connectedB * 60
+  const bonus = 100 + connectedBuildingCount() * 60
   money[0] += bonus
   hud.banner('ROAD BUILT', `avatars take to the streets · +$${bonus}`)
   if (!networkTriggered && connectedBuildingCount() >= 7 && waterConnected()) {
@@ -2401,51 +2473,215 @@ function placeRoad(): void {
   endPlayerManage()
 }
 
+function updateRoadMode(): void {
+  if (phase !== 'road') return
+  // Preview line while dragging is handled by mouse events; nothing per-frame.
+}
+
 function cancelRoad(): void {
   roadPreview.visible = false
+  nodeMarkers.visible = false
+  roadFrom = null
   hud.setBuildHint(false)
   openManage()
 }
 
-// The jackpot: complete network → cash windfall, plunder the enemy, and wake
-// the King to stomp half their buildings.
-function triggerNetworkPayoff(): void {
-  networkTriggered = true
-  money[0] += 8000
-  // Plunder half the enemy's cash and weapons.
-  const stolenCash = Math.floor(money[1] / 2)
-  money[1] -= stolenCash
-  money[0] += stolenCash
+// Mouse drag for roads.
+renderer.domElement.addEventListener('mousedown', e => {
+  if (phase !== 'road') return
+  roadFrom = nodeAtScreen(e.clientX, e.clientY)
+})
+renderer.domElement.addEventListener('mousemove', e => {
+  if (phase !== 'road' || !roadFrom) return
+  const to = nodeAtScreen(e.clientX, e.clientY)
+  const end = to ?? roadFrom
+  roadPreview.geometry.setFromPoints([
+    new THREE.Vector3(roadFrom.x, roadFrom.y + 2, roadFrom.z),
+    new THREE.Vector3(end.x, end.y + 2, end.z),
+  ])
+  roadPreview.visible = true
+})
+window.addEventListener('mouseup', e => {
+  if (phase !== 'road' || !roadFrom) return
+  const to = nodeAtScreen(e.clientX, e.clientY)
+  const from = roadFrom
+  roadFrom = null
+  roadPreview.visible = false
+  if (to && to.key !== from.key) buildRoadBetween(from, to)
+})
+
+// The jackpot: whoever completes their network gets a cash windfall, plunders
+// the loser, and wakes the King to stomp half the LOSER's buildings. Symmetric:
+// winner 0 = you complete your city; winner 1 = the enemy completes theirs.
+let networkTriggeredFoe = false
+function wakeKing(winner: number): void {
+  const loser = 1 - winner
+  if (winner === 0) networkTriggered = true
+  else networkTriggeredFoe = true
+  money[winner] += 8000
+  // Plunder half the loser's cash and weapons.
+  const stolenCash = Math.floor(money[loser] / 2)
+  money[loser] -= stolenCash
+  money[winner] += stolenCash
   for (const w of WEAPONS) {
-    const have = sides[1].arsenal.get(w.id) ?? 0
+    const have = sides[loser].arsenal.get(w.id) ?? 0
     if (!Number.isFinite(have) || have <= 0) continue
     const half = Math.floor(have / 2)
     if (half <= 0) continue
-    sides[1].arsenal.set(w.id, have - half)
-    sides[0].arsenal.set(w.id, (sides[0].arsenal.get(w.id) ?? 0) + half)
+    sides[loser].arsenal.set(w.id, have - half)
+    sides[winner].arsenal.set(w.id, (sides[winner].arsenal.get(w.id) ?? 0) + half)
   }
   updateWeaponHud()
-  // Stomp half the enemy's buildings.
-  const foeB = world.buildings.filter(b => b.side === 1)
-  const doomed = foeB.slice(0, Math.ceil(foeB.length / 2))
+  // Stomp half the loser's buildings.
+  const loseB = world.buildings.filter(b => b.side === loser)
+  const doomed = loseB.slice(0, Math.ceil(loseB.length / 2))
   for (const b of doomed) world.carve(b.cx, b.baseY + b.h / 2, b.cz, Math.max(b.w, b.d) + 2)
   world.updateSupport(Math.random)
   world.rebuild()
   sfx.rumble()
-  // King cinematic.
+  // King cinematic — rises over the loser's fort.
   kingAvatar.scale.setScalar(4)
   kingAvatar.visible = true
-  const t = world.forts[1].towers[0]
+  kingFortSide = loser
+  const t = world.forts[loser].towers[0]
   king.x = t.cx
   king.z = t.cz
   king.y = world.surfaceY(t.cx, t.cz) + 0.5
   kingAvatar.position.set(king.x, king.y + 4, king.z)
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
-  hud.banner('THE ZOMBIE KING RISES', `+$${(8000 + stolenCash).toLocaleString()} · half the enemy city falls`)
+  if (winner === 0)
+    hud.banner('THE ZOMBIE KING RISES', `+$${(8000 + stolenCash).toLocaleString()} · half the enemy city falls`)
+  else
+    hud.banner('THE ENEMY WAKES THE KING', `they plunder $${stolenCash.toLocaleString()} · half YOUR city falls`)
   phase = 'king'
   kingCineT = 4.5
 }
+function triggerNetworkPayoff(): void {
+  wakeKing(0)
+}
 let kingCineT = 0
+
+// ---------------------------------------------------------------- enemy economy
+// The enemy builds its own city and roads too, chasing the same castle→7
+// buildings→water network that wakes the King (on YOU, if it gets there first).
+
+function foeBuildSpot(): { cx: number; cz: number; w: number; d: number; h: number } | null {
+  const w = 5 + Math.floor(Math.random() * 5)
+  const d = 5 + Math.floor(Math.random() * 4)
+  const h = 12 + Math.floor(Math.random() * 12)
+  const mine = world.buildings.filter(b => b.side === 1)
+  const anchor = mine.length ? mine[mine.length - 1] : null
+  const seat = world.cannonSeat(1)
+  const ax = anchor ? anchor.cx : Math.round(seat.x)
+  const az = anchor ? anchor.cz : Math.round(seat.z)
+  for (let r = anchor ? 6 : 8; r <= 30; r += 2) {
+    for (const [dx, dz] of [[-r, 0], [-r, r], [-r, -r], [0, r], [0, -r]]) {
+      const cx = Math.max(GX / 2 + 3, Math.min(GX - 6, ax + dx))
+      const cz = Math.max(4, Math.min(GZ - 4, az + dz))
+      if (cx < GX / 2 + 3) continue
+      if (!world.canPlaceBuilding(cx, cz, w, d)) continue
+      if (anchor && !mine.some(b => Math.hypot(b.cx - cx, b.cz - cz) <= 10 + Math.max(b.w, w) / 2)) continue
+      return { cx, cz, w, d, h }
+    }
+  }
+  return null
+}
+
+function enemyDoBuild(): boolean {
+  const cost = buildingCost(1)
+  if (money[1] < cost) return false
+  const spot = foeBuildSpot()
+  if (!spot) return false
+  money[1] -= cost
+  world.placeBuilding(spot.cx, spot.cz, spot.w, spot.d, spot.h, 1)
+  world.rebuild()
+  return true
+}
+
+// Choose two enemy nodes to link, growing the castle-rooted net toward 7+water.
+function foeRoadPick(): { a: string; b: string; ax: number; az: number; bx: number; bz: number } | null {
+  const foeB: { key: string; x: number; z: number }[] = []
+  world.buildings.forEach((b, i) => { if (b.side === 1) foeB.push({ key: 'b' + i, x: b.cx, z: b.cz }) })
+  if (foeB.length < 2) return null
+  const seat = world.cannonSeat(1)
+  const pos = (key: string): { x: number; z: number } => {
+    if (key === 'castle') return { x: seat.x, z: seat.z }
+    if (key[0] === 'b') { const b = world.buildings[+key.slice(1)]; return { x: b.cx, z: b.cz } }
+    const [x, z] = key.slice(1).split('_').map(Number)
+    return { x, z }
+  }
+  const comp = castleComponent(1)
+  const exists = (a: string, b: string) => roads.some(r => r.side === 1 && ((r.a === a && r.b === b) || (r.a === b && r.b === a)))
+  const froms = ['castle', ...foeB.filter(b => comp.has(b.key)).map(b => b.key)]
+  const outB = foeB.filter(b => !comp.has(b.key))
+  let best: { a: string; b: string; d: number } | null = null
+  const consider = (a: string, b: string) => {
+    if (a === b || exists(a, b)) return
+    const pa = pos(a), pb = pos(b)
+    const dd = Math.hypot(pa.x - pb.x, pa.z - pb.z)
+    if (!best || dd < best.d) best = { a, b, d: dd }
+  }
+  if (outB.length) {
+    for (const f of froms) for (const t of outB) consider(f, t.key)
+  } else if (connectedBuildingCount(1) >= 7 && !waterConnected(1)) {
+    const wpt = world.nearestWater(Math.round(seat.x), Math.round(seat.z), 80)
+    if (wpt) {
+      const wkey = `w${wpt.x}_${wpt.z}`
+      for (const f of froms) consider(f, wkey)
+    }
+  }
+  if (!best) return null
+  const chosen: { a: string; b: string; d: number } = best
+  const pa = pos(chosen.a), pb = pos(chosen.b)
+  return { a: chosen.a, b: chosen.b, ax: Math.round(pa.x), az: Math.round(pa.z), bx: Math.round(pb.x), bz: Math.round(pb.z) }
+}
+
+function enemyDoRoad(): boolean {
+  if (money[1] < ROAD_COST) return false
+  const pick = foeRoadPick()
+  if (!pick) return false
+  money[1] -= ROAD_COST
+  const path = world.buildVoxelRoad(pick.ax, pick.az, pick.bx, pick.bz, 1)
+  roads.push({ a: pick.a, b: pick.b, ax: pick.ax, az: pick.az, bx: pick.bx, bz: pick.bz, side: 1, path })
+  world.rebuild()
+  spawnRoadWalker(roads.length - 1)
+  if (!networkTriggeredFoe && connectedBuildingCount(1) >= 7 && waterConnected(1)) wakeKing(1)
+  return true
+}
+
+// One enemy economy action (road or building). Returns true if it acted and set
+// up its own turn beat (or woke the King); false → the caller should fire instead.
+function enemyEconomyTurn(): boolean {
+  const nB = world.buildings.filter(b => b.side === 1).length
+  const nR = roads.filter(r => r.side === 1).length
+  const canBuild = (nB < 2 || nR >= nB - 1) && nB < 8 && money[1] >= buildingCost(1)
+  const canRoad = nB >= 2 && money[1] >= ROAD_COST && foeRoadPick() != null
+  const preferRoad = canRoad && (!canBuild || Math.random() < 0.5)
+  if (preferRoad && enemyDoRoad()) {
+    if (phase !== 'king') {
+      hud.banner('ENEMY TURN', 'the enemy lays a road')
+      phase = 'aiManage'
+      aiManageT = 1.3
+    }
+    return true
+  }
+  if (canBuild && enemyDoBuild()) {
+    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    hud.banner('ENEMY TURN', 'the enemy raises a building')
+    phase = 'aiManage'
+    aiManageT = 1.3
+    return true
+  }
+  if (canRoad && enemyDoRoad()) {
+    if (phase !== 'king') {
+      hud.banner('ENEMY TURN', 'the enemy lays a road')
+      phase = 'aiManage'
+      aiManageT = 1.3
+    }
+    return true
+  }
+  return false
+}
 
 function manageAction(a: 'fire' | 'repair' | 'buy' | 'build' | 'road'): void {
   if (phase !== 'manage') return
@@ -2483,6 +2719,7 @@ function manageAction(a: 'fire' | 'repair' | 'buy' | 'build' | 'road'): void {
   if (a === 'fire') {
     hud.hideManage()
     phase = 'aim'
+    hud.setPowerVisible(true)
     hud.banner('AIM', 'hold space to fire')
     hud.setPower(null, shotThisRound ? lastPlayerPower : null)
   } else if (a === 'repair') {
@@ -2723,9 +2960,9 @@ function rebuildRoundWorld(): void {
   world.generate(roundSeed, forti)
   // Buildings are wiped with the terrain, so the road network resets too.
   roads.length = 0
-  rebuildRoadTiles()
   clearRoadWalkers()
   networkTriggered = false
+  networkTriggeredFoe = false
   overheadUnlocked = false
   kingAvatar.visible = false
   roadPreview.visible = false
@@ -2948,18 +3185,8 @@ window.addEventListener('keydown', e => {
       cancelBuild()
     }
   }
-  // Road mode: Tab cycles the suggested link, Enter builds, Escape cancels.
-  if (phase === 'road' && !e.repeat) {
-    if (e.code === 'Tab') {
-      e.preventDefault()
-      roadPick = (roadPick + 1) % Math.max(1, roadCands.length)
-    } else if (e.code === 'Enter' || e.code === 'Space') {
-      e.preventDefault()
-      placeRoad()
-    } else if (e.code === 'Escape') {
-      cancelRoad()
-    }
-  }
+  // Road mode: drag with the mouse to lay a road; Escape cancels.
+  if (phase === 'road' && !e.repeat && e.code === 'Escape') cancelRoad()
   if (phase === 'night' && (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' || e.code === 'KeyD')) {
     hud.setNightHint(false)
   }
@@ -3040,6 +3267,7 @@ function tick(now: number): void {
 
   updatePlayerAim(dt)
   updateBuild(dt)
+  updateGrow(dt)
   updateRoadMode()
   updateRoadWalkers(dt)
   updateAi(dt)
@@ -3055,7 +3283,11 @@ function tick(now: number): void {
     kingAvatar.rotation.y += dt * 0.8
     if (kingCineT <= 0) {
       kingAvatar.visible = false
-      endPlayerManage()
+      kingAvatar.scale.setScalar(1.45)
+      // If you woke the King, the enemy still gets its turn next; if the enemy
+      // woke it on you, control returns to you.
+      if (kingFortSide === 1) endPlayerManage()
+      else startTurn(0)
     }
   }
 
@@ -3156,7 +3388,14 @@ declare global {
       cash: (n: number) => void
       enemyCity: () => void
       netState: () => object
-      forcePayoff: () => void
+      forcePayoff: (winner?: number) => void
+      foeCash: (n: number) => void
+      foeBuild: () => boolean
+      foeRoad: () => boolean
+      foeTurn: () => string
+      dbgBuild: () => boolean
+      roadDbg: (fromKey: string, toKey: string) => void
+      nodeKeys: () => string[]
       kingMoodOf: () => string
     }
   }
@@ -3252,15 +3491,52 @@ window.__sv = {
     buildings: world.buildings.filter(b => b.side === 0).length,
     foeBuildings: world.buildings.filter(b => b.side === 1).length,
     roads: roads.length,
-    connected: connectedBuildingCount(),
-    water: waterConnected(),
+    youRoads: roads.filter(r => r.side === 0).length,
+    foeRoads: roads.filter(r => r.side === 1).length,
+    connected: connectedBuildingCount(0),
+    water: waterConnected(0),
+    foeConnected: connectedBuildingCount(1),
+    foeWater: waterConnected(1),
+    commerce: [commerceBuildingCount(0), commerceBuildingCount(1)],
     phase,
     kingVisible: kingAvatar.visible,
+    kingFortSide,
     money: [money[0], money[1]],
     foeNukes: sides[1].arsenal.get('nuke') ?? 0,
     youNukes: sides[0].arsenal.get('nuke') ?? 0,
   }),
-  forcePayoff: () => triggerNetworkPayoff(),
+  forcePayoff: (winner = 0) => wakeKing(winner),
+  foeCash: (n: number) => { money[1] += n },
+  foeBuild: () => enemyDoBuild() && (world.rebuild(), true),
+  foeRoad: () => enemyDoRoad(),
+  foeTurn: () => { startTurn(1); return phase },
+  dbgBuild: () => {
+    const anchor = world.buildings.filter(b => b.side === 0).slice(-1)[0]
+    if (!anchor) return false
+    for (const [dx, dz] of [[0, 9], [9, 0], [0, -9], [7, 7], [-7, 7], [7, -7]]) {
+      build.w = anchor.w
+      build.d = anchor.d
+      build.h = 14
+      build.cx = anchor.cx + dx
+      build.cz = anchor.cz + dz
+      if (buildValid()) {
+        phase = 'build'
+        placeGhostBuilding()
+        return true
+      }
+    }
+    return false
+  },
+  roadDbg: (fromKey: string, toKey: string) => {
+    buildPickNodes()
+    const a = pickNodes.find(n => n.key === fromKey)
+    const b = pickNodes.find(n => n.key === toKey)
+    if (a && b) {
+      phase = 'road'
+      buildRoadBetween(a, b)
+    }
+  },
+  nodeKeys: () => pickNodes.length ? pickNodes.map(n => n.key) : (buildPickNodes(), pickNodes.map(n => n.key)),
   sunset: () => {
     dayT = DAY_LEN // testing: force the next quiet moment to trigger nightfall
   },

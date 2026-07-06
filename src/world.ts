@@ -14,6 +14,8 @@ export const FORT_A = 2 // player fort voxel
 export const FORT_B = 3 // enemy fort voxel
 export const BLD_A = 6 // player-built shield building
 export const BLD_B = 7 // enemy-built shield building
+export const ROAD_A = 8 // player road (same colour as their building)
+export const ROAD_B = 9 // enemy road
 export const WATER = 4 // lakes & rivers — solid light blue, stylized
 export const CITY = 5 // ruined city buildings between the forts — night scavenging ground
 
@@ -518,13 +520,11 @@ export class World {
     const put = (x: number, y: number, z: number) => {
       if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
     }
-    let origCount = 0
     for (let dy = 0; dy < h; dy++) {
       const narrow = dy >= setback ? 1 : 0
       for (let dx = -hw + narrow; dx <= hw - narrow; dx++) {
         for (let dz = -hd + narrow; dz <= hd - narrow; dz++) {
           put(cx + dx, baseY + dy, cz + dz)
-          origCount++
         }
       }
     }
@@ -557,6 +557,64 @@ export class World {
     return b
   }
 
+  // Incremental build (for the quick-grow-brick animation): compute the base,
+  // add one layer at a time, then register the finished building.
+  buildingBaseYAt(cx: number, cz: number, w: number, d: number): number {
+    const hw = Math.floor(w / 2)
+    const hd = Math.floor(d / 2)
+    let baseY = 0
+    for (let x = cx - hw; x <= cx + hw; x++) {
+      for (let z = cz - hd; z <= cz + hd; z++) baseY = Math.max(baseY, this.surfaceY(x, z))
+    }
+    return baseY + 1
+  }
+
+  writeBuildingLayer(cx: number, cz: number, w: number, d: number, h: number, side: number, baseY: number, dy: number): void {
+    const cell = side === 0 ? BLD_A : BLD_B
+    const hw = Math.floor(w / 2)
+    const hd = Math.floor(d / 2)
+    const setback = h - Math.floor(h * 0.32)
+    const put = (x: number, y: number, z: number) => {
+      if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
+    }
+    const narrow = dy >= setback ? 1 : 0
+    for (let dx = -hw + narrow; dx <= hw - narrow; dx++) {
+      for (let dz = -hd + narrow; dz <= hd - narrow; dz++) put(cx + dx, baseY + dy, cz + dz)
+    }
+    if (dy === 0) {
+      for (let dx = -hw; dx <= hw; dx++) {
+        for (let dz = -hd; dz <= hd; dz++) {
+          let fy = baseY - 1
+          while (fy >= 0 && this.cellAt(cx + dx, fy, cz + dz) === EMPTY) {
+            put(cx + dx, fy, cz + dz)
+            fy--
+          }
+        }
+      }
+    }
+    this.dirty = true
+  }
+
+  registerBuilding(cx: number, cz: number, w: number, d: number, h: number, side: number, baseY: number): BuildingInfo {
+    const cell = side === 0 ? BLD_A : BLD_B
+    const hw = Math.floor(w / 2)
+    const hd = Math.floor(d / 2)
+    const voxels: number[] = []
+    for (let dy = -6; dy < h + 2; dy++) {
+      const y = baseY + dy
+      if (y < 0 || y >= GY) continue
+      for (let dx = -hw; dx <= hw; dx++) {
+        for (let dz = -hd; dz <= hd; dz++) {
+          const i = this.idx(cx + dx, y, cz + dz)
+          if (this.grid[i] === cell) voxels.push(i)
+        }
+      }
+    }
+    const b: BuildingInfo = { cell, side, cx, cz, baseY, w, d, h, origCount: voxels.length, voxels }
+    this.buildings.push(b)
+    return b
+  }
+
   // Nearest open-water cell to (x,z) within radius r — a waterway endpoint.
   nearestWater(x: number, z: number, r = 60): { x: number; z: number } | null {
     let best: { x: number; z: number } | null = null
@@ -575,6 +633,70 @@ export class World {
       }
     }
     return best
+  }
+
+  // Build a voxel road between two world points: a 2-wide path in 90° Manhattan
+  // segments that stair-steps up/down gentle slopes and arches into a bridge
+  // over water or drops deeper than a step. Returns the centreline (with road
+  // surface heights) for avatars to walk. Road cells are ROAD_A/ROAD_B.
+  buildVoxelRoad(ax: number, az: number, bx: number, bz: number, side: number): { x: number; z: number; y: number }[] {
+    const cell = side === 0 ? ROAD_A : ROAD_B
+    // Centreline: travel in x first, then z (an L with 90° corners).
+    const line: { x: number; z: number }[] = []
+    let x = Math.round(ax)
+    let z = Math.round(az)
+    const tx = Math.round(bx)
+    const tz = Math.round(bz)
+    line.push({ x, z })
+    while (x !== tx) {
+      x += Math.sign(tx - x)
+      line.push({ x, z })
+    }
+    while (z !== tz) {
+      z += Math.sign(tz - z)
+      line.push({ x, z })
+    }
+    // Height profile: sit on terrain+1, but never drop more than 1 per cell — so
+    // over a gap/water the deck holds its height (a bridge) instead of diving in.
+    const surf = (cx: number, cz: number) => {
+      const sy = this.surfaceY(cx, cz)
+      return sy < 0 ? 0 : sy
+    }
+    const roadY: number[] = []
+    for (let i = 0; i < line.length; i++) {
+      const t = surf(line[i].x, line[i].z) + 1
+      roadY.push(i === 0 ? t : Math.max(t, roadY[i - 1] - 1))
+    }
+    const put = (cx: number, cy: number, cz: number) => {
+      if (this.inBounds(cx, cy, cz) && this.grid[this.idx(cx, cy, cz)] === EMPTY) this.grid[this.idx(cx, cy, cz)] = cell
+    }
+    const out: { x: number; z: number; y: number }[] = []
+    for (let i = 0; i < line.length; i++) {
+      const cx = line[i].x
+      const cz = line[i].z
+      const ry = roadY[i]
+      // Perpendicular to travel → widen to 2 cells.
+      const prev = line[Math.max(0, i - 1)]
+      const next = line[Math.min(line.length - 1, i + 1)]
+      const dirx = Math.sign(next.x - prev.x)
+      const dirz = Math.sign(next.z - prev.z)
+      const px = dirz !== 0 ? 1 : 0 // perpendicular offset
+      const pz = dirx !== 0 ? 1 : 0
+      for (const s of [0, 1]) {
+        const wx = cx + px * s
+        const wz = cz + pz * s
+        put(wx, ry, wz)
+        // Solid fill down to the terrain for stairs on small gaps; leave the
+        // deck floating over deep gaps/water so it reads as a bridge.
+        const groundTop = surf(wx, wz)
+        if (ry - 1 - groundTop <= 3) {
+          for (let fy = ry - 1; fy > groundTop; fy--) put(wx, fy, wz)
+        }
+      }
+      out.push({ x: cx, z: cz, y: ry })
+    }
+    this.dirty = true
+    return out
   }
 
   // Fraction of a building still standing (0..1).
@@ -980,12 +1102,12 @@ export class World {
             // Player castle: light red.
             const v = 0.92 + h * 0.05
             col.setRGB(Math.min(1, v + 0.06), v * 0.86, v * 0.82)
-          } else if (c === BLD_A) {
-            // Player building: tall, dark red.
+          } else if (c === BLD_A || c === ROAD_A) {
+            // Player building / road: tall, dark red.
             const v = 0.34 + 0.16 * (y / 40) + h * 0.06
             col.setRGB(v + 0.14, v * 0.5, v * 0.52)
-          } else if (c === BLD_B) {
-            // Enemy building: tall, dark blue.
+          } else if (c === BLD_B || c === ROAD_B) {
+            // Enemy building / road: tall, dark blue.
             const v = 0.32 + 0.16 * (y / 40) + h * 0.06
             col.setRGB(v * 0.5, v * 0.58, v + 0.16)
           } else {
