@@ -62,7 +62,8 @@ export function newArsenal(): Map<string, number> {
 }
 
 // Power (0..100) → muzzle speed. Shared by player firing, AI planning, and the
-// aim hint. Tuned so full power spans the widest battlefields.
+// aim hint. Tuned so full power comfortably clears the widest battlefields (the
+// forts can sit ~300 voxels apart), with margin so mid-power shots still land.
 export function speedOf(power: number): number {
-  return 14 + 0.54 * power
+  return 14 + 0.98 * power
 }

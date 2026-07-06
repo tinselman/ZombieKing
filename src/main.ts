@@ -1,6 +1,6 @@
 // Scorched Earth 3D — main entry: scene, game loop, turns, camera, input.
 import * as THREE from 'three'
-import { World, GX, GY, GZ, GRAVITY, WIND_ACCEL, EMPTY, WATER, type Wind, type Fortifications } from './world'
+import { World, GX, GY, GZ, GRAVITY, WIND_ACCEL, EMPTY, WATER, buildingSpec, type Wind, type Fortifications } from './world'
 import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './weapons'
 import { planShot } from './ai'
 import { createHud } from './hud'
@@ -119,7 +119,8 @@ const sides: SideState[] = [
 
 // VoxPop-style voxel avatars, one per side, standing watch beside their cannon.
 // (Core of the coming night-cycle gameplay — for now they just take the field.)
-const avatars = [makeAvatar(0xc0392b), makeAvatar(0x2f6fd6)]
+const AVATAR_YELLOW = 0xf2c33c
+const avatars = [makeAvatar(AVATAR_YELLOW), makeAvatar(AVATAR_YELLOW)]
 avatars[1].rotation.y = -Math.PI // enemy avatar faces back toward the player
 for (const a of avatars) scene.add(a)
 
@@ -2011,11 +2012,9 @@ function startTurn(s: number): void {
       money[0] += inc
       hud.msg(`commerce +$${inc.toLocaleString()} (${cb} linked buildings)`)
     }
-    // Manage OR fire: open the action menu; the player picks one action.
-    phase = 'manage'
+    // Open the turn armed to fire (the default); the menu offers the other actions.
     openManage()
-    hud.banner('YOUR TURN', 'manage or fire')
-    hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+    hud.banner('YOUR TURN', 'hold space to fire · or pick an action')
   } else {
     // Enemy also manages OR fires (symmetric): commerce income, then repair when
     // battered, else grow its city/roads, else bombard.
@@ -2048,8 +2047,12 @@ function repairCost(): number {
 }
 
 function openManage(): void {
-  phase = 'manage'
-  hud.setPowerVisible(false)
+  // Fire is the default action: open the turn armed to shoot (aim phase, power
+  // bar showing, Fire highlighted) with the manage menu alongside so the player
+  // can switch to Repair/Build/Road, or Buy freely, at any point.
+  phase = 'aim'
+  hud.setPowerVisible(true)
+  hud.setPower(null, shotThisRound ? lastPlayerPower : null)
   const nB = world.buildings.filter(b => b.side === 0).length
   const buildOk = nB < 2 || roads.length >= nB - 1 // linear gating
   const roadOk = nB >= 2
@@ -2066,12 +2069,15 @@ function openManage(): void {
       roadOk,
       network,
     },
-    manageAction
+    manageAction,
+    'fire'
   )
 }
 
 // ---------------------------------------------------------------- buildings (M3)
 
+const BUILD_MIN_GAP = 10 // buildings must sit at least this far from a neighbour
+const BUILD_MAX_GAP = 15 // …and no farther than this from the nearest one
 const BUILD_BASE_COST = 700 // escalates with each building you own
 function buildingCost(side = 0): number {
   const owned = world.buildings.filter(b => b.side === side).length
@@ -2085,30 +2091,41 @@ const ghost = new THREE.Mesh(
 )
 ghost.visible = false
 scene.add(ghost)
-const build = { cx: 0, cz: 0, w: 7, d: 6, h: 16 }
+const build = { cx: 0, cz: 0, w: 7, d: 6, stories: 2, slot: 0 }
+
+// Victorian house types — one is announced each time you raise a building.
+const BUILDING_TYPES = ['Mansion', 'Hotel', 'Doll Shop', 'Library', 'Laboratory', 'Conservatory', 'Hospital', 'Theater', 'Cemetery', 'Apothecary', 'Mausoleum', 'Cathedral']
+
+// Grander (3-storey) near your own castle, humbler (1-storey) out on the frontier.
+function storiesFor(cx: number, cz: number, side: number): number {
+  const seat = world.cannonSeat(side)
+  const dist = Math.hypot(cx - seat.x, cz - seat.z)
+  return dist < 26 ? 3 : dist < 56 ? 2 : 1
+}
 
 function enterBuildMode(): void {
   phase = 'build'
   // Roll a building silhouette with variation.
   build.w = 5 + Math.floor(Math.random() * 5) // 5..9
   build.d = 5 + Math.floor(Math.random() * 4) // 5..8
-  build.h = 12 + Math.floor(Math.random() * 12) // 12..23
+  build.slot = Math.floor(Math.random() * 12)
+  build.stories = 2 // recomputed from position in updateBuild
   // Start it at a valid spot near your main tower (search outward toward the
   // enemy for clear ground; near an existing building if you have one).
   const anchor = world.buildings.filter(b => b.side === 0).slice(-1)[0]
   const ax = anchor ? anchor.cx : world.forts[0].towers[0].cx
   const az = anchor ? anchor.cz : world.forts[0].towers[0].cz
-  build.cx = Math.min(GX / 2 - 4, ax + 8)
+  build.cx = Math.min(GX / 2 - 4, ax + 12)
   build.cz = az
-  for (let r = 4; r <= 28; r += 2) {
+  for (let r = anchor ? BUILD_MIN_GAP : 10; r <= (anchor ? BUILD_MAX_GAP : 26); r += 1) {
     let found = false
-    for (const [dx, dz] of [[r, 0], [r, -r], [r, r], [0, -r], [0, r]]) {
+    for (const [dx, dz] of [[r, 0], [0, r], [0, -r], [-r, 0], [r, -r], [r, r]]) {
       const cx = Math.min(GX / 2 - 4, ax + dx)
       const cz = Math.max(4, Math.min(GZ - 4, az + dz))
       if (cx > GX / 2 - 3) continue
-      if (world.canPlaceBuilding(cx, cz, build.w, build.d)) {
-        build.cx = cx
-        build.cz = cz
+      build.cx = cx
+      build.cz = cz
+      if (buildValid()) {
         found = true
         break
       }
@@ -2129,11 +2146,12 @@ function cancelBuild(): void {
 function buildValid(): boolean {
   if (build.cx > GX / 2 - 3) return false
   if (!world.canPlaceBuilding(build.cx, build.cz, build.w, build.d)) return false
-  // 2nd+ building must sit within 10 voxels of an existing one (network seed).
+  // 2nd+ building must sit 10–15 voxels from its nearest neighbour: never
+  // overlapping, always close enough to chain into the network.
   const mine = world.buildings.filter(b => b.side === 0)
   if (mine.length > 0) {
-    const near = mine.some(b => Math.hypot(b.cx - build.cx, b.cz - build.cz) <= 10 + Math.max(b.w, build.w) / 2)
-    if (!near) return false
+    const nearest = Math.min(...mine.map(b => Math.hypot(b.cx - build.cx, b.cz - build.cz)))
+    if (nearest < BUILD_MIN_GAP || nearest > BUILD_MAX_GAP) return false
   }
   return true
 }
@@ -2152,25 +2170,24 @@ function placeGhostBuilding(): void {
   ghost.visible = false
   hud.setBuildHint(false)
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
-  const first = !overheadUnlocked
-  if (first) {
-    overheadUnlocked = true
-    hud.banner('CITY VIEW UNLOCKED', 'your first building rises — behold the field')
-  } else {
-    hud.banner('BUILDING RAISED', `–$${cost.toLocaleString()}`)
+  if (!overheadUnlocked) {
+    overheadUnlocked = true // first building lifts the reward "city view" camera
   }
-  // Quick-grow-brick: raise the building layer by layer, then hand off the turn.
-  startGrow(Math.round(build.cx), Math.round(build.cz), build.w, build.d, build.h, 0, endPlayerManage)
+  const name = BUILDING_TYPES[Math.floor(Math.random() * BUILDING_TYPES.length)]
+  hud.banner('Congratulations!', `You have built a ${name}`)
+  // Quick-grow-brick: raise the house layer by layer, then hand off the turn.
+  startGrow(Math.round(build.cx), Math.round(build.cz), build.w, build.d, build.stories, build.slot, 0, name, endPlayerManage)
   phase = 'grow'
 }
 
 // Building growth animation — one brick-layer at a time.
-type GrowJob = { cx: number; cz: number; w: number; d: number; h: number; side: number; baseY: number; dy: number; t: number; done: () => void }
+type GrowJob = { cx: number; cz: number; w: number; d: number; stories: number; slot: number; side: number; baseY: number; h: number; name: string; dy: number; t: number; done: () => void }
 let growJob: GrowJob | null = null
 
-function startGrow(cx: number, cz: number, w: number, d: number, h: number, side: number, done: () => void): void {
+function startGrow(cx: number, cz: number, w: number, d: number, stories: number, slot: number, side: number, name: string, done: () => void): void {
   const baseY = world.buildingBaseYAt(cx, cz, w, d)
-  growJob = { cx, cz, w, d, h, side, baseY, dy: 0, t: 0, done }
+  const h = buildingSpec(w, d, stories).h
+  growJob = { cx, cz, w, d, stories, slot, side, baseY, h, name, dy: 0, t: 0, done }
 }
 
 function updateGrow(dt: number): void {
@@ -2179,13 +2196,14 @@ function updateGrow(dt: number): void {
   // ~2 layers per 0.05s → a fast rise.
   while (growJob.t >= 0.03 && growJob.dy < growJob.h) {
     growJob.t -= 0.03
-    world.writeBuildingLayer(growJob.cx, growJob.cz, growJob.w, growJob.d, growJob.h, growJob.side, growJob.baseY, growJob.dy)
+    world.writeBuildingLayer(growJob.cx, growJob.cz, growJob.w, growJob.d, growJob.stories, growJob.side, growJob.baseY, growJob.dy, growJob.slot)
     growJob.dy++
     sfx.tick()
   }
   world.rebuild()
   if (growJob.dy >= growJob.h) {
-    world.registerBuilding(growJob.cx, growJob.cz, growJob.w, growJob.d, growJob.h, growJob.side, growJob.baseY)
+    const b = world.registerBuilding(growJob.cx, growJob.cz, growJob.w, growJob.d, growJob.stories, growJob.side, growJob.baseY, growJob.slot)
+    b.name = growJob.name
     const done = growJob.done
     growJob = null
     done()
@@ -2203,9 +2221,11 @@ function updateBuild(dt: number): void {
   if (keys.has('ArrowRight')) build.cz += rate
   build.cx = Math.max(6, Math.min(GX / 2 - 3, build.cx))
   build.cz = Math.max(4, Math.min(GZ - 4, build.cz))
+  build.stories = storiesFor(build.cx, build.cz, 0)
+  const gh = buildingSpec(build.w, build.d, build.stories).h
   const gy = world.surfaceY(Math.round(build.cx), Math.round(build.cz))
-  ghost.scale.set(build.w, build.h, build.d)
-  ghost.position.set(build.cx, gy + build.h / 2, build.cz)
+  ghost.scale.set(build.w, gh, build.d)
+  ghost.position.set(build.cx, gy + gh / 2, build.cz)
   const ok = buildValid() && money[0] >= buildingCost()
   ;(ghost.material as THREE.MeshBasicMaterial).color.setHex(ok ? 0x2ec26a : 0xd0453a)
   ghost.visible = true
@@ -2327,7 +2347,7 @@ function clearRoadWalkers(): void {
 }
 
 function spawnRoadWalker(roadIdx: number): void {
-  const g = makeAvatar(roads[roadIdx].side === 0 ? 0xc0392b : 0x2f6fd6)
+  const g = makeAvatar(AVATAR_YELLOW)
   g.scale.setScalar(0.6)
   scene.add(g)
   roadWalkers.push({ group: g, road: roadIdx, t: Math.random(), dir: 1 })
@@ -2565,23 +2585,25 @@ let kingCineT = 0
 // The enemy builds its own city and roads too, chasing the same castle→7
 // buildings→water network that wakes the King (on YOU, if it gets there first).
 
-function foeBuildSpot(): { cx: number; cz: number; w: number; d: number; h: number } | null {
+function foeBuildSpot(): { cx: number; cz: number; w: number; d: number } | null {
   const w = 5 + Math.floor(Math.random() * 5)
   const d = 5 + Math.floor(Math.random() * 4)
-  const h = 12 + Math.floor(Math.random() * 12)
   const mine = world.buildings.filter(b => b.side === 1)
   const anchor = mine.length ? mine[mine.length - 1] : null
   const seat = world.cannonSeat(1)
   const ax = anchor ? anchor.cx : Math.round(seat.x)
   const az = anchor ? anchor.cz : Math.round(seat.z)
-  for (let r = anchor ? 6 : 8; r <= 30; r += 2) {
-    for (const [dx, dz] of [[-r, 0], [-r, r], [-r, -r], [0, r], [0, -r]]) {
+  for (let r = anchor ? BUILD_MIN_GAP : 10; r <= (anchor ? BUILD_MAX_GAP : 30); r += 1) {
+    for (const [dx, dz] of [[-r, 0], [0, r], [0, -r], [r, 0], [-r, r], [-r, -r]]) {
       const cx = Math.max(GX / 2 + 3, Math.min(GX - 6, ax + dx))
       const cz = Math.max(4, Math.min(GZ - 4, az + dz))
       if (cx < GX / 2 + 3) continue
       if (!world.canPlaceBuilding(cx, cz, w, d)) continue
-      if (anchor && !mine.some(b => Math.hypot(b.cx - cx, b.cz - cz) <= 10 + Math.max(b.w, w) / 2)) continue
-      return { cx, cz, w, d, h }
+      if (anchor) {
+        const nearest = Math.min(...mine.map(b => Math.hypot(b.cx - cx, b.cz - cz)))
+        if (nearest < BUILD_MIN_GAP || nearest > BUILD_MAX_GAP) continue
+      }
+      return { cx, cz, w, d }
     }
   }
   return null
@@ -2593,7 +2615,10 @@ function enemyDoBuild(): boolean {
   const spot = foeBuildSpot()
   if (!spot) return false
   money[1] -= cost
-  world.placeBuilding(spot.cx, spot.cz, spot.w, spot.d, spot.h, 1)
+  const stories = storiesFor(spot.cx, spot.cz, 1)
+  const slot = Math.floor(Math.random() * 12)
+  const b = world.placeBuilding(spot.cx, spot.cz, spot.w, spot.d, stories, 1, slot)
+  b.name = BUILDING_TYPES[Math.floor(Math.random() * BUILDING_TYPES.length)]
   world.rebuild()
   return true
 }
@@ -2684,7 +2709,8 @@ function enemyEconomyTurn(): boolean {
 }
 
 function manageAction(a: 'fire' | 'repair' | 'buy' | 'build' | 'road'): void {
-  if (phase !== 'manage') return
+  // Reachable from the armed default (aim) or the plain manage state.
+  if (phase !== 'manage' && phase !== 'aim' && phase !== 'charge') return
   if (a === 'road') {
     const nB = world.buildings.filter(b => b.side === 0).length
     if (nB < 2) {
@@ -2695,6 +2721,7 @@ function manageAction(a: 'fire' | 'repair' | 'buy' | 'build' | 'road'): void {
       hud.msg(`a road costs $${ROAD_COST} — not enough cash`)
       return
     }
+    hud.setPowerVisible(false)
     hud.hideManage()
     enterRoadMode()
     return
@@ -2712,15 +2739,15 @@ function manageAction(a: 'fire' | 'repair' | 'buy' | 'build' | 'road'): void {
       hud.msg(`a building costs $${cost.toLocaleString()} — not enough cash`)
       return
     }
+    hud.setPowerVisible(false)
     hud.hideManage()
     enterBuildMode()
     return
   }
   if (a === 'fire') {
-    hud.hideManage()
+    // Fire is the default; just (re-)arm without dismissing the menu.
     phase = 'aim'
     hud.setPowerVisible(true)
-    hud.banner('AIM', 'hold space to fire')
     hud.setPower(null, shotThisRound ? lastPlayerPower : null)
   } else if (a === 'repair') {
     const cost = repairCost()
@@ -2737,11 +2764,14 @@ function manageAction(a: 'fire' | 'repair' | 'buy' | 'build' | 'road'): void {
     world.rebuild()
     hud.setIntegrity(world.integrity(0), world.integrity(1))
     hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    hud.setPowerVisible(false)
     hud.hideManage()
     hud.banner('CASTLE REPAIRED', `+${restored} blocks · –$${cost.toLocaleString()}`)
     endPlayerManage()
   } else {
-    // Buy: reuse the armory overlay; closing it (DONE) ends the turn.
+    // Buy is a FREE action: open the armory; closing it (DONE) returns you to your
+    // turn so you can still fire or build.
+    hud.setPowerVisible(false)
     hud.hideManage()
     perTurnBuy = true
     phase = 'shop'
@@ -3081,9 +3111,9 @@ function refreshShop(): void {
     () => {
       hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
       if (perTurnBuy) {
-        // Per-turn buy: the purchase was this turn's action — enemy goes next.
+        // Buying is free: hand the turn back to the player, armed to fire or build.
         perTurnBuy = false
-        endPlayerManage()
+        openManage()
       } else {
         hud.banner(`ROUND ${round}`, 'take the field')
         startTurn(0)
@@ -3160,6 +3190,7 @@ window.addEventListener('keydown', e => {
       phase = 'charge'
       chargeT = 0
       chargePower = 0
+      hud.hideManage() // declutter while the shot charges
     }
     // Night: space flicks the flashlight on and off. Dark = hidden but blind.
     if (phase === 'night' && !walker.zombie && !e.repeat) {
@@ -3168,10 +3199,9 @@ window.addEventListener('keydown', e => {
     }
   }
   if (e.code === 'KeyV') toggleWorldView()
-  // Manage-or-fire shortcuts.
-  if (phase === 'manage' && !e.repeat) {
-    if (e.code === 'KeyF') manageAction('fire')
-    else if (e.code === 'KeyR') manageAction('repair')
+  // Manage-or-fire shortcuts — available from the armed default (aim) too.
+  if ((phase === 'manage' || phase === 'aim') && !e.repeat) {
+    if (e.code === 'KeyR') manageAction('repair')
     else if (e.code === 'KeyB') manageAction('buy')
     else if (e.code === 'KeyC') manageAction('build')
     else if (e.code === 'KeyG') manageAction('road')
@@ -3481,7 +3511,7 @@ window.__sv = {
     for (let k = 0; k < 4; k++) {
       const cx = Math.round(GX / 2 + 16 + k * 7)
       const cz = Math.round(GZ / 2 + (k - 2) * 7)
-      if (cx < GX - 4 && world.canPlaceBuilding(cx, cz, 7, 6)) world.placeBuilding(cx, cz, 7, 6, 14, 1)
+      if (cx < GX - 4 && world.canPlaceBuilding(cx, cz, 7, 6)) world.placeBuilding(cx, cz, 7, 6, storiesFor(cx, cz, 1), 1, k % 12)
     }
     world.rebuild()
     money[1] = 6000
@@ -3513,12 +3543,13 @@ window.__sv = {
   dbgBuild: () => {
     const anchor = world.buildings.filter(b => b.side === 0).slice(-1)[0]
     if (!anchor) return false
-    for (const [dx, dz] of [[0, 9], [9, 0], [0, -9], [7, 7], [-7, 7], [7, -7]]) {
+    for (const [dx, dz] of [[0, 12], [12, 0], [0, -12], [9, 9], [-9, 9], [12, -6]]) {
       build.w = anchor.w
       build.d = anchor.d
-      build.h = 14
+      build.slot = Math.floor(Math.random() * 12)
       build.cx = anchor.cx + dx
       build.cz = anchor.cz + dz
+      build.stories = storiesFor(build.cx, build.cz, 0)
       if (buildValid()) {
         phase = 'build'
         placeGhostBuilding()

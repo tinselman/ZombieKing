@@ -46,11 +46,12 @@ const CSS = `
 #sc-end p { font-size: 16px; color: #7a838d; margin: 0 0 28px; }
 #sc-end button { pointer-events: auto; font-size: 16px; font-weight: 700; letter-spacing: 0.08em; padding: 12px 36px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-end button:hover { background: #454c55; }
-#sc-manage { position: fixed; left: 16px; bottom: 200px; display: none; gap: 6px; pointer-events: auto; }
+#sc-manage { position: fixed; left: 16px; bottom: 200px; display: none; flex-direction: column; align-items: stretch; gap: 6px; width: 170px; pointer-events: auto; }
 #sc-manage button { pointer-events: auto; font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; padding: 8px 12px; border-radius: 9px; border: 1px solid #2c3138; background: rgba(255,255,255,0.9); color: #2c3138; cursor: pointer; box-shadow: 0 2px 10px rgba(40,50,60,0.1); text-align: center; }
 #sc-manage button:hover { background: #2c3138; color: #fff; }
 #sc-manage button.fire { background: #2c3138; color: #fff; }
 #sc-manage button.fire:hover { background: #454c55; }
+#sc-manage button.sel { box-shadow: 0 0 0 2px #2c3138, 0 2px 10px rgba(40,50,60,0.18); }
 #sc-manage button:disabled { opacity: 0.4; cursor: default; }
 #sc-manage button small { display: block; font-weight: 400; font-size: 11px; letter-spacing: 0.04em; opacity: 0.7; margin-top: 2px; }
 #sc-buildHint { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); display: none; font-size: 13px; font-weight: 600; color: #2c3138; background: rgba(255,255,255,0.85); border: 1px solid #d8dde3; border-radius: 8px; padding: 8px 16px; pointer-events: none; }
@@ -379,7 +380,8 @@ export function createHud(
         roadOk: boolean
         network: string
       },
-      on: (a: 'fire' | 'repair' | 'buy' | 'build' | 'road') => void
+      on: (a: 'fire' | 'repair' | 'buy' | 'build' | 'road') => void,
+      selected?: 'fire' | 'repair' | 'buy' | 'build' | 'road'
     ) {
       onManage = on
       const full = data.repairCost <= 0
@@ -389,6 +391,8 @@ export function createHud(
       manageBuildBtn.disabled = !data.buildOk || data.cash < data.buildCost
       manageRoadSmall.textContent = data.network
       manageRoadBtn.disabled = !data.roadOk || data.cash < data.roadCost
+      // Highlight the currently-selected action (Fire by default).
+      manageEl.querySelectorAll('button').forEach(b => b.classList.toggle('sel', (b as HTMLElement).dataset.a === selected))
       // Dock the row just above the weapon list on the left.
       const wr = weaponsPanel.getBoundingClientRect()
       manageEl.style.bottom = `${window.innerHeight - wr.top + 10}px`

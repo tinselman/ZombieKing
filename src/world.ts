@@ -2,9 +2,9 @@
 // Standalone from the voxel-builder app; shares nothing but the three.js dependency.
 import * as THREE from 'three'
 
-export const GX = 160
+export const GX = 320
 export const GY = 96
-export const GZ = 72
+export const GZ = 144
 export const GRAVITY = 28
 export const WIND_ACCEL = 0.45 // projectile acceleration per unit of wind speed
 
@@ -22,7 +22,8 @@ export const CITY = 5 // ruined city buildings between the forts — night scave
 export type Vec3 = { x: number; y: number; z: number }
 export type Wind = { x: number; z: number }
 
-const MAX_INSTANCES = 140000
+const MAX_INSTANCES = 520000
+const MAX_BRIDGE = 80000
 const MAX_DEBRIS = 1600
 const RUBBLE_MARGIN = 3 // fort voxels below baseY+margin no longer count as "standing"
 
@@ -121,8 +122,31 @@ export type BuildingInfo = {
   w: number
   d: number
   h: number
+  stories: number
+  slot: number // palette slot for the Victorian wall colour
+  name?: string
   origCount: number
   voxels: number[]
+}
+
+// Victorian townhouse massing.
+const STORY_H = 4 // voxels per storey
+// 12 muted Victorian wall pastels (paint slot 0..11). Roof/chimney share a slate.
+const VIC_WALL = [0xd8b8a0, 0xc9d0a8, 0xb9c6da, 0xd8c0d0, 0xc0d8cc, 0xdad0aa, 0xc8b2c6, 0xd2b2a8, 0xaac2ca, 0xd2cab2, 0xbcd2b0, 0xb2becb]
+const VIC_ROOF = 0x6a5b57 // slate/brown roof
+// paint-code encoding in the parallel `paint` array (0 = unpainted):
+const PAINT_WALL = 1 // wall code = PAINT_WALL + slot  (1..12)
+const PAINT_ROOF = 20 // roof code = PAINT_ROOF + slot  (20..31)
+const PAINT_WINDOW = 40 // window code = PAINT_WINDOW + slot (40..51)
+const VIC_GLASS = 0x33414d // dark window glass
+
+// Storeys → wall height + hip-roof height + total layer count.
+export function buildingSpec(w: number, d: number, stories: number): { hw: number; hd: number; wallH: number; roofH: number; h: number } {
+  const hw = Math.floor(w / 2)
+  const hd = Math.floor(d / 2)
+  const wallH = Math.max(1, stories) * STORY_H
+  const roofH = Math.min(hw, hd) + 1 // hip roof insets 1/side per layer to a ridge
+  return { hw, hd, wallH, roofH, h: wallH + roofH }
 }
 
 export type ShotResult = { hit: boolean; pos: Vec3; t: number }
@@ -132,10 +156,13 @@ const FORT_HEIGHT = 17
 
 export class World {
   grid: Uint8Array
+  paint: Uint8Array // per-voxel Victorian colour code for BLD cells (0 = none)
   forts: FortInfo[] = []
   buildings: BuildingInfo[] = []
   mesh: THREE.InstancedMesh
   debrisMesh: THREE.InstancedMesh
+  bridgeMesh!: THREE.InstancedMesh
+  private bridgeVoxels: { x: number; y: number; z: number; warm: boolean }[] = []
   debris: Debris[] = []
   dirty = false
   waterY = -1 // global water table; -1 = dry map
@@ -155,6 +182,7 @@ export class World {
   constructor(scene: THREE.Scene) {
     this.scene = scene
     this.grid = new Uint8Array(GX * GY * GZ)
+    this.paint = new Uint8Array(GX * GY * GZ)
     const geo = new THREE.BoxGeometry(1, 1, 1)
     const mat = new THREE.MeshLambertMaterial({ color: 0xffffff })
     this.mesh = new THREE.InstancedMesh(geo, mat, MAX_INSTANCES)
@@ -170,6 +198,17 @@ export class World {
     this.debrisMesh.frustumCulled = false
     this.debrisMesh.count = 0
     scene.add(this.debrisMesh)
+
+    // Fine (quarter-scale) voxels for arching bridges — a separate mesh so the
+    // bridge deck reads as delicate planks rather than blocky road cells.
+    const bgeo = new THREE.BoxGeometry(0.25, 0.25, 0.25)
+    const bmat = new THREE.MeshLambertMaterial({ color: 0xffffff })
+    this.bridgeMesh = new THREE.InstancedMesh(bgeo, bmat, MAX_BRIDGE)
+    this.bridgeMesh.castShadow = true
+    this.bridgeMesh.receiveShadow = true
+    this.bridgeMesh.frustumCulled = false
+    this.bridgeMesh.count = 0
+    scene.add(this.bridgeMesh)
 
     // Stylized water top: solid light blue with thick white flow-dashes that
     // scroll to show movement. Drawn once; animated via texture offset.
@@ -248,8 +287,10 @@ export class World {
 
   generate(seed: number, forti: Fortifications[] = [{ height: 0, towers: 0 }, { height: 0, towers: 0 }]): void {
     this.grid.fill(EMPTY)
+    this.paint.fill(0)
     this.debris.length = 0
     this.debrisMesh.count = 0
+    this.clearBridges()
     this.forts = []
     this.buildings = []
     this.colorSeed = seed & 0xffff
@@ -505,56 +546,74 @@ export class World {
     return gmax - gmin <= 9 // buildings root to the terrain, so tolerate slopes
   }
 
-  // Build a tall shield building: solid tower with a narrower setback near the
-  // top for silhouette variation, rooted to the terrain.
-  placeBuilding(cx: number, cz: number, w: number, d: number, h: number, side: number): BuildingInfo {
+  // Write one horizontal layer of a Victorian townhouse: full-footprint walls
+  // for the storeys, then an inset hip roof, plus a corner chimney. Paints each
+  // cell with its wall/roof colour code so rebuild() can render it pastel.
+  private writeLayer(cx: number, cz: number, side: number, baseY: number, dy: number, spec: { hw: number; hd: number; wallH: number; roofH: number }, slot: number): void {
     const cell = side === 0 ? BLD_A : BLD_B
-    const hw = Math.floor(w / 2)
-    const hd = Math.floor(d / 2)
-    let baseY = 0
-    for (let x = cx - hw; x <= cx + hw; x++) {
-      for (let z = cz - hd; z <= cz + hd; z++) baseY = Math.max(baseY, this.surfaceY(x, z))
+    const { hw, hd, wallH } = spec
+    const put = (x: number, y: number, z: number, code: number) => {
+      if (!this.inBounds(x, y, z)) return
+      const i = this.idx(x, y, z)
+      this.grid[i] = cell
+      this.paint[i] = code
     }
-    baseY += 1
-    const setback = h - Math.floor(h * 0.32) // where the tower narrows
-    const put = (x: number, y: number, z: number) => {
-      if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
-    }
-    for (let dy = 0; dy < h; dy++) {
-      const narrow = dy >= setback ? 1 : 0
-      for (let dx = -hw + narrow; dx <= hw - narrow; dx++) {
-        for (let dz = -hd + narrow; dz <= hd - narrow; dz++) {
-          put(cx + dx, baseY + dy, cz + dz)
+    const y = baseY + dy
+    if (dy < wallH) {
+      // Storey walls: full footprint, with a band of windows midway up each storey
+      // (skipping the corners, so they read as Victorian sash windows).
+      const windowRow = dy % STORY_H === 2
+      for (let dx = -hw; dx <= hw; dx++) {
+        for (let dz = -hd; dz <= hd; dz++) {
+          const corner = (dx === -hw || dx === hw) && (dz === -hd || dz === hd)
+          const win = windowRow && !corner && (dx + dz) % 2 === 0
+          put(cx + dx, y, cz + dz, win ? PAINT_WINDOW + slot : PAINT_WALL + slot)
         }
       }
+      // Chimney: a single stack rising through the top storey at a back corner.
+      if (dy >= wallH - STORY_H) put(cx + hw, y, cz - hd, PAINT_ROOF + slot)
+    } else {
+      // Hip roof: inset 1 per layer on every side until it closes to a ridge.
+      const inset = dy - wallH
+      const rx = hw - inset
+      const rz = hd - inset
+      if (rx >= 0 && rz >= 0) {
+        for (let dx = -rx; dx <= rx; dx++) {
+          for (let dz = -rz; dz <= rz; dz++) put(cx + dx, y, cz + dz, PAINT_ROOF + slot)
+        }
+      }
+      // Chimney pokes ~2 above the eaves.
+      if (inset <= 2) put(cx + hw, y, cz - hd, PAINT_ROOF + slot)
     }
-    // Fill any gap down to the terrain so it doesn't float over a slope.
-    for (let dx = -hw; dx <= hw; dx++) {
-      for (let dz = -hd; dz <= hd; dz++) {
+  }
+
+  // Fill any gap below the footprint down to the terrain (so a house on a slope
+  // doesn't float). Painted as wall.
+  private fillBuildingBase(cx: number, cz: number, side: number, baseY: number, spec: { hw: number; hd: number }, slot: number): void {
+    const cell = side === 0 ? BLD_A : BLD_B
+    for (let dx = -spec.hw; dx <= spec.hw; dx++) {
+      for (let dz = -spec.hd; dz <= spec.hd; dz++) {
         let fy = baseY - 1
         while (fy >= 0 && this.cellAt(cx + dx, fy, cz + dz) === EMPTY) {
-          put(cx + dx, fy, cz + dz)
+          if (this.inBounds(cx + dx, fy, cz + dz)) {
+            const i = this.idx(cx + dx, fy, cz + dz)
+            this.grid[i] = cell
+            this.paint[i] = PAINT_WALL + slot
+          }
           fy--
         }
       }
     }
-    // Snapshot just this building's footprint volume (same-side buildings share
-    // a cell type, so we scan this building's own column range, not the whole grid).
-    const voxels: number[] = []
-    for (let dy = -6; dy < h + 2; dy++) {
-      const y = baseY + dy
-      if (y < 0 || y >= GY) continue
-      for (let dx = -hw; dx <= hw; dx++) {
-        for (let dz = -hd; dz <= hd; dz++) {
-          const i = this.idx(cx + dx, y, cz + dz)
-          if (this.grid[i] === cell) voxels.push(i)
-        }
-      }
-    }
-    const b: BuildingInfo = { cell, side, cx, cz, baseY, w, d, h, origCount: voxels.length, voxels }
-    this.buildings.push(b)
+  }
+
+  // Build a whole Victorian townhouse at once (used by the enemy AI).
+  placeBuilding(cx: number, cz: number, w: number, d: number, stories: number, side: number, slot = 0): BuildingInfo {
+    const spec = buildingSpec(w, d, stories)
+    const baseY = this.buildingBaseYAt(cx, cz, w, d)
+    for (let dy = 0; dy < spec.h; dy++) this.writeLayer(cx, cz, side, baseY, dy, spec, slot)
+    this.fillBuildingBase(cx, cz, side, baseY, spec, slot)
     this.dirty = true
-    return b
+    return this.registerBuilding(cx, cz, w, d, stories, side, baseY, slot)
   }
 
   // Incremental build (for the quick-grow-brick animation): compute the base,
@@ -569,38 +628,20 @@ export class World {
     return baseY + 1
   }
 
-  writeBuildingLayer(cx: number, cz: number, w: number, d: number, h: number, side: number, baseY: number, dy: number): void {
-    const cell = side === 0 ? BLD_A : BLD_B
-    const hw = Math.floor(w / 2)
-    const hd = Math.floor(d / 2)
-    const setback = h - Math.floor(h * 0.32)
-    const put = (x: number, y: number, z: number) => {
-      if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
-    }
-    const narrow = dy >= setback ? 1 : 0
-    for (let dx = -hw + narrow; dx <= hw - narrow; dx++) {
-      for (let dz = -hd + narrow; dz <= hd - narrow; dz++) put(cx + dx, baseY + dy, cz + dz)
-    }
-    if (dy === 0) {
-      for (let dx = -hw; dx <= hw; dx++) {
-        for (let dz = -hd; dz <= hd; dz++) {
-          let fy = baseY - 1
-          while (fy >= 0 && this.cellAt(cx + dx, fy, cz + dz) === EMPTY) {
-            put(cx + dx, fy, cz + dz)
-            fy--
-          }
-        }
-      }
-    }
+  writeBuildingLayer(cx: number, cz: number, w: number, d: number, stories: number, side: number, baseY: number, dy: number, slot: number): void {
+    const spec = buildingSpec(w, d, stories)
+    this.writeLayer(cx, cz, side, baseY, dy, spec, slot)
+    if (dy === 0) this.fillBuildingBase(cx, cz, side, baseY, spec, slot)
     this.dirty = true
   }
 
-  registerBuilding(cx: number, cz: number, w: number, d: number, h: number, side: number, baseY: number): BuildingInfo {
+  registerBuilding(cx: number, cz: number, w: number, d: number, stories: number, side: number, baseY: number, slot: number): BuildingInfo {
     const cell = side === 0 ? BLD_A : BLD_B
-    const hw = Math.floor(w / 2)
-    const hd = Math.floor(d / 2)
+    const spec = buildingSpec(w, d, stories)
+    const hw = spec.hw
+    const hd = spec.hd
     const voxels: number[] = []
-    for (let dy = -6; dy < h + 2; dy++) {
+    for (let dy = -6; dy < spec.h + 2; dy++) {
       const y = baseY + dy
       if (y < 0 || y >= GY) continue
       for (let dx = -hw; dx <= hw; dx++) {
@@ -610,7 +651,7 @@ export class World {
         }
       }
     }
-    const b: BuildingInfo = { cell, side, cx, cz, baseY, w, d, h, origCount: voxels.length, voxels }
+    const b: BuildingInfo = { cell, side, cx, cz, baseY, w, d, h: spec.h, stories, slot, origCount: voxels.length, voxels }
     this.buildings.push(b)
     return b
   }
@@ -656,10 +697,11 @@ export class World {
       z += Math.sign(tz - z)
       line.push({ x, z })
     }
-    // Height profile: sit on terrain+1, but never drop more than 1 per cell — so
-    // over a gap/water the deck holds its height (a bridge) instead of diving in.
+    // Height profile follows the TERRAIN surface (ignoring buildings), so a road
+    // meets a house at its base rather than climbing onto its roof; it never drops
+    // more than 1 per cell, so over a gap/water the deck holds height (a bridge).
     const surf = (cx: number, cz: number) => {
-      const sy = this.surfaceY(cx, cz)
+      const sy = this.terrainSurfaceY(cx, cz)
       return sy < 0 ? 0 : sy
     }
     const roadY: number[] = []
@@ -670,6 +712,7 @@ export class World {
     const put = (cx: number, cy: number, cz: number) => {
       if (this.inBounds(cx, cy, cz) && this.grid[this.idx(cx, cy, cz)] === EMPTY) this.grid[this.idx(cx, cy, cz)] = cell
     }
+    const bridgeCells: { x: number; z: number; y: number; px: number; pz: number }[] = []
     const out: { x: number; z: number; y: number }[] = []
     for (let i = 0; i < line.length; i++) {
       const cx = line[i].x
@@ -682,21 +725,88 @@ export class World {
       const dirz = Math.sign(next.z - prev.z)
       const px = dirz !== 0 ? 1 : 0 // perpendicular offset
       const pz = dirx !== 0 ? 1 : 0
-      for (const s of [0, 1]) {
-        const wx = cx + px * s
-        const wz = cz + pz * s
-        put(wx, ry, wz)
-        // Solid fill down to the terrain for stairs on small gaps; leave the
-        // deck floating over deep gaps/water so it reads as a bridge.
-        const groundTop = surf(wx, wz)
-        if (ry - 1 - groundTop <= 3) {
+      // Deep drop below the deck → this stretch is an arching bridge, rendered as
+      // quarter-size voxels; shallow dips get solid cobblestone stairs.
+      const isBridge = ry - 1 - surf(cx, cz) > 3
+      if (isBridge) {
+        bridgeCells.push({ x: cx, z: cz, y: ry, px, pz })
+      } else {
+        for (const s of [0, 1]) {
+          const wx = cx + px * s
+          const wz = cz + pz * s
+          put(wx, ry, wz)
+          const groundTop = surf(wx, wz)
           for (let fy = ry - 1; fy > groundTop; fy--) put(wx, fy, wz)
         }
       }
       out.push({ x: cx, z: cz, y: ry })
     }
+    if (bridgeCells.length) this.addBridge(bridgeCells, side)
     this.dirty = true
     return out
+  }
+
+  // Terrain/water surface height, skipping any structures (forts, buildings,
+  // roads) piled on top — the natural ground a bridge should span between.
+  terrainSurfaceY(x: number, z: number): number {
+    const rx = Math.round(x)
+    const rz = Math.round(z)
+    if (rx < 0 || rx >= GX || rz < 0 || rz >= GZ) return -1
+    for (let y = GY - 1; y >= 0; y--) {
+      const c = this.grid[this.idx(rx, y, rz)]
+      if (c === TERRAIN || c === WATER) return y
+    }
+    return -1
+  }
+
+  // Build the arching bridge deck out of quarter-size voxels: a 2-wide plank deck
+  // with a low railing along both outer edges.
+  private addBridge(cells: { x: number; z: number; y: number; px: number; pz: number }[], side: number): void {
+    const warm = side === 0
+    for (const c of cells) {
+      for (let s = 0; s <= 1; s++) {
+        const bx = c.x + c.px * s
+        const bz = c.z + c.pz * s
+        for (let a = 0; a < 4; a++) {
+          for (let b = 0; b < 4; b++) {
+            const fx = bx - 0.5 + 0.125 + a * 0.25
+            const fz = bz - 0.5 + 0.125 + b * 0.25
+            this.bridgeVoxels.push({ x: fx, y: c.y + 0.375, z: fz, warm })
+            // Railing: the outermost fine column along the width rises two voxels.
+            const onEdge = (c.px !== 0 && ((s === 0 && a === 0) || (s === 1 && a === 3))) || (c.pz !== 0 && ((s === 0 && b === 0) || (s === 1 && b === 3)))
+            if (onEdge) {
+              this.bridgeVoxels.push({ x: fx, y: c.y + 0.625, z: fz, warm })
+              this.bridgeVoxels.push({ x: fx, y: c.y + 0.875, z: fz, warm })
+            }
+          }
+        }
+      }
+    }
+    this.rebuildBridges()
+  }
+
+  private rebuildBridges(): void {
+    const m = this.tmpM
+    const col = this.tmpC
+    let i = 0
+    for (const v of this.bridgeVoxels) {
+      if (i >= MAX_BRIDGE) break
+      m.makeTranslation(v.x, v.y, v.z)
+      this.bridgeMesh.setMatrixAt(i, m)
+      if (v.warm) col.setRGB(0.62, 0.55, 0.5)
+      else col.setRGB(0.5, 0.55, 0.62)
+      this.bridgeMesh.setColorAt(i, col)
+      i++
+    }
+    this.bridgeMesh.count = i
+    this.bridgeMesh.instanceMatrix.needsUpdate = true
+    if (this.bridgeMesh.instanceColor) this.bridgeMesh.instanceColor.needsUpdate = true
+  }
+
+  clearBridges(): void {
+    this.bridgeVoxels.length = 0
+    this.bridgeMesh.count = 0
+    this.bridgeMesh.instanceMatrix.needsUpdate = true
   }
 
   // Fraction of a building still standing (0..1).
@@ -1102,14 +1212,26 @@ export class World {
             // Player castle: light red.
             const v = 0.92 + h * 0.05
             col.setRGB(Math.min(1, v + 0.06), v * 0.86, v * 0.82)
-          } else if (c === BLD_A || c === ROAD_A) {
-            // Player building / road: tall, dark red.
-            const v = 0.34 + 0.16 * (y / 40) + h * 0.06
-            col.setRGB(v + 0.14, v * 0.5, v * 0.52)
-          } else if (c === BLD_B || c === ROAD_B) {
-            // Enemy building / road: tall, dark blue.
-            const v = 0.32 + 0.16 * (y / 40) + h * 0.06
-            col.setRGB(v * 0.5, v * 0.58, v + 0.16)
+          } else if (c === ROAD_A || c === ROAD_B) {
+            // Cobblestone road/bridge — faintly warm (you) or cool (enemy).
+            const v = 0.52 + h * 0.07
+            if (c === ROAD_A) col.setRGB(Math.min(1, v + 0.04), v * 0.92, v * 0.86)
+            else col.setRGB(v * 0.86, v * 0.92, Math.min(1, v + 0.04))
+          } else if (c === BLD_A || c === BLD_B) {
+            // Victorian townhouse: per-building pastel wall or slate roof, with a
+            // warm (player) / cool (enemy) tint so you can still read ownership.
+            const warm = c === BLD_A
+            const p = this.paint[x + zOff]
+            let base: number
+            if (p >= 40) base = VIC_GLASS
+            else if (p >= 20) base = VIC_ROOF
+            else if (p >= 1) base = VIC_WALL[(p - 1) % VIC_WALL.length]
+            else base = warm ? 0xc08a7a : 0x7a8ac0
+            let r = ((base >> 16) & 255) / 255 + (h - 0.5) * 0.05
+            let g = ((base >> 8) & 255) / 255 + (h - 0.5) * 0.05
+            let b = (base & 255) / 255 + (h - 0.5) * 0.05
+            if (warm) { r *= 1.07; b *= 0.9 } else { b *= 1.07; r *= 0.9 }
+            col.setRGB(Math.min(1, Math.max(0, r)), Math.min(1, Math.max(0, g)), Math.min(1, Math.max(0, b)))
           } else {
             // Enemy castle: light blue.
             const v = 0.92 + h * 0.05
