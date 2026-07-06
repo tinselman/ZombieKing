@@ -3,7 +3,7 @@
 import * as THREE from 'three'
 
 export const GX = 320
-export const GY = 96
+export const GY = 160
 export const GZ = 144
 export const GRAVITY = 28
 export const WIND_ACCEL = 0.45 // projectile acceleration per unit of wind speed
@@ -297,73 +297,99 @@ export class World {
     const rand = mulberry32(seed)
 
     const nseed = Math.floor(rand() * 100000)
-    // Per-match character: dramatic, fully random relief — rolling plains one
-    // game, jagged peaks / ridged badlands / terraced mesas / deep slot canyons
-    // the next. Water always pools toward the middle of the map, in a different
-    // shape each time.
-    const amp = 26 + rand() * 62
-    const sharp = 1.1 + rand() * 1.4 // exponent >1 exaggerates peaks vs valleys
-    const ridged = rand() < 0.45
+    // Per-match character: dramatic, towering, fully random relief — rolling
+    // plains one game, soaring peaks / ridged badlands / terraced mesas / deep
+    // slot canyons the next. Water always pools toward the middle of the map.
+    const amp = 60 + rand() * 95 // peaks tower up toward the raised ceiling
+    const sharp = 1.1 + rand() * 1.15 // exponent >1 exaggerates peaks vs valleys
+    const ridged = rand() < 0.5
     const plateau = rand() < 0.4
     const plateauLevels = 3 + Math.floor(rand() * 4)
     const waterY = Math.round(6 + rand() * 12)
     const riverBed = waterY - 3 // channel floor always below the water table
     const riverSlant = (rand() - 0.5) * 0.7
     const riverWidth = 5 + rand() * 9
-    // Central water always, but a different form each game: a winding river, a
-    // broad lake, or both — cutting through the high country so it reads as
-    // flowing from higher ground down into the low middle.
     const hasLake = rand() < 0.6
     const lakeCX = GX / 2 + (rand() - 0.5) * 40
     const lakeCZ = GZ / 2 + (rand() - 0.5) * 40
     const lakeR = 22 + rand() * 28
-    // A couple of dry slot canyons slice the landscape at random angles.
     const canyons = Array.from({ length: Math.floor(rand() * 3) }, () => ({
       x: rand() * GX,
       z: rand() * GZ,
       ang: rand() * Math.PI,
       w: 2.5 + rand() * 3.5,
-      depth: 14 + rand() * 28,
+      depth: 16 + rand() * 34,
     }))
+
+    // The natural terrain height at any column (before forts flatten their pads).
+    const terrainH = (x: number, z: number): number => {
+      let n01 = 0.5 + 0.5 * fbmPerlin(x / 34, z / 34, nseed)
+      if (ridged) {
+        const r = 1 - Math.abs(fbmPerlin(x / 46, z / 46, nseed + 777, 4))
+        n01 = n01 * 0.4 + r * r * 0.6
+      }
+      if (plateau) {
+        const t = Math.floor(n01 * plateauLevels) / plateauLevels
+        n01 = n01 * 0.22 + t * 0.78
+      }
+      const detail = fbmPerlin(x / 11, z / 11, nseed + 999, 3) * 6
+      let h = 4 + Math.pow(Math.max(0, n01), sharp) * amp + detail
+      // Central river — always present, carving down to the water table.
+      {
+        const xr = GX / 2 + riverSlant * (z - GZ / 2) + fbmPerlin(z / 34, 3.3, nseed + 555) * 36
+        const d = x - xr
+        const g = Math.exp(-(d * d) / (2 * riverWidth * riverWidth))
+        h -= Math.max(0, h - riverBed) * g
+      }
+      // Central lake — a broad basin pulled below the water table.
+      if (hasLake) {
+        const dl = Math.hypot(x - lakeCX, z - lakeCZ)
+        if (dl < lakeR) {
+          const t = smoothstep(Math.min(1, dl / lakeR))
+          h = Math.min(h, riverBed) * (1 - t) + h * t
+        }
+      }
+      // Dry slot canyons: deep narrow cuts, floors kept just above the water.
+      for (const c of canyons) {
+        const across = -(x - c.x) * Math.sin(c.ang) + (z - c.z) * Math.cos(c.ang)
+        if (Math.abs(across) < c.w) {
+          const g = 1 - Math.abs(across) / c.w
+          h = Math.max(waterY + 1, h - c.depth * g * g)
+        }
+      }
+      return h
+    }
+
+    // Towers sit centred on the cross-axis and pushed right to each back edge —
+    // never off to the side, never out toward the middle. Their elevation is
+    // still whatever the land gives (a lofty mesa one game, a low shelf the
+    // next), but a flat pad is levelled around each so a city can be built.
+    const czCentre = Math.round(GZ / 2)
+    const cxA = 14
+    const czA = czCentre
+    const cxB = GX - 15
+    const czB = czCentre
+    const clampPad = (h: number) => Math.max(waterY + 3, Math.min(GY - 30, h))
+    const padA = clampPad(terrainH(cxA, czA))
+    const padB = clampPad(terrainH(cxB, czB))
+    const PAD_FLAT = 20 // fully level within this radius of a tower
+    const PAD_BLEND = 34 // ramp back to natural terrain by here
+    const pads = [
+      { cx: cxA, cz: czA, pad: padA },
+      { cx: cxB, cz: czB, pad: padB },
+    ]
 
     this.waterY = waterY
     for (let x = 0; x < GX; x++) {
       for (let z = 0; z < GZ; z++) {
-        let n01 = 0.5 + 0.5 * fbmPerlin(x / 34, z / 34, nseed)
-        if (ridged) {
-          const r = 1 - Math.abs(fbmPerlin(x / 46, z / 46, nseed + 777, 4))
-          n01 = n01 * 0.4 + r * r * 0.6
-        }
-        if (plateau) {
-          // Terraced mesas: quantize height into stepped levels with cliffs.
-          const t = Math.floor(n01 * plateauLevels) / plateauLevels
-          n01 = n01 * 0.22 + t * 0.78
-        }
-        const detail = fbmPerlin(x / 11, z / 11, nseed + 999, 3) * 5.5
-        let h = 4 + Math.pow(Math.max(0, n01), sharp) * amp + detail
-        // Central river — always present, carving down to the water table.
-        {
-          const xr = GX / 2 + riverSlant * (z - GZ / 2) + fbmPerlin(z / 34, 3.3, nseed + 555) * 36
-          const d = x - xr
-          const g = Math.exp(-(d * d) / (2 * riverWidth * riverWidth))
-          h -= Math.max(0, h - riverBed) * g
-        }
-        // Central lake — a broad basin pulled below the water table.
-        if (hasLake) {
-          const dl = Math.hypot(x - lakeCX, z - lakeCZ)
-          if (dl < lakeR) {
-            const t = smoothstep(Math.min(1, dl / lakeR))
-            h = Math.min(h, riverBed) * (1 - t) + h * t
-          }
-        }
-        // Dry slot canyons: deep narrow cuts, floors kept just above the water.
-        for (const c of canyons) {
-          const dx = x - c.x
-          const dz = z - c.z
-          const across = -dx * Math.sin(c.ang) + dz * Math.cos(c.ang)
-          if (Math.abs(across) < c.w) {
-            const g = 1 - Math.abs(across) / c.w
-            h = Math.max(waterY + 1, h - c.depth * g * g)
+        let h = terrainH(x, z)
+        // Flat buildable pad around each tower, ramping out to natural terrain.
+        for (const f of pads) {
+          const d = Math.hypot(x - f.cx, z - f.cz)
+          if (d < PAD_FLAT) h = f.pad
+          else if (d < PAD_BLEND) {
+            const t = smoothstep((d - PAD_FLAT) / (PAD_BLEND - PAD_FLAT))
+            h = f.pad * (1 - t) + h * t
           }
         }
         const hi = Math.max(2, Math.min(GY - 26, Math.round(h)))
@@ -372,46 +398,6 @@ export class World {
         for (let y = hi + 1; y <= waterY; y++) this.grid[this.idx(x, y, z)] = WATER
       }
     }
-
-    // Drop the forts ONTO the finished terrain: a random spot on each side,
-    // wherever it lands — a peak, a gulch, tucked behind a ridge. Prefer dry
-    // ground (never drowned), but don't flatten it: the awkward positions are
-    // the fun (you fire without quite knowing where the enemy sits).
-    const pickFort = (xmin: number, xmax: number): { cx: number; cz: number } => {
-      let best: { cx: number; cz: number; sy: number } | null = null
-      for (let t = 0; t < 48; t++) {
-        const cx = Math.round(xmin + rand() * (xmax - xmin))
-        const cz = Math.round(6 + rand() * (GZ - 12))
-        const sy = this.surfaceY(cx, cz)
-        const dry = sy > waterY && this.cellAt(cx, sy, cz) === TERRAIN
-        if (dry && t > 4) return { cx, cz } // after a few tries, take the first dry random spot
-        if (!best || sy > best.sy) best = { cx, cz, sy }
-      }
-      return { cx: best!.cx, cz: best!.cz }
-    }
-    const A = pickFort(8, Math.round(GX * 0.3))
-    const B = pickFort(Math.round(GX * 0.7), GX - 9)
-    const cxA = A.cx
-    const czA = A.cz
-    const cxB = B.cx
-    const czB = B.cz
-    // If a fort still sits in water, raise a small dry footing so it isn't drowned.
-    const ensureDry = (cx: number, cz: number) => {
-      if (this.surfaceY(cx, cz) > waterY) return
-      for (let dx = -FORT_HALF - 1; dx <= FORT_HALF + 1; dx++) {
-        for (let dz = -FORT_HALF - 1; dz <= FORT_HALF + 1; dz++) {
-          const x = cx + dx
-          const z = cz + dz
-          if (!this.inBounds(x, 0, z)) continue
-          for (let y = 0; y <= waterY + 1; y++) {
-            const i = this.idx(x, y, z)
-            if (this.grid[i] === WATER || this.grid[i] === EMPTY) this.grid[i] = TERRAIN
-          }
-        }
-      }
-    }
-    ensureDry(cxA, czA)
-    ensureDry(cxB, czB)
 
     // Tower sites per side: the main tower plus any purchased extras, spread in z.
     const towerSites = (cx: number, cz: number, extra: number, dir: number): { cx: number; cz: number }[] => {

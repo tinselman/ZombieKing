@@ -1728,13 +1728,13 @@ function updateCamera(dt: number): void {
   let k = 3.5
 
   if (phase === 'build' || phase === 'road' || phase === 'grow') {
-    // Far-back isometric-style view framing your whole half of the board, centred
-    // on your fort's build area. The ghost / road preview moves within the frame.
+    // Straight top-down map view over your fort's build area (camera.up is set to
+    // +X below so the enemy side is toward the top of the screen).
     const t = world.forts[0].towers[0]
-    const hx = Math.min(GX / 2 - 12, t.cx + 20)
-    const hz = t.cz
-    desiredPos.set(hx - 130, 140, hz + 130)
-    desiredLook.set(hx, 6, hz)
+    const gy = world.surfaceY(t.cx, t.cz)
+    const hx = Math.min(GX / 2 - 16, t.cx + 12)
+    desiredPos.set(hx, gy + 175, t.cz)
+    desiredLook.set(hx, gy, t.cz)
     k = 2.4
   } else if (phase === 'king') {
     // Orbit the crumbling city as the King stomps it (whichever side was razed).
@@ -1859,6 +1859,10 @@ function updateCamera(dt: number): void {
     camera.position.z += (Math.random() - 0.5) * shakeAmp
     shakeAmp *= Math.exp(-2.8 * dt)
   }
+  // Top-down build/road view looks straight down; point "up" toward the enemy
+  // (+X) so the map reads consistently. Everything else uses world-up.
+  const topDown = phase === 'build' || phase === 'road' || phase === 'grow'
+  camera.up.set(topDown ? 1 : 0, topDown ? 0 : 1, 0)
   camera.lookAt(camLookCur)
 }
 
@@ -2080,8 +2084,8 @@ function openManage(): void {
 
 // ---------------------------------------------------------------- buildings (M3)
 
-const BUILD_MIN_GAP = 10 // buildings must sit at least this far from a neighbour
-const BUILD_MAX_GAP = 15 // …and no farther than this from the nearest one
+const BUILD_MIN_GAP = 10 // buildings must sit at least this far from a neighbour/tower
+const BUILD_MAX_GAP = 30 // …and no farther than this from the nearest one
 const BUILD_BASE_COST = 700 // escalates with each building you own
 function buildingCost(side = 0): number {
   const owned = world.buildings.filter(b => b.side === side).length
@@ -2140,7 +2144,7 @@ function enterBuildMode(): void {
   const az = anchor ? anchor.cz : world.forts[0].towers[0].cz
   build.cx = Math.min(GX / 2 - 4, ax + 12)
   build.cz = az
-  for (let r = anchor ? BUILD_MIN_GAP : 10; r <= (anchor ? BUILD_MAX_GAP : 26); r += 1) {
+  for (let r = BUILD_MIN_GAP; r <= BUILD_MAX_GAP; r += 1) {
     let found = false
     for (const [dx, dz] of [[r, 0], [0, r], [0, -r], [-r, 0], [r, -r], [r, r]]) {
       const cx = Math.min(GX / 2 - 4, ax + dx)
@@ -2170,13 +2174,13 @@ function cancelBuild(): void {
 function buildValid(): boolean {
   if (build.cx > GX / 2 - 3) return false
   if (!world.canPlaceBuilding(build.cx, build.cz, build.w, build.d)) return false
-  // 2nd+ building must sit 10–15 voxels from its nearest neighbour: never
-  // overlapping, always close enough to chain into the network.
-  const mine = world.buildings.filter(b => b.side === 0)
-  if (mine.length > 0) {
-    const nearest = Math.min(...mine.map(b => Math.hypot(b.cx - build.cx, b.cz - build.cz)))
-    if (nearest < BUILD_MIN_GAP || nearest > BUILD_MAX_GAP) return false
-  }
+  // Every building must sit 10–30 voxels from its nearest anchor — an existing
+  // building OR your tower — so the city stays a connected cluster around the
+  // castle (the first building anchors off the tower).
+  const t = world.forts[0].towers[0]
+  const anchors = [{ cx: t.cx, cz: t.cz }, ...world.buildings.filter(b => b.side === 0)]
+  const nearest = Math.min(...anchors.map(a => Math.hypot(a.cx - build.cx, a.cz - build.cz)))
+  if (nearest < BUILD_MIN_GAP || nearest > BUILD_MAX_GAP) return false
   return true
 }
 
@@ -2626,19 +2630,18 @@ function foeBuildSpot(): { cx: number; cz: number; w: number; d: number } | null
   const d = 5 + Math.floor(Math.random() * 4)
   const mine = world.buildings.filter(b => b.side === 1)
   const anchor = mine.length ? mine[mine.length - 1] : null
-  const seat = world.cannonSeat(1)
-  const ax = anchor ? anchor.cx : Math.round(seat.x)
-  const az = anchor ? anchor.cz : Math.round(seat.z)
-  for (let r = anchor ? BUILD_MIN_GAP : 10; r <= (anchor ? BUILD_MAX_GAP : 30); r += 1) {
+  const tower = world.forts[1].towers[0]
+  const anchors = [{ cx: tower.cx, cz: tower.cz }, ...mine]
+  const ax = anchor ? anchor.cx : tower.cx
+  const az = anchor ? anchor.cz : tower.cz
+  for (let r = BUILD_MIN_GAP; r <= BUILD_MAX_GAP; r += 1) {
     for (const [dx, dz] of [[-r, 0], [0, r], [0, -r], [r, 0], [-r, r], [-r, -r]]) {
       const cx = Math.max(GX / 2 + 3, Math.min(GX - 6, ax + dx))
       const cz = Math.max(4, Math.min(GZ - 4, az + dz))
       if (cx < GX / 2 + 3) continue
       if (!world.canPlaceBuilding(cx, cz, w, d)) continue
-      if (anchor) {
-        const nearest = Math.min(...mine.map(b => Math.hypot(b.cx - cx, b.cz - cz)))
-        if (nearest < BUILD_MIN_GAP || nearest > BUILD_MAX_GAP) continue
-      }
+      const nearest = Math.min(...anchors.map(a => Math.hypot(a.cx - cx, a.cz - cz)))
+      if (nearest < BUILD_MIN_GAP || nearest > BUILD_MAX_GAP) continue
       return { cx, cz, w, d }
     }
   }
