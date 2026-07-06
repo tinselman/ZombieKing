@@ -240,11 +240,17 @@ export class World {
     const ridged = rand() < 0.3
     const plateau = rand() < 0.35
     const plateauLevels = 3 + Math.floor(rand() * 3)
-    const waterY = Math.round(5 + rand() * 8)
-    const hasRiver = rand() < 0.75
-    const riverSlant = (rand() - 0.5) * 0.5
-    const riverWidth = 5 + rand() * 7
+    const waterY = Math.round(6 + rand() * 10) // higher table → more basins flood into lakes
+    const hasRiver = true // every battlefield gets a river
+    const riverSlant = (rand() - 0.5) * 0.6
+    const riverWidth = 6 + rand() * 8
     const riverBed = waterY - 3 // channel floor always below the water table
+    // A broad lake sits somewhere between the forts, pulling terrain below the
+    // water table into open water.
+    const hasLake = rand() < 0.7
+    const lakeCX = GX / 2 + (rand() - 0.5) * 34
+    const lakeCZ = GZ / 2 + (rand() - 0.5) * 34
+    const lakeR = 14 + rand() * 16
     // Fort elevations roll independently — and 40% of matches force real drama:
     // one fort high on a mountain, the other down in a valley.
     let padA: number
@@ -303,6 +309,14 @@ export class World {
           const d = x - xr
           const g = Math.exp(-(d * d) / (2 * riverWidth * riverWidth))
           h -= Math.max(0, h - riverBed) * g
+        }
+        // A broad lake basin — pulled below the water table into open water.
+        if (hasLake) {
+          const dl = Math.hypot(x - lakeCX, z - lakeCZ)
+          if (dl < lakeR) {
+            const t = smoothstep(Math.min(1, dl / lakeR))
+            h = Math.min(h, riverBed) * (1 - t) + h * t
+          }
         }
         // Blend toward each tower's pad height: a high pad grows a mountain
         // beneath the fort, a low pad sinks it into a bowl.
@@ -639,6 +653,7 @@ export class World {
       this.spawnDebris(i % GX, Math.floor(i / stride), Math.floor(i / GX) % GZ, cell, rand, 0.6)
     }
     dislodged += this.sinkUndermined(rand)
+    dislodged += this.toppleUnstable(rand)
     if (dislodged) this.dirty = true
     return dislodged
   }
@@ -714,6 +729,101 @@ export class World {
       wz: (rand() - 0.5) * 4,
       cell,
     })
+  }
+
+  // A brick flung as part of a tower TOPPLING: it swings out in the fall direction
+  // with a speed that grows with its height above the pivot (so the top whips over
+  // fastest, like a felled tree), tumbling about the horizontal axis it rolls over.
+  private spawnDebrisTopple(x: number, y: number, z: number, cell: number, rand: () => number, dirx: number, dirz: number, hAbove: number): void {
+    if (this.debris.length >= MAX_DEBRIS) return
+    const lat = 0.7 + hAbove * 0.34 // higher up → farther out
+    const spin = 1.3 + hAbove * 0.13
+    this.debris.push({
+      x, y, z,
+      vx: dirx * lat + (rand() - 0.5) * 0.7,
+      vy: rand() * 0.6,
+      vz: dirz * lat + (rand() - 0.5) * 0.7,
+      rx: 0, ry: 0, rz: 0,
+      // rotate about the horizontal axis perpendicular to the fall direction.
+      wx: dirz * spin + (rand() - 0.5) * 1.2,
+      wy: (rand() - 0.5) * 1.2,
+      wz: -dirx * spin + (rand() - 0.5) * 1.2,
+      cell,
+    })
+  }
+
+  // Gravity/toppling: a standing tower whose remaining mass leans past its footing,
+  // or that has been whittled to a thin tall stump, tips over as a whole — every
+  // brick flung in the lean direction and tumbling — instead of hovering upright.
+  private toppleUnstable(rand: () => number): number {
+    let toppled = 0
+    for (const f of this.forts) {
+      for (const t of f.towers) {
+        const cells: { x: number; y: number; z: number; i: number }[] = []
+        let sumX = 0
+        let sumZ = 0
+        let minY = GY
+        let maxY = -1
+        let baseSumX = 0
+        let baseSumZ = 0
+        const baseCols: { x: number; z: number }[] = []
+        for (let y = 0; y < GY; y++) {
+          for (let dx = -FORT_HALF - 1; dx <= FORT_HALF + 1; dx++) {
+            for (let dz = -FORT_HALF - 1; dz <= FORT_HALF + 1; dz++) {
+              const x = t.cx + dx
+              const z = t.cz + dz
+              if (!this.inBounds(x, y, z)) continue
+              const i = this.idx(x, y, z)
+              if (this.grid[i] !== f.cell) continue
+              cells.push({ x, y, z, i })
+              sumX += x
+              sumZ += z
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
+              const below = y === 0 ? TERRAIN : this.grid[this.idx(x, y - 1, z)]
+              if (below === TERRAIN) {
+                baseSumX += x
+                baseSumZ += z
+                baseCols.push({ x, z })
+              }
+            }
+          }
+        }
+        if (cells.length < 6 || baseCols.length === 0) continue
+        const n = cells.length
+        const comX = sumX / n
+        const comZ = sumZ / n
+        const baseX = baseSumX / baseCols.length
+        const baseZ = baseSumZ / baseCols.length
+        let baseR = 0
+        for (const b of baseCols) baseR = Math.max(baseR, Math.hypot(b.x - baseX, b.z - baseZ))
+        const lean = Math.hypot(comX - baseX, comZ - baseZ)
+        const height = maxY - minY
+        // Unstable if the centre of mass overhangs the footing, or the standing
+        // remnant is a thin, tall stump with barely any base.
+        const unstable = lean > baseR * 0.55 + 1.0 || (baseCols.length <= 5 && height > baseR * 2.5 + 7)
+        if (!unstable) continue
+        // Fall the way it already leans; a perfectly balanced spike picks a random way.
+        let dirx = comX - baseX
+        let dirz = comZ - baseZ
+        let dl = Math.hypot(dirx, dirz)
+        if (dl < 0.5) {
+          const a = rand() * Math.PI * 2
+          dirx = Math.cos(a)
+          dirz = Math.sin(a)
+          dl = 1
+        }
+        dirx /= dl
+        dirz /= dl
+        for (const c of cells) {
+          this.grid[c.i] = EMPTY
+          this.spawnDebrisTopple(c.x, c.y, c.z, f.cell, rand, dirx, dirz, c.y - minY)
+          toppled++
+        }
+      }
+    }
+    if (toppled) this.dirty = true
+    return toppled
   }
 
   // Advance falling debris; returns number still airborne.

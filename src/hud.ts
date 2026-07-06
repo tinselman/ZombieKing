@@ -148,6 +148,26 @@ export function createHud(
     if (btn && btn.dataset.i !== undefined) shopOnBuyFort(parseInt(btn.dataset.i))
   })
 
+  // Screen-relative wind compass: the arrow always points where the wind pushes
+  // ON SCREEN, no matter which way the camera faces (golf-broadcast style).
+  // setWind stores the vector; orientWind re-projects it into the current camera
+  // frame every frame.
+  let windX = 0
+  let windZ = 0
+  let windScale = 1
+  let camFx = 1
+  let camFz = 0
+
+  function drawWindArrow(): void {
+    // Screen-up = camera forward (horizontal), screen-right = camera right.
+    // With y-up, camera right = (-fz, fx). The ➤ glyph points right at 0°, so
+    // rotate -90° to make it point up first.
+    const rightComp = -camFz * windX + camFx * windZ
+    const upComp = camFx * windX + camFz * windZ
+    const deg = (Math.atan2(rightComp, upComp) * 180) / Math.PI - 90
+    windArrow.style.transform = `rotate(${deg.toFixed(1)}deg) scale(${windScale.toFixed(2)})`
+  }
+
   return {
     setIntegrity(you: number, foe: number) {
       youBar.style.width = `${Math.round(you * 100)}%`
@@ -155,18 +175,24 @@ export function createHud(
       foeBar.style.width = `${Math.round(foe * 100)}%`
       foePct.textContent = `${Math.round(foe * 100)}%`
     },
-    // Compass in the player's aim-view terms: screen-up = +x (toward the enemy),
-    // and +z appears to screen-RIGHT when looking along +x with y-up.
-    // The ➤ glyph points right at 0°, so rotate -90° to make it point up first.
     // Arrow size and color escalate with strength so gales are unmissable.
     setWind(x: number, z: number) {
+      windX = x
+      windZ = z
       const speed = Math.hypot(x, z)
-      const deg = (Math.atan2(z, x) * 180) / Math.PI - 90
-      const scale = 1 + Math.min(1.2, speed / 9)
-      windArrow.style.transform = `rotate(${deg}deg) scale(${scale.toFixed(2)})`
+      windScale = 1 + Math.min(1.2, speed / 9)
+      drawWindArrow()
       windArrow.style.color = speed > 9 ? '#c0392b' : speed > 5 ? '#8a5a2b' : '#2c3138'
       windSpeed.style.color = speed > 9 ? '#c0392b' : '#2c3138'
       windSpeed.textContent = speed < 0.3 ? 'calm' : speed > 9 ? `${speed.toFixed(1)} GALE` : speed.toFixed(1)
+    },
+    // Called each frame with the camera's horizontal forward direction.
+    orientWind(fx: number, fz: number) {
+      if (fx * fx + fz * fz < 1e-6) return
+      const len = Math.hypot(fx, fz)
+      camFx = fx / len
+      camFz = fz / len
+      drawWindArrow()
     },
     setWeapons(rows: WeaponRow[]) {
       weaponList.innerHTML = rows

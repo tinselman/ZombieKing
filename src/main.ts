@@ -6,7 +6,7 @@ import { planShot } from './ai'
 import { createHud } from './hud'
 import * as sfx from './audio'
 
-const COLLAPSE_AT = 0.4 // fort integrity below this = destroyed
+const COLLAPSE_AT = 0.2 // fort integrity below this = destroyed (≈8/10 of the tower gone)
 const STEP = 1 / 120 // fixed physics step, must match World.simShot
 const DEG = Math.PI / 180
 
@@ -138,7 +138,7 @@ function applyCannonPose(side: number): void {
 type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
 
 // Match economy: a match is best-of-ROUNDS; damage earns cash, spent in the armory.
-const ROUNDS = 5
+const ROUNDS = 3 // best-of-3: first side to 2 round wins takes the match
 const START_CASH = 3000
 const WIN_BONUS = 2500
 const DMG_PAY = 4000 // pay for demolishing 100% of the enemy fort
@@ -163,7 +163,7 @@ let lastPlayerPower = 60
 let shotThisRound = false // power marker only shows after the first shot of a round
 let resolveT = 0
 let aiT = 0
-let aiErr = 13
+let aiErr = 16 // enemy aim scatter — modest and human; ranges in slowly, never pinpoint
 let aiPlanned: { az: number; el: number; power: number } | null = null
 let aiAnimT = 0
 let aiStart = { az: 0, el: 0 }
@@ -854,6 +854,22 @@ function aiPickWeapon(): WeaponDef {
   return WEAPONS[0]
 }
 
+// Straight-line sight test: does terrain rise above the line from a to b? Tells
+// whether the enemy can actually see the player (vs. firing blind over a hill).
+function losBlocked(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const dz = b.z - a.z
+  const dist = Math.hypot(dx, dz)
+  const steps = Math.max(2, Math.ceil(dist / 2))
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps
+    const sy = world.surfaceY(Math.round(a.x + dx * t), Math.round(a.z + dz * t))
+    if (sy > a.y + dy * t + 1) return true // ground pokes above the sightline
+  }
+  return false
+}
+
 function updateAi(dt: number): void {
   if (phase === 'aiThink') {
     aiT += dt
@@ -875,7 +891,10 @@ function updateAi(dt: number): void {
       y: p1.y + 1.65 + 2.6,
       z: p1.z + toward.z * 2.3,
     }
-    aiPlanned = planShot(world, origin, target, wind, aiErr, Math.random)
+    // If terrain hides the player, the enemy is reduced to guessing where you are
+    // — a big extra scatter on top of its already-human aim.
+    const blind = losBlocked(origin, target)
+    aiPlanned = planShot(world, origin, target, wind, aiErr + (blind ? 16 : 0), Math.random)
     aiStart = { az: sides[1].az, el: sides[1].el }
     // Normalize so the barrel swings the short way round.
     let dAz = aiPlanned.az - aiStart.az
@@ -897,7 +916,7 @@ function updateAi(dt: number): void {
       sides[1].az = aiPlanned.az
       sides[1].el = aiPlanned.el
       aiPlanned = null
-      aiErr = Math.max(1.2, aiErr * 0.62)
+      aiErr = Math.max(4, aiErr * 0.82) // ranges in slowly, never gets pinpoint
       fireShot(1, weapon, power)
     }
   }
@@ -987,7 +1006,15 @@ function finishResolve(): void {
     const losers: number[] = []
     if (youDead) losers.push(0)
     if (foeDead) losers.push(1)
-    for (const l of losers) world.collapseFort(l, Math.random)
+    // The tower loses its last footing — every remaining piece crumbles at once
+    // in a bright blast.
+    for (const l of losers) {
+      world.collapseFort(l, Math.random)
+      const lt = world.forts[l].towers[0]
+      const c = new THREE.Vector3(lt.cx, lt.baseY + 7, lt.cz)
+      spawnFlash(c, 34, 0xffe0a0)
+      spawnFlash(c.clone().add(new THREE.Vector3(0, 6, 0)), 22, 0xffd070)
+    }
     sfx.rumble()
     const loserTower = world.forts[losers[0]].towers[0]
     const center =
@@ -1051,7 +1078,7 @@ function setupRoundWorld(): void {
     sides[s].el = 55 * DEG
     applyCannonPose(s)
   }
-  aiErr = 13
+  aiErr = 16
   endInfo = null
   flyHold = null
   shotThisRound = false
@@ -1219,12 +1246,23 @@ window.addEventListener('keyup', e => {
 window.addEventListener('blur', () => keys.clear())
 window.addEventListener('pointerdown', () => sfx.unlock())
 
+// How long each aim axis has been held — drives the exponential acceleration.
+let azHoldT = 0
+let elHoldT = 0
+
 function updatePlayerAim(dt: number): void {
   if (phase !== 'aim' && phase !== 'charge') return
   const s = sides[0]
   const fine = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 0.28 : 1
-  const azRate = 0.9 * fine * dt
-  const elRate = 0.6 * fine * dt
+  // Exponential acceleration: a quick tap barely nudges the barrel; the longer you
+  // hold, the faster it sweeps. The hold timer resets the instant you let go of the
+  // axis, so rapid tapping stays as a series of tiny, precise nudges.
+  const azActive = keys.has('ArrowLeft') || keys.has('ArrowRight')
+  const elActive = keys.has('ArrowUp') || keys.has('ArrowDown')
+  azHoldT = azActive ? azHoldT + dt : 0
+  elHoldT = elActive ? elHoldT + dt : 0
+  const azRate = Math.min(2.8, 0.16 * Math.exp(azHoldT / 0.32)) * fine * dt
+  const elRate = Math.min(1.9, 0.12 * Math.exp(elHoldT / 0.32)) * fine * dt
   if (keys.has('ArrowLeft')) s.az -= azRate
   if (keys.has('ArrowRight')) s.az += azRate
   if (keys.has('ArrowUp')) s.el = Math.min(85 * DEG, s.el + elRate)
@@ -1336,6 +1374,10 @@ function tick(now: number): void {
 
   updateHint()
   updateCamera(dt)
+  // Keep the wind compass screen-relative: arrow points where the wind pushes on
+  // screen, whichever way the camera currently faces (fixes the enemy-turn view
+  // showing the arrow mirrored against the actual drift).
+  hud.orientWind(camLookCur.x - camPosCur.x, camLookCur.z - camPosCur.z)
   if (!skipRender) {
     renderer.render(scene, camera)
     renderSideView()
