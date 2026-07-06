@@ -16,7 +16,6 @@ const CSS = `
 #sc-wind { top: 16px; left: 50%; transform: translateX(-50%); text-align: center; min-width: 110px; }
 #sc-status { top: 130px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; letter-spacing: 0.05em; padding: 6px 14px; white-space: nowrap; }
 #sc-status span { color: #7a838d; font-weight: 400; }
-#sc-nightTurn { top: 168px; left: 50%; transform: translateX(-50%); font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; padding: 7px 18px; white-space: nowrap; background: rgba(20,26,38,0.85); color: #fff; border-color: #3a4a6b; display: none; }
 #sc-windArrow { font-size: 22px; line-height: 1; display: inline-block; transition: transform 0.4s ease; }
 #sc-windSpeed { font-size: 13px; font-weight: 600; margin-top: 2px; }
 #sc-weapons { bottom: 16px; left: 16px; min-width: 170px; pointer-events: auto; }
@@ -25,7 +24,7 @@ const CSS = `
 #sc-weapons .w.sel { background: #2c3138; color: #fff; font-weight: 600; }
 #sc-weapons .w.sel:hover { background: #2c3138; }
 #sc-weapons .w.empty { opacity: 0.35; cursor: default; }
-#sc-power { display: none; bottom: 16px; left: 50%; transform: translateX(-50%); width: 260px; text-align: center; }
+#sc-power { bottom: 16px; left: 50%; transform: translateX(-50%); width: 260px; text-align: center; }
 #sc-powerBar { position: relative; height: 14px; background: #e8ebef; border-radius: 7px; }
 #sc-powerBar > div.fill { height: 100%; width: 0%; background: linear-gradient(90deg, #7db4e8, #d5473a); border-radius: 7px; }
 #sc-powerMark { position: absolute; top: -3px; bottom: -3px; width: 3px; margin-left: -1px; background: #2c3138; border-radius: 2px; display: none; }
@@ -46,15 +45,6 @@ const CSS = `
 #sc-end p { font-size: 16px; color: #7a838d; margin: 0 0 28px; }
 #sc-end button { pointer-events: auto; font-size: 16px; font-weight: 700; letter-spacing: 0.08em; padding: 12px 36px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-end button:hover { background: #454c55; }
-#sc-manage { position: fixed; left: 16px; bottom: 200px; display: none; flex-direction: column; align-items: stretch; gap: 6px; width: 170px; pointer-events: auto; }
-#sc-manage button { pointer-events: auto; font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; padding: 8px 12px; border-radius: 9px; border: 1px solid #2c3138; background: rgba(255,255,255,0.9); color: #2c3138; cursor: pointer; box-shadow: 0 2px 10px rgba(40,50,60,0.1); text-align: center; }
-#sc-manage button:hover { background: #2c3138; color: #fff; }
-#sc-manage button.fire { background: #2c3138; color: #fff; }
-#sc-manage button.fire:hover { background: #454c55; }
-#sc-manage button.sel { box-shadow: 0 0 0 2px #2c3138, 0 2px 10px rgba(40,50,60,0.18); }
-#sc-manage button:disabled { opacity: 0.4; cursor: default; }
-#sc-manage button small { display: block; font-weight: 400; font-size: 11px; letter-spacing: 0.04em; opacity: 0.7; margin-top: 2px; }
-#sc-buildHint { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); display: none; font-size: 13px; font-weight: 600; color: #2c3138; background: rgba(255,255,255,0.85); border: 1px solid #d8dde3; border-radius: 8px; padding: 8px 16px; pointer-events: none; }
 #sc-shop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(244,246,248,0.82); backdrop-filter: blur(8px); pointer-events: auto; }
 #sc-shop .box { background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 14px; padding: 24px 28px; width: 780px; max-height: 88vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(40,50,60,0.12); color: #2c3138; }
 #sc-shopList { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
@@ -69,14 +59,6 @@ const CSS = `
 #sc-shop .srow button { font-size: 12px; font-weight: 700; padding: 4px 0; border-radius: 6px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shop .srow button:disabled { opacity: 0.25; cursor: default; }
 #sc-shop .slabel { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin: 12px 0 2px; }
-#sc-time { display: none; position: fixed; left: 16px; bottom: 240px; box-sizing: border-box; padding: 7px 12px 8px; background: rgba(255,255,255,0.78); backdrop-filter: blur(6px); border: 1px solid #d8dde3; border-radius: 10px; box-shadow: 0 2px 10px rgba(40,50,60,0.08); pointer-events: none; }
-#sc-time .tlabel { display: flex; justify-content: space-between; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin-bottom: 4px; }
-#sc-timeTrack { height: 8px; background: #e8ebef; border-radius: 4px; overflow: hidden; }
-#sc-timeFill { height: 100%; width: 0%; border-radius: 4px; background: #e8b84d; }
-#sc-cross { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: #fff; box-shadow: 0 0 5px rgba(0,0,0,0.7); display: none; pointer-events: none; }
-#sc-nightHint { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); font-size: 13px; font-weight: 600; color: #fff; background: rgba(20,26,38,0.82); border: 1px solid #3a4a6b; border-radius: 10px; padding: 10px 18px; display: none; pointer-events: none; text-align: center; }
-#sc-burst { position: fixed; left: 50%; top: 38%; transform: translate(-50%, -50%); font-family: Helvetica, Arial, sans-serif; font-size: 54px; font-weight: 900; letter-spacing: 0.04em; color: #3ed06a; text-shadow: 0 0 18px rgba(62,208,106,0.8), 0 2px 6px rgba(0,0,0,0.9); display: none; pointer-events: none; animation: sc-wiggle 0.14s infinite; }
-@keyframes sc-wiggle { 0% { transform: translate(-50%, -50%) rotate(-2.5deg) scale(1); } 50% { transform: translate(-48%, -52%) rotate(2.5deg) scale(1.05); } 100% { transform: translate(-50%, -50%) rotate(-2.5deg) scale(1); } }
 #sc-shopStart { margin-top: 18px; width: 100%; font-size: 15px; font-weight: 800; letter-spacing: 0.08em; padding: 12px 0; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shopStart:hover { background: #454c55; }
 `
@@ -96,7 +78,6 @@ export function createHud(
     <div class="panel" id="sc-fortFoe"><div class="label">Enemy Fort</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
     <div class="panel" id="sc-wind"><div class="label">Wind</div><span id="sc-windArrow">➤</span><div id="sc-windSpeed"></div></div>
     <div class="panel" id="sc-status"></div>
-    <div class="panel" id="sc-nightTurn"></div>
     <div class="panel" id="sc-weapons"><div class="label">Weapon &nbsp;⇥ / click</div><div id="sc-weaponList"></div></div>
     <div class="panel" id="sc-power"><div class="label">Power — hold space, release to fire</div><div id="sc-powerBar"><div class="fill"></div><div id="sc-powerMark"></div></div><div id="sc-powerNum">–</div></div>
     <div class="panel" id="sc-angles"></div>
@@ -105,18 +86,6 @@ export function createHud(
     <div id="sc-banner"></div>
     <div id="sc-msg"></div>
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
-    <div class="panel" id="sc-time"><div class="tlabel"><span id="sc-timeMode">day</span><span>time</span></div><div id="sc-timeTrack"><div id="sc-timeFill"></div></div></div>
-    <div id="sc-cross"></div>
-    <div id="sc-nightHint">WASD = move &nbsp;·&nbsp; arrow keys = look &nbsp;·&nbsp; SPACE = flashlight on / off &nbsp;·&nbsp; don't shine it on the sleeping King &nbsp;·&nbsp; hide indoors</div>
-    <div id="sc-burst">ZOMBIE BURST!</div>
-    <div id="sc-manage">
-      <button class="fire" data-a="fire">FIRE <small>[F] hold space</small></button>
-      <button data-a="repair">REPAIR <small class="rc">castle</small></button>
-      <button data-a="build">BUILD <small class="bc">[C]</small></button>
-      <button data-a="road">ROAD <small class="gc">[G]</small></button>
-      <button data-a="buy">BUY <small>[B] armory</small></button>
-    </div>
-    <div id="sc-buildHint">arrows = move &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; Enter = place &nbsp;·&nbsp; Esc = cancel</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
       <h2>THE ARMORY</h2>
@@ -139,7 +108,6 @@ export function createHud(
   const windArrow = q<HTMLElement>('#sc-windArrow')
   const windSpeed = q<HTMLElement>('#sc-windSpeed')
   const statusEl = q<HTMLElement>('#sc-status')
-  const nightTurnEl = q<HTMLElement>('#sc-nightTurn')
   const shop = q<HTMLElement>('#sc-shop')
   const shopResult = q<HTMLElement>('#sc-shopResult')
   const shopStatus = q<HTMLElement>('#sc-shopStatus')
@@ -150,33 +118,12 @@ export function createHud(
   const powerBar = q<HTMLElement>('#sc-powerBar > div.fill')
   const powerMark = q<HTMLElement>('#sc-powerMark')
   const powerNum = q<HTMLElement>('#sc-powerNum')
-  const powerPanel = q<HTMLElement>('#sc-power')
   const angles = q<HTMLElement>('#sc-angles')
   const sideEl = q<HTMLElement>('#sc-side')
   const worldBtn = q<HTMLButtonElement>('#sc-worldBtn')
-  const weaponsPanel = q<HTMLElement>('#sc-weapons')
-  const timeEl = q<HTMLElement>('#sc-time')
-  const timeMode = q<HTMLElement>('#sc-timeMode')
-  const timeFill = q<HTMLElement>('#sc-timeFill')
-  const crossEl = q<HTMLElement>('#sc-cross')
-  const hintEl = q<HTMLElement>('#sc-nightHint')
-  const burstEl = q<HTMLElement>('#sc-burst')
   worldBtn.addEventListener('click', () => handlers.onWorldToggle?.())
   const banner = q<HTMLElement>('#sc-banner')
   const msgEl = q<HTMLElement>('#sc-msg')
-  const manageEl = q<HTMLElement>('#sc-manage')
-  const manageRepairSmall = q<HTMLElement>('#sc-manage .rc')
-  const manageRepairBtn = q<HTMLButtonElement>('#sc-manage button[data-a="repair"]')
-  const manageBuildSmall = q<HTMLElement>('#sc-manage .bc')
-  const manageBuildBtn = q<HTMLButtonElement>('#sc-manage button[data-a="build"]')
-  const manageRoadSmall = q<HTMLElement>('#sc-manage .gc')
-  const manageRoadBtn = q<HTMLButtonElement>('#sc-manage button[data-a="road"]')
-  const buildHintEl = q<HTMLElement>('#sc-buildHint')
-  let onManage: (a: 'fire' | 'repair' | 'buy' | 'build' | 'road') => void = () => {}
-  manageEl.addEventListener('click', e => {
-    const btn = (e.target as HTMLElement).closest('button') as HTMLElement | null
-    if (btn && btn.dataset.a) onManage(btn.dataset.a as 'fire' | 'repair' | 'buy' | 'build')
-  })
   const end = q<HTMLElement>('#sc-end')
   const endTitle = q<HTMLElement>('#sc-end h1')
   const endSub = q<HTMLElement>('#sc-end p')
@@ -201,26 +148,6 @@ export function createHud(
     if (btn && btn.dataset.i !== undefined) shopOnBuyFort(parseInt(btn.dataset.i))
   })
 
-  // Screen-relative wind compass: the arrow always points where the wind
-  // pushes ON SCREEN, no matter which way the camera faces (golf-broadcast
-  // style). setWind stores the vector; orientWind re-projects it into the
-  // current camera frame every frame.
-  let windX = 0
-  let windZ = 0
-  let windScale = 1
-  let camFx = 1
-  let camFz = 0
-
-  function drawWindArrow(): void {
-    // Screen-up = camera forward (horizontal), screen-right = camera right.
-    // With y-up, camera right = (-fz, fx). The ➤ glyph points right at 0°,
-    // so rotate -90° to make it point up first.
-    const rightComp = -camFz * windX + camFx * windZ
-    const upComp = camFx * windX + camFz * windZ
-    const deg = (Math.atan2(rightComp, upComp) * 180) / Math.PI - 90
-    windArrow.style.transform = `rotate(${deg.toFixed(1)}deg) scale(${windScale.toFixed(2)})`
-  }
-
   return {
     setIntegrity(you: number, foe: number) {
       youBar.style.width = `${Math.round(you * 100)}%`
@@ -228,24 +155,18 @@ export function createHud(
       foeBar.style.width = `${Math.round(foe * 100)}%`
       foePct.textContent = `${Math.round(foe * 100)}%`
     },
+    // Compass in the player's aim-view terms: screen-up = +x (toward the enemy),
+    // and +z appears to screen-RIGHT when looking along +x with y-up.
+    // The ➤ glyph points right at 0°, so rotate -90° to make it point up first.
     // Arrow size and color escalate with strength so gales are unmissable.
     setWind(x: number, z: number) {
-      windX = x
-      windZ = z
       const speed = Math.hypot(x, z)
-      windScale = 1 + Math.min(1.2, speed / 9)
-      drawWindArrow()
+      const deg = (Math.atan2(z, x) * 180) / Math.PI - 90
+      const scale = 1 + Math.min(1.2, speed / 9)
+      windArrow.style.transform = `rotate(${deg}deg) scale(${scale.toFixed(2)})`
       windArrow.style.color = speed > 9 ? '#c0392b' : speed > 5 ? '#8a5a2b' : '#2c3138'
       windSpeed.style.color = speed > 9 ? '#c0392b' : '#2c3138'
       windSpeed.textContent = speed < 0.3 ? 'calm' : speed > 9 ? `${speed.toFixed(1)} GALE` : speed.toFixed(1)
-    },
-    // Called each frame with the camera's horizontal forward direction.
-    orientWind(fx: number, fz: number) {
-      if (fx * fx + fz * fz < 1e-6) return
-      const len = Math.hypot(fx, fz)
-      camFx = fx / len
-      camFz = fz / len
-      drawWindArrow()
     },
     setWeapons(rows: WeaponRow[]) {
       weaponList.innerHTML = rows
@@ -300,31 +221,6 @@ export function createHud(
     sideRect(): DOMRect {
       return sideEl.getBoundingClientRect()
     },
-    // Day/night bar, docked directly above the weapons panel (tracks its size).
-    setTime(mode: 'day' | 'sunset' | 'night' | 'dawn', frac: number) {
-      const wr = weaponsPanel.getBoundingClientRect()
-      timeEl.style.left = `${wr.left}px`
-      timeEl.style.width = `${wr.width}px`
-      timeEl.style.bottom = `${window.innerHeight - wr.top + 8}px`
-      timeMode.textContent = mode
-      timeFill.style.width = `${Math.round(frac * 100)}%`
-      timeFill.style.background =
-        mode === 'day' ? '#e8b84d' : mode === 'sunset' ? '#e8956b' : mode === 'night' ? '#5a6fa8' : '#e8c8a0'
-    },
-    setNightHint(show: boolean) {
-      hintEl.style.display = show ? 'block' : 'none'
-    },
-    setBurst(show: boolean) {
-      burstEl.style.display = show ? 'block' : 'none'
-    },
-    // Whose turn it is at night (null hides the panel).
-    setNightTurn(text: string | null) {
-      nightTurnEl.style.display = text ? 'block' : 'none'
-      if (text) nightTurnEl.textContent = text
-    },
-    setCross(show: boolean) {
-      crossEl.style.display = show ? 'block' : 'none'
-    },
     setStatus(round: number, rounds: number, you: number, foe: number, cash: number) {
       statusEl.innerHTML = `<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}`
     },
@@ -367,45 +263,6 @@ export function createHud(
     },
     hideShop() {
       shop.style.display = 'none'
-    },
-    // The manage-or-fire action menu shown at the start of your turn.
-    showManage(
-      data: {
-        cash: number
-        repairCost: number
-        integrity: number
-        buildCost: number
-        buildOk: boolean
-        roadCost: number
-        roadOk: boolean
-        network: string
-      },
-      on: (a: 'fire' | 'repair' | 'buy' | 'build' | 'road') => void,
-      selected?: 'fire' | 'repair' | 'buy' | 'build' | 'road'
-    ) {
-      onManage = on
-      const full = data.repairCost <= 0
-      manageRepairSmall.textContent = full ? 'full strength' : `$${data.repairCost.toLocaleString()} · ${Math.round(data.integrity * 100)}%`
-      manageRepairBtn.disabled = full || data.cash < data.repairCost
-      manageBuildSmall.textContent = `[C] $${data.buildCost.toLocaleString()}`
-      manageBuildBtn.disabled = !data.buildOk || data.cash < data.buildCost
-      manageRoadSmall.textContent = data.network
-      manageRoadBtn.disabled = !data.roadOk || data.cash < data.roadCost
-      // Highlight the currently-selected action (Fire by default).
-      manageEl.querySelectorAll('button').forEach(b => b.classList.toggle('sel', (b as HTMLElement).dataset.a === selected))
-      // Dock the row just above the weapon list on the left.
-      const wr = weaponsPanel.getBoundingClientRect()
-      manageEl.style.bottom = `${window.innerHeight - wr.top + 10}px`
-      manageEl.style.display = 'flex'
-    },
-    hideManage() {
-      manageEl.style.display = 'none'
-    },
-    setPowerVisible(v: boolean) {
-      powerPanel.style.display = v ? 'block' : 'none'
-    },
-    setBuildHint(show: boolean) {
-      buildHintEl.style.display = show ? 'block' : 'none'
     },
     showEnd(title: string, sub: string, onRematch: () => void) {
       endTitle.textContent = title
