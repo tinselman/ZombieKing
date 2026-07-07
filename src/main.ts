@@ -153,8 +153,8 @@ let lastRoundResult = ''
 let roundSeed = 0
 // Match-persistent structure upgrades (taller main tower, extra towers).
 const forti: Fortifications[] = [
-  { height: 0, towers: 0 },
-  { height: 0, towers: 0 },
+  { height: 0, towers: 0, barricade: 0 },
+  { height: 0, towers: 0, barricade: 0 },
 ]
 let wind: Wind = { x: 0, z: 0 }
 let chargeT = 0
@@ -170,6 +170,9 @@ let aiStart = { az: 0, el: 0 }
 let endT = 0
 let endShown = false
 let endInfo: { title: string; sub: string; center: THREE.Vector3 } | null = null
+// Defeated towers crumble first, THEN explode once the rubble has settled.
+let pendingBlasts: { cx: number; cz: number; y: number }[] = []
+let blastFired = true
 const lastImpact = new THREE.Vector3(GX / 2, 12, GZ / 2)
 const keys = new Set<string>()
 
@@ -1006,15 +1009,15 @@ function finishResolve(): void {
     const losers: number[] = []
     if (youDead) losers.push(0)
     if (foeDead) losers.push(1)
-    // The tower loses its last footing — every remaining piece crumbles at once
-    // in a bright blast.
+    // The tower loses its last footing and crumbles straight down into rubble; the
+    // explosion is deferred until it has finished falling (see the 'end' phase).
+    pendingBlasts = []
     for (const l of losers) {
       world.collapseFort(l, Math.random)
       const lt = world.forts[l].towers[0]
-      const c = new THREE.Vector3(lt.cx, lt.baseY + 7, lt.cz)
-      spawnFlash(c, 34, 0xffe0a0)
-      spawnFlash(c.clone().add(new THREE.Vector3(0, 6, 0)), 22, 0xffd070)
+      pendingBlasts.push({ cx: lt.cx, cz: lt.cz, y: lt.baseY })
     }
+    blastFired = false
     sfx.rumble()
     const loserTower = world.forts[losers[0]].towers[0]
     const center =
@@ -1092,6 +1095,11 @@ function setupRoundWorld(): void {
 // The computer spends its winnings too: fortifications when flush, then
 // cheap weapon volume first, big-ticket when rich.
 function aiShop(): void {
+  // A berm is cheap insurance — the enemy grabs one fairly often.
+  if (money[1] >= 2500 && forti[1].barricade < 2 && Math.random() < 0.55) {
+    money[1] -= 2500
+    forti[1].barricade++
+  }
   if (money[1] >= 8000 && forti[1].towers < 2 && Math.random() < 0.5) {
     money[1] -= 8000
     forti[1].towers++
@@ -1121,6 +1129,7 @@ function aiShop(): void {
 }
 
 const FORT_UPGRADES = [
+  { name: 'Defensive berm (blocks flat shots)', price: 2500, max: 2, owned: () => forti[0].barricade, apply: () => (forti[0].barricade += 1) },
   { name: 'Raise main tower (+6 levels)', price: 5000, max: 2, owned: () => forti[0].height / 6, apply: () => (forti[0].height += 6) },
   { name: 'Extra tower', price: 8000, max: 2, owned: () => forti[0].towers, apply: () => (forti[0].towers += 1) },
 ]
@@ -1203,6 +1212,7 @@ function fullReset(): void {
     sides[s].wsel = 0
     forti[s].height = 0
     forti[s].towers = 0
+    forti[s].barricade = 0
   }
   nextRound()
 }
@@ -1352,7 +1362,23 @@ function tick(now: number): void {
   }
   if (phase === 'end') {
     endT += dt
-    if (!endShown && endT > 3.0 && endInfo) {
+    // Once the crumbled tower has fallen to the ground (rubble settled, or a short
+    // fallback delay), set off the explosion: the pile bursts skyward in fire.
+    if (!blastFired && (world.debris.length === 0 || endT > 2.4)) {
+      blastFired = true
+      for (const b of pendingBlasts) {
+        const base = new THREE.Vector3(b.cx, world.surfaceY(b.cx, b.cz), b.cz)
+        world.burstRubble(b.cx, b.cz, 8, Math.random)
+        spawnExplosion(base.clone().add(new THREE.Vector3(0, 3, 0)), 10, true)
+        spawnFlash(base.clone().add(new THREE.Vector3(0, 5, 0)), 44, 0xffe0a0)
+        spawnFlash(base.clone().add(new THREE.Vector3(0, 1, 0)), 28, 0xffd070)
+        addShake(11, base)
+      }
+      if (pendingBlasts.length) sfx.boom(10)
+      pendingBlasts = []
+    }
+    // Hold on the wreckage a beat after the blast before the result / next round.
+    if (!endShown && endT > 4.2 && endInfo) {
       endShown = true
       const decided = round >= ROUNDS || scoreYou > ROUNDS / 2 || scoreFoe > ROUNDS / 2
       if (decided) {

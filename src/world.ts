@@ -13,6 +13,7 @@ export const TERRAIN = 1
 export const FORT_A = 2 // player fort voxel
 export const FORT_B = 3 // enemy fort voxel
 export const WATER = 4 // lakes & rivers — solid light blue, stylized
+export const BARRICADE = 5 // bought defensive berm in front of a fort — soaks hits
 
 export type Vec3 = { x: number; y: number; z: number }
 export type Wind = { x: number; z: number }
@@ -102,7 +103,7 @@ export type FortInfo = {
 }
 
 // Purchasable, match-persistent structure upgrades per side.
-export type Fortifications = { height: number; towers: number }
+export type Fortifications = { height: number; towers: number; barricade: number }
 
 export type ShotResult = { hit: boolean; pos: Vec3; t: number }
 
@@ -217,7 +218,7 @@ export class World {
 
   // ---------------------------------------------------------------- generation
 
-  generate(seed: number, forti: Fortifications[] = [{ height: 0, towers: 0 }, { height: 0, towers: 0 }]): void {
+  generate(seed: number, forti: Fortifications[] = [{ height: 0, towers: 0, barricade: 0 }, { height: 0, towers: 0, barricade: 0 }]): void {
     this.grid.fill(EMPTY)
     this.debris.length = 0
     this.debrisMesh.count = 0
@@ -346,7 +347,37 @@ export class World {
       }
       this.forts.push(fort)
     }
+    // Bought defensive berms sit in front of each fort, facing the enemy.
+    this.buildBarricade(cxA, czA, 1, forti[0].barricade)
+    this.buildBarricade(cxB, czB, -1, forti[1].barricade)
     this.rebuild()
+  }
+
+  // A destructible berm a few voxels in front of a fort (toward the enemy). It
+  // blocks and soaks flat shots so they must be lobbed over — bought in the shop,
+  // taller/thicker with each level. Not counted in fort integrity.
+  private buildBarricade(cx: number, cz: number, dir: number, level: number): void {
+    if (level <= 0) return
+    const height = 5 + level * 2 // level 1: 7 tall, level 2: 9
+    const thick = 1 + level // level 1: 2 thick, level 2: 3 (a chunkier wall soaks more)
+    const front = cx + dir * 10 // stand-off far enough that a crater here won't reach the fort
+    for (let dz = -6; dz <= 6; dz++) {
+      const z = cz + dz
+      if (z < 0 || z >= GZ) continue
+      for (let t = 0; t < thick; t++) {
+        const x = front + dir * t
+        if (x < 0 || x >= GX) continue
+        const base = this.surfaceY(x, z) + 1
+        for (let dy = 0; dy < height; dy++) {
+          if (this.inBounds(x, base + dy, z)) this.grid[this.idx(x, base + dy, z)] = BARRICADE
+        }
+        let fy = base - 1
+        while (fy >= 0 && this.cellAt(x, fy, z) === EMPTY) {
+          this.grid[this.idx(x, fy, z)] = BARRICADE
+          fy--
+        }
+      }
+    }
   }
 
   // Build one tower; returns the voxel count above its rubble line.
@@ -568,15 +599,19 @@ export class World {
     if (added) this.dirty = true
   }
 
-  // Blast shockwave: fort voxels above and around a crater get knocked loose and
-  // topple as debris, so a hit at a wall's base brings the wall down rather than
-  // just denting the terrain. Falloff by horizontal distance and height above the
-  // blast; reaches ~2.4x the crater radius upward.
+  // Blast shockwave: fort voxels around and above a crater get knocked loose and
+  // topple as debris, so a hit brings down a whole section of wall rather than just
+  // denting it. Reach and knock-loose odds are generous so towers crumble fast —
+  // a solid hit gouges a tall bite out of a tower. Falloff by horizontal distance
+  // and height above the blast.
   shockwave(cx: number, cy: number, cz: number, r: number, rand: () => number): number {
-    const hr = Math.ceil(r)
-    const vr = Math.ceil(r * 2.4)
+    const hReach = r * 2.4 // wide horizontal bite — reaches across a tower
+    const vReach = r * 3.5 // tall vertical bite — a hit gouges high up
+    const vDown = r * 1.2 // and a little below, so mid hits detach the top
+    const hr = Math.ceil(hReach)
+    const vr = Math.ceil(vReach)
     let count = 0
-    for (let y = Math.max(0, Math.round(cy)); y <= Math.min(GY - 1, Math.round(cy) + vr); y++) {
+    for (let y = Math.max(0, Math.round(cy - vDown)); y <= Math.min(GY - 1, Math.round(cy) + vr); y++) {
       const dy = y - cy
       for (let z = Math.max(0, Math.round(cz) - hr); z <= Math.min(GZ - 1, Math.round(cz) + hr); z++) {
         for (let x = Math.max(0, Math.round(cx) - hr); x <= Math.min(GX - 1, Math.round(cx) + hr); x++) {
@@ -584,16 +619,34 @@ export class World {
           const c = this.grid[i]
           if (c !== FORT_A && c !== FORT_B) continue
           const h = Math.hypot(x - cx, z - cz)
-          const p = (1 - h / r) * (1 - dy / (r * 2.4))
-          if (p <= 0 || rand() > p * 1.1) continue
+          // Full strength near the blast (so the core punches clean through and
+          // detaches whatever is above), falling off with distance and height.
+          const p = (1 - h / hReach) * (1 - (dy > 0 ? dy / vReach : -dy / (vDown + 1)))
+          if (p <= 0 || rand() > p * 2.4) continue
+          // A standing berm between the blast and this wall shields it (until breached).
+          if (this.barricadeShields(cx, cy, cz, x, y, z)) continue
           this.grid[i] = EMPTY
-          this.spawnDebris(x, y, z, c, rand, 1.2)
+          this.spawnDebris(x, y, z, c, rand, 1.5)
           count++
         }
       }
     }
     if (count) this.dirty = true
     return count
+  }
+
+  // Is there an intact berm on the straight line between a blast and a target cell?
+  // If so, the target is shielded from the shockwave until the berm is breached.
+  private barricadeShields(bx: number, by: number, bz: number, x: number, y: number, z: number): boolean {
+    const steps = Math.ceil(Math.hypot(x - bx, y - by, z - bz))
+    for (let s = 1; s < steps; s++) {
+      const t = s / steps
+      const sx = Math.round(bx + (x - bx) * t)
+      const sy = Math.round(by + (y - by) * t)
+      const sz = Math.round(bz + (z - bz) * t)
+      if (this.cellAt(sx, sy, sz) === BARRICADE) return true
+    }
+    return false
   }
 
   // Find fort voxels no longer connected to the ground and turn them into falling debris.
@@ -699,7 +752,9 @@ export class World {
     return dropped
   }
 
-  // Dramatic full collapse of a defeated fort.
+  // A defeated fort crumbles straight DOWN to the ground (only a little spread), so
+  // it collapses into a rubble pile rather than blowing apart — the explosion comes
+  // afterwards, once it has fallen.
   collapseFort(side: number, rand: () => number): void {
     const f = this.forts[side]
     const stride = GX * GZ
@@ -709,7 +764,40 @@ export class World {
           const i = x + GX * z + stride * y
           if (this.grid[i] !== f.cell) continue
           this.grid[i] = EMPTY
-          this.spawnDebris(x, y, z, f.cell, rand, 2.2)
+          this.spawnDebris(x, y, z, f.cell, rand, 0.9)
+        }
+      }
+    }
+    this.dirty = true
+  }
+
+  // The finale: blow the settled rubble pile up and out in a blast. Turns any fort
+  // rubble (and loose terrain) near (cx,cz) back into debris flung skyward.
+  burstRubble(cx: number, cz: number, r: number, rand: () => number): void {
+    const ri = Math.ceil(r)
+    for (let y = 0; y < GY; y++) {
+      for (let z = Math.max(0, cz - ri); z <= Math.min(GZ - 1, cz + ri); z++) {
+        for (let x = Math.max(0, cx - ri); x <= Math.min(GX - 1, cx + ri); x++) {
+          const dx = x - cx
+          const dz = z - cz
+          if (dx * dx + dz * dz > r * r) continue
+          const i = this.idx(x, y, z)
+          const c = this.grid[i]
+          if (c !== FORT_A && c !== FORT_B && c !== TERRAIN) continue
+          if (this.debris.length >= MAX_DEBRIS) continue
+          this.grid[i] = EMPTY
+          const dist = Math.hypot(dx, dz) + 0.1
+          this.debris.push({
+            x, y, z,
+            vx: (dx / dist) * (2 + rand() * 4),
+            vy: 3 + rand() * 6,
+            vz: (dz / dist) * (2 + rand() * 4),
+            rx: 0, ry: 0, rz: 0,
+            wx: (rand() - 0.5) * 7,
+            wy: (rand() - 0.5) * 7,
+            wz: (rand() - 0.5) * 7,
+            cell: c,
+          })
         }
       }
     }
@@ -917,6 +1005,10 @@ export class World {
             // Player castle: light red.
             const v = 0.92 + h * 0.05
             col.setRGB(Math.min(1, v + 0.06), v * 0.86, v * 0.82)
+          } else if (c === BARRICADE) {
+            // Sandbag berm: earthy tan.
+            const v = 0.62 + h * 0.08
+            col.setRGB(Math.min(1, v + 0.14), v * 0.92, v * 0.66)
           } else {
             // Enemy castle: light blue.
             const v = 0.92 + h * 0.05
