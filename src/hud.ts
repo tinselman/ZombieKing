@@ -87,6 +87,9 @@ const CSS = `
 #sc-setupMsg { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); max-width: 620px; text-align: center; display: none; font-size: 13px; font-weight: 600; color: #2c3138; line-height: 1.5; }
 #sc-setupMsg.on { display: block; }
 #sc-setupMsg small { display: block; font-weight: 400; color: #7a838d; font-size: 12px; margin-top: 3px; }
+#sc-skipped { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; pointer-events: none; z-index: 7; }
+#sc-skipped.on { display: flex; }
+#sc-skipped span { font-family: Helvetica, Arial, sans-serif; font-size: 72px; font-weight: 800; color: #fff; letter-spacing: 0.03em; text-shadow: 0 3px 24px rgba(20,24,30,0.7); }
 /* Big center card with a 3D flip. */
 #sc-cardModal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(20,24,28,0.55); backdrop-filter: blur(3px); pointer-events: auto; z-index: 6; }
 #sc-cardModal.on { display: flex; }
@@ -136,6 +139,7 @@ export function createHud(
     <button id="sc-worldBtn">World View</button>
     <div id="sc-banner"></div>
     <div id="sc-msg"></div>
+    <div id="sc-skipped"><span>You've been SKIPPED!</span></div>
     <div id="sc-cardModal"><div class="stage">
       <div id="sc-flip">
         <div class="face front"><div class="femoji"></div><div class="fname"></div><div class="fhint">tap card to flip</div></div>
@@ -153,13 +157,13 @@ export function createHud(
       <div id="sc-shopCards"></div>
       <div class="slabel">Resources</div>
       <div id="sc-shopRes"></div>
+      <div class="slabel">Weapons</div>
+      <div id="sc-shopList"></div>
       <div id="sc-shopArms">
-        <div class="slabel">Weapons</div>
-        <div id="sc-shopList"></div>
         <div class="slabel">Fortifications</div>
         <div id="sc-shopForts"></div>
       </div>
-      <div id="sc-shopArmsNote" class="snote">Weapons &amp; fortifications restock between rounds — after a castle falls.</div>
+      <div id="sc-shopArmsNote" class="snote">Fortifications restock between rounds — after a castle falls.</div>
       <button id="sc-shopStart">START ROUND</button>
     </div></div>
   `
@@ -207,6 +211,7 @@ export function createHud(
   const cardClose = q<HTMLButtonElement>('#sc-cardClose')
   const banner = q<HTMLElement>('#sc-banner')
   const msgEl = q<HTMLElement>('#sc-msg')
+  const skipped = q<HTMLElement>('#sc-skipped')
   const end = q<HTMLElement>('#sc-end')
   const endTitle = q<HTMLElement>('#sc-end h1')
   const endSub = q<HTMLElement>('#sc-end p')
@@ -214,6 +219,7 @@ export function createHud(
 
   let bannerTimer = 0
   let msgTimer = 0
+  let skipTimer = 0
 
   // The big card flips on click; Close (or a click on the backdrop) dismisses it.
   flip.addEventListener('click', () => flip.classList.toggle('flipped'))
@@ -477,6 +483,12 @@ export function createHud(
         setupMsg.classList.remove('on')
         powerPanel.style.display = ''
       }
+    },
+    // Big white "You've been SKIPPED!" for three seconds (Skip Player card on you).
+    showSkipped() {
+      skipped.classList.add('on')
+      clearTimeout(skipTimer)
+      skipTimer = window.setTimeout(() => skipped.classList.remove('on'), 3000)
     },
   }
 }

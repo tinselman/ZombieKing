@@ -185,22 +185,25 @@ function sideIncome(side: number): number {
 }
 
 // ---------------------------------------------------------------- stratagem cards
-// A weighted deck: weak cards are common, power cards rare. You buy one card per
-// turn ($1,500) from a random draw, hold a hand across turns, and play cards before
-// your shot. `impl` gates which cards are live (complex ones land in Phase 5).
-type CardId = 'army' | 'ghost' | 'steal' | 'fireworks' | 'toaster' | 'zombie'
+// A weighted deck: common cards (Skip, Bumper Crop) come up far more often than the
+// rare power cards (Zombie King, Toaster). Buy as many as you can afford each turn,
+// hold a hand across turns, and play cards before your shot.
+type CardId = 'skip' | 'bumper' | 'army' | 'ghost' | 'forcefield' | 'steal' | 'rebuild' | 'fireworks' | 'toaster' | 'zombie'
 type CardDef = { id: CardId; name: string; blurb: string; weight: number; impl: boolean; emoji: string }
 const DECK: CardDef[] = [
-  { id: 'army', name: 'Army', weight: 28, impl: true, emoji: '🪖', blurb: '40 warriors zig-zag the field and raid the enemy economy — skimming about an eighth of their income to you.' },
-  { id: 'ghost', name: 'Ghost Tower', weight: 24, impl: true, emoji: '👻', blurb: 'Your tower turns invisible and jumps to a new spot. It reappears when an enemy shell lands within ten voxels.' },
-  { id: 'steal', name: 'Steal', weight: 18, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — its cells and its income become yours." },
-  { id: 'fireworks', name: 'Fireworks', weight: 14, impl: true, emoji: '🎆', blurb: 'Night falls and fireworks bloom; the enemy pockets $1,000. While it lasts, a killing blow rebuilds their castle and bills you $1,000 instead.' },
-  { id: 'toaster', name: 'Flying Toaster', weight: 10, impl: true, emoji: '🍞', blurb: "A winged toaster homes onto the enemy castle and strikes with Death's Head force — a free bonus attack on top of your shot." },
-  { id: 'zombie', name: 'Zombie King', weight: 6, impl: true, emoji: '🧟', blurb: "A giant king stomps the enemy's producers, razing HALF — and that half becomes your resources." },
+  { id: 'skip', name: 'Skip Player', weight: 30, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
+  { id: 'bumper', name: 'Bumper Crop', weight: 28, impl: true, emoji: '🌾', blurb: 'A bounty harvest! Your next income payout from resources is doubled.' },
+  { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: '40 warriors zig-zag the field and raid the enemy economy — skimming about an eighth of their income to you.' },
+  { id: 'ghost', name: 'Ghost Tower', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
+  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks your castle. The next shot that actually hits it is blocked completely — any weapon, no penetration.' },
+  { id: 'steal', name: 'Steal', weight: 12, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — its cells and its income become yours." },
+  { id: 'rebuild', name: 'Rebuild', weight: 11, impl: true, emoji: '🧱', blurb: "Rip half the enemy's tower apart and fly the voxels over to repair your own castle." },
+  { id: 'fireworks', name: 'Fireworks', weight: 9, impl: true, emoji: '🎆', blurb: 'Night falls and fireworks bloom; the enemy pockets $1,000. While it lasts, a killing blow rebuilds their castle and bills you $1,000 instead.' },
+  { id: 'toaster', name: 'Flying Toaster', weight: 6, impl: true, emoji: '🍞', blurb: "A winged toaster homes onto the enemy castle and strikes with Death's Head force — a free bonus attack on top of your shot." },
+  { id: 'zombie', name: 'Zombie King', weight: 4, impl: true, emoji: '🧟', blurb: "A giant king stomps the enemy's producers, razing HALF — and that half becomes your resources." },
 ]
 const CARD_COST = 1500
 const hand: CardId[][] = [[], []] // cards each side is holding
-const cardBought = [false, false] // one purchase per side per turn
 // Ghost Tower state: which side's tower is currently ghosted (-1 none), and the decoy
 // (old) position the enemy AI keeps aiming at while your real tower is hidden/moved.
 let ghostSide = -1
@@ -209,6 +212,13 @@ let ghostDecoy: { cx: number; cz: number } | null = null
 // $1,000 debt per side (charged when a killing blow is intercepted, paid from income).
 let fireworksSide = -1
 const fireworksDebt = [0, 0]
+// Force Field: side with an active (as-yet-unhit) shield, or -1. Bumper Crop: a ×2
+// multiplier on a side's NEXT income payout. Skip Player: this side's next turn is skipped.
+let forceFieldSide = -1
+const incomeBoost = [1, 1]
+const skipNext = [false, false]
+// Ghost Tower: set while the player is hand-repositioning their (still-visible) tower.
+let ghostReposition = false
 function cardDef(id: CardId): CardDef {
   return DECK.find(c => c.id === id)!
 }
@@ -226,10 +236,8 @@ function drawCard(): CardId {
 }
 
 function buyCard(side: number): void {
-  if (cardBought[side]) return void (side === 0 && hud.msg('one card per turn'))
   if (money[side] < CARD_COST) return void (side === 0 && hud.msg('not enough cash'))
   money[side] -= CARD_COST
-  cardBought[side] = true
   const id = drawCard()
   hand[side].push(id)
   if (side === 0) {
@@ -271,6 +279,60 @@ function applyCard(side: number, id: CardId): void {
   else if (id === 'zombie') cardZombie(side, foe)
   else if (id === 'ghost') cardGhost(side)
   else if (id === 'fireworks') cardFireworks(side, foe)
+  else if (id === 'bumper') cardBumper(side)
+  else if (id === 'skip') cardSkip(side, foe)
+  else if (id === 'forcefield') cardForcefield(side)
+  else if (id === 'rebuild') cardRebuild(side, foe)
+}
+
+// Bumper Crop: double this side's NEXT income payout (applied and cleared in startTurn).
+function cardBumper(side: number): void {
+  incomeBoost[side] = 2
+  hud.msg(side === 0 ? 'bumper crop! next income doubled' : 'the enemy banks a bumper crop')
+}
+
+// Skip Player: the opponent's entire next turn is skipped; the caster goes again.
+function cardSkip(side: number, foe: number): void {
+  skipNext[foe] = true
+  hud.msg(side === 0 ? 'the enemy will be skipped — you go again' : 'you are about to be skipped!')
+}
+
+// Force Field: raise an invisible one-hit shield over your castle (see crater()).
+function cardForcefield(side: number): void {
+  forceFieldSide = side
+  hud.msg(side === 0 ? 'force field up — your castle is shielded' : 'the enemy raises a force field')
+}
+
+// Rebuild: rip half the enemy tower out and fly those voxels over to patch yours.
+function cardRebuild(side: number, foe: number): void {
+  const { from, to } = world.rebuildTransfer(foe, side)
+  if (!from.length) return void (side === 0 && hud.msg('the enemy tower has nothing left to take'))
+  world.rebuild()
+  hud.setIntegrity(world.integrity(0), world.integrity(1))
+  spawnVoxelFlight(from, to, side === 0 ? 0xffb0a0 : 0xa0c0ff)
+  sfx.rumble()
+  hud.msg(side === 0 ? 'rebuild! their tower patches yours' : 'the enemy cannibalises your tower')
+}
+
+// Cosmetic: a sample of the transferred voxels arcs from the source cells to the
+// destination cells over ~1s (the grid change itself already happened).
+const voxFlyGeo = new THREE.BoxGeometry(1, 1, 1)
+function spawnVoxelFlight(from: THREE.Vector3[] | { x: number; y: number; z: number }[], to: THREE.Vector3[] | { x: number; y: number; z: number }[], color: number): void {
+  const n = Math.min(28, from.length, to.length)
+  if (n === 0) return
+  const mat = new THREE.MeshLambertMaterial({ color })
+  const items: { mesh: THREE.Mesh; from: THREE.Vector3; to: THREE.Vector3 }[] = []
+  for (let k = 0; k < n; k++) {
+    const fi = Math.floor((k / n) * from.length)
+    const ti = Math.floor((k / n) * to.length)
+    const f = from[fi]
+    const t = to[ti]
+    const mesh = new THREE.Mesh(voxFlyGeo, mat)
+    mesh.position.set(f.x, f.y, f.z)
+    scene.add(mesh)
+    items.push({ mesh, from: new THREE.Vector3(f.x, f.y, f.z), to: new THREE.Vector3(t.x, t.y, t.z) })
+  }
+  tasks.push({ kind: 'voxfly', items, t: 0, dur: 1 })
 }
 
 // Steal: move the enemy's richest producer (cells + income) to your side. No world
@@ -348,23 +410,28 @@ function cardZombie(side: number, foe: number): void {
   hud.msg(side === 0 ? `the Zombie King seizes ${takeCount} of their producers!` : `the enemy Zombie King seizes ${takeCount} of yours!`)
 }
 
-// Ghost Tower: your castle vanishes and jumps to a new random spot on your half. It
-// stays solid (still hittable) but unrendered; the enemy AI keeps aiming at the decoy
-// (old) spot until a shell lands within 10 voxels of the real tower, revealing it.
+// Ghost Tower. You (side 0): reposition your castle by hand; it stays visible to YOU
+// but the enemy AI keeps firing at the decoy (old) spot until a shell lands within 10
+// of the real tower. Enemy (side 1): auto-jumps and vanishes from YOUR view instead.
 function cardGhost(side: number): void {
   const oldT = world.forts[side]?.towers[0]
   ghostDecoy = oldT ? { cx: oldT.cx, cz: oldT.cz } : null
-  const lo = side === 0 ? 10 : Math.round(GX / 2) + 8
-  const hi = side === 0 ? Math.round(GX / 2) - 8 : GX - 10
-  const cx = Math.round(lo + Math.random() * (hi - lo))
+  if (side === 0) {
+    // Hand-reposition; ghostSide is set when you confirm placement (placeCastle).
+    ghostReposition = true
+    beginCastlePlacement()
+    return
+  }
+  // Enemy: jump to a random spot on its half and hide the tower from the human.
+  const cx = Math.round(Math.round(GX / 2) + 8 + Math.random() * (GX / 2 - 18))
   const cz = Math.round(8 + Math.random() * (GZ - 16))
-  world.castleOverride[side] = { cx, cz }
+  world.castleOverride[1] = { cx, cz }
   rebuildRoundWorld()
-  world.hiddenFort = side
+  world.hiddenFort = 1
   world.rebuild()
-  sides[side].cannon.group.visible = false
-  ghostSide = side
-  hud.msg(side === 0 ? 'your tower vanishes and jumps!' : 'the enemy tower vanishes!')
+  sides[1].cannon.group.visible = false
+  ghostSide = 1
+  hud.msg('the enemy tower vanishes!')
 }
 
 function revealGhost(): void {
@@ -372,9 +439,9 @@ function revealGhost(): void {
   world.hiddenFort = -1
   sides[ghostSide].cannon.group.visible = true
   world.rebuild()
+  hud.msg(ghostSide === 0 ? 'the enemy has spotted your tower!' : 'the enemy ghost tower reappears!')
   ghostSide = -1
   ghostDecoy = null
-  hud.msg('the ghost tower reappears!')
 }
 
 // Fireworks: switch to night with a fireworks show; the enemy pockets $1,000. While it
@@ -517,12 +584,25 @@ type Task =
   | { kind: 'toaster'; mesh: THREE.Mesh; pos: THREE.Vector3; target: THREE.Vector3; t: number }
   | { kind: 'army'; runners: THREE.Mesh[]; z0: number[]; x: number; dir: number; t: number }
   | { kind: 'king'; mesh: THREE.Mesh; x: number; z: number; dir: number; t: number }
+  | { kind: 'voxfly'; items: { mesh: THREE.Mesh; from: THREE.Vector3; to: THREE.Vector3 }[]; t: number; dur: number }
+  | { kind: 'shield'; mesh: THREE.Mesh; t: number }
 const tasks: Task[] = []
 // When true, the current fly→resolve pass is a played card (Flying Toaster), not a
 // normal shot: on resolve it hands the turn back to the shooter instead of advancing.
 let flyIsCard = false
 
 function crater(at: THREE.Vector3, r: number, fire: boolean): void {
+  // Force field: if this blast would reach the shielded castle, the shield eats it
+  // entirely (any weapon, no penetration) and is spent. A miss leaves it up.
+  if (forceFieldSide >= 0) {
+    const ft = world.forts[forceFieldSide]?.towers[0]
+    if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
+      spawnShieldBlock(ft.cx, ft.cz)
+      forceFieldSide = -1
+      lastImpact.copy(at)
+      return // nothing gets through
+    }
+  }
   world.carve(at.x, at.y, at.z, r)
   if (fire) world.shockwave(at.x, at.y, at.z, r, Math.random)
   world.updateSupport(Math.random)
@@ -535,6 +615,21 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
     const t = world.forts[ghostSide]?.towers[0]
     if (t && Math.hypot(at.x - t.cx, at.z - t.cz) < 10) revealGhost()
   }
+}
+
+// The visible flare when a force field stops a shot: a cyan dome that flares and fades.
+function spawnShieldBlock(cx: number, cz: number): void {
+  const cy = world.surfaceY(cx, cz) + 4
+  const geo = new THREE.SphereGeometry(9, 18, 10, 0, Math.PI * 2, 0, Math.PI / 2)
+  const mat = new THREE.MeshBasicMaterial({ color: 0x77d6ff, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide })
+  const mesh = new THREE.Mesh(geo, mat)
+  mesh.position.set(cx, cy, cz)
+  scene.add(mesh)
+  tasks.push({ kind: 'shield', mesh, t: 0 })
+  spawnFlash(new THREE.Vector3(cx, cy + 6, cz), 42, 0x99e2ff)
+  sfx.boom(3)
+  addShake(4, new THREE.Vector3(cx, cy, cz))
+  hud.msg('force field holds!')
 }
 
 // Shell lost to the drink: white plume, no crater.
@@ -744,6 +839,29 @@ function updateTasks(dt: number): void {
       t.mesh.position.set(t.x, (sy < 0 ? 0 : sy) + 8 + stomp, t.z)
       t.mesh.rotation.y = t.dir > 0 ? 0 : Math.PI
       if (t.t > 4 || t.x < 6 || t.x > GX - 6) {
+        scene.remove(t.mesh)
+        tasks.splice(i, 1)
+      }
+    } else if (t.kind === 'voxfly') {
+      // Rebuild card: arc each sampled voxel from its old cell to its new one.
+      const u = Math.min(1, t.t / t.dur)
+      for (const it of t.items) {
+        it.mesh.position.lerpVectors(it.from, it.to, u)
+        it.mesh.position.y += Math.sin(u * Math.PI) * 14 // lofted arc
+        it.mesh.rotation.x += dt * 6
+        it.mesh.rotation.y += dt * 5
+      }
+      if (u >= 1) {
+        for (const it of t.items) scene.remove(it.mesh)
+        tasks.splice(i, 1)
+      }
+    } else if (t.kind === 'shield') {
+      // Force-field block: a translucent dome flares up and fades.
+      const u = Math.min(1, t.t / 0.55)
+      const s = 1 + u * 1.4
+      t.mesh.scale.set(s, s, s)
+      ;(t.mesh.material as THREE.MeshBasicMaterial).opacity = 0.6 * (1 - u)
+      if (u >= 1) {
         scene.remove(t.mesh)
         tasks.splice(i, 1)
       }
@@ -1142,6 +1260,13 @@ function placeCastle(): void {
   world.castleOverride[0] = { cx, cz }
   rebuildRoundWorld() // rebuild the battlefield with both castles where they were placed
   sfx.tick()
+  if (ghostReposition) {
+    // Ghost Tower: your tower stays visible to you but the enemy can't see it (it aims
+    // at the decoy) until a shell lands within 10 of the real one.
+    ghostReposition = false
+    ghostSide = 0
+    hud.msg('ghost tower set — the enemy is blind to it')
+  }
   // Income already ran (startTurn opened the market) — go to your turn (aim). Place
   // resources from the left-hand list whenever you like before firing.
   enterAim()
@@ -1440,15 +1565,30 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
   hud.setPower(null, shotThisRound ? lastPlayerPower : null)
 }
 
+// Hand off to the other side — unless Skip Player flagged them, in which case their
+// turn is skipped entirely and the current side goes again.
+function advanceTurn(): void {
+  const next = 1 - turn
+  if (skipNext[next]) {
+    skipNext[next] = false
+    if (next === 0) hud.showSkipped()
+    else hud.msg('the enemy is skipped — go again!')
+    startTurn(turn) // Skip's caster takes another turn
+  } else {
+    startTurn(next)
+  }
+}
+
 function startTurn(s: number): void {
   turn = s
   rerollWind()
   flyHold = null
-  cardBought[s] = false // one card purchase allowed per turn
   // Age this side's producers a turn (crops mature), then pay out — scaled by how
   // intact each is (integrity) and how mature (crops ramp in over a couple turns).
   for (const p of planted[s]) p.age++
-  const income = sideIncome(s)
+  // Bumper Crop doubles this one payout, then the boost is spent.
+  const income = Math.round(sideIncome(s) * incomeBoost[s])
+  incomeBoost[s] = 1
   if (income > 0) money[s] += income
   // Modest AI catch-up: the enemy doesn't optimise its spending like a human, so a
   // small per-turn subsidy keeps it able to field weapons, producers AND stratagems.
@@ -1490,9 +1630,9 @@ function startTurn(s: number): void {
 // heuristics — toaster to attack, ghost when hurt, seize/steal/army vs your economy.
 function aiCards(): void {
   const s = 1
-  if (!cardBought[s] && money[s] >= CARD_COST + 300 && Math.random() < 0.55) {
+  // Buy a card or two when it can spare the cash (keeping a $300 reserve).
+  while (money[s] >= CARD_COST + 300 && Math.random() < 0.5) {
     money[s] -= CARD_COST
-    cardBought[s] = true
     hand[s].push(drawCard())
   }
   if (!hand[s].length || Math.random() > 0.7) return
@@ -1786,7 +1926,7 @@ function finishResolve(force = false): void {
       hud.setIntegrity(world.integrity(0), world.integrity(1))
       hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
       hud.banner('REBUILT!', 'fireworks spared the castle — billed $1,000')
-      startTurn(1 - turn)
+      advanceTurn()
       return
     }
   }
@@ -1857,7 +1997,7 @@ function finishResolve(force = false): void {
       aiPlanned = null
     }
   } else {
-    startTurn(1 - turn)
+    advanceTurn()
   }
 }
 
@@ -1892,11 +2032,17 @@ function setupRoundWorld(): void {
     else if (t.kind === 'army') for (const r of t.runners) scene.remove(r)
   }
   tasks.length = 0
-  // Card effects don't carry between rounds: clear night/ghost and restore both cannons.
+  // Card effects don't carry between rounds: clear night/ghost/field and restore cannons.
   setNight(false)
   fireworksSide = -1
   ghostSide = -1
   ghostDecoy = null
+  ghostReposition = false
+  forceFieldSide = -1
+  incomeBoost[0] = 1
+  incomeBoost[1] = 1
+  skipNext[0] = false
+  skipNext[1] = false
   sides[0].cannon.group.visible = true
   sides[1].cannon.group.visible = true
   world.hiddenFort = -1
@@ -2004,8 +2150,8 @@ function refreshShop(): void {
       full: marketFull,
       startLabel: marketFull ? 'START ROUND' : 'DONE — PLACE & AIM',
       cardCost: CARD_COST,
-      cardHint: cardBought[0] ? 'drew this turn' : `hand ${hand[0].length}`,
-      canBuyCard: !cardBought[0] && money[0] >= CARD_COST,
+      cardHint: `hand ${hand[0].length} · buy as many as you like`,
+      canBuyCard: money[0] >= CARD_COST,
       resources: shopResources(),
       items: shopItems(),
       forts: shopForts(),

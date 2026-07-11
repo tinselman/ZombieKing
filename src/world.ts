@@ -454,6 +454,48 @@ export class World {
     return p ? this.producerIntegrity(p) : 0
   }
 
+  // Rebuild card: rip the top half of `fromSide`'s standing tower out and use those
+  // voxels to patch `toSide`'s walls from the base up. Returns the removed and filled
+  // world positions so the caller can animate the voxels flying across.
+  rebuildTransfer(fromSide: number, toSide: number): { from: Vec3[]; to: Vec3[] } {
+    const ff = this.forts[fromSide]
+    const tf = this.forts[toSide]
+    const from: Vec3[] = []
+    const to: Vec3[] = []
+    if (!ff || !tf || !tf.towers.length) return { from, to }
+    const cells: Vec3[] = []
+    for (const t of ff.towers) {
+      for (let y = t.rubbleY; y < GY; y++)
+        for (let x = t.cx - FORT_HALF; x <= t.cx + FORT_HALF; x++)
+          for (let z = t.cz - FORT_HALF; z <= t.cz + FORT_HALF; z++)
+            if (this.cellAt(x, y, z) === ff.cell) cells.push({ x, y, z })
+    }
+    cells.sort((a, b) => b.y - a.y) // rip the top off first
+    for (const c of cells.slice(0, Math.floor(cells.length / 2))) {
+      this.grid[this.idx(c.x, c.y, c.z)] = EMPTY
+      from.push(c)
+    }
+    // Patch the recipient's wall columns with that many voxels, from the base upward.
+    const tt = tf.towers[0]
+    const need = from.length
+    for (let dy = 0; dy < FORT_HEIGHT + 6 && to.length < need; dy++) {
+      for (let dx = -FORT_HALF; dx <= FORT_HALF && to.length < need; dx++) {
+        for (let dz = -FORT_HALF; dz <= FORT_HALF && to.length < need; dz++) {
+          if (Math.abs(dx) !== FORT_HALF && Math.abs(dz) !== FORT_HALF) continue // walls only
+          const x = tt.cx + dx
+          const y = tt.baseY + dy
+          const z = tt.cz + dz
+          if (this.inBounds(x, y, z) && this.cellAt(x, y, z) === EMPTY) {
+            this.grid[this.idx(x, y, z)] = tf.cell
+            to.push({ x, y, z })
+          }
+        }
+      }
+    }
+    this.dirty = true
+    return { from, to }
+  }
+
   // Fraction of a producer still standing (0..1) — drives its income.
   producerIntegrity(p: ProducerInfo): number {
     let n = 0
