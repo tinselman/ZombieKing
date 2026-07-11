@@ -352,8 +352,9 @@ export function createHud(
     sideRect(): DOMRect {
       return sideEl.getBoundingClientRect()
     },
-    setStatus(round: number, rounds: number, you: number, foe: number, cash: number) {
-      statusEl.innerHTML = `<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}`
+    setStatus(round: number, rounds: number, you: number, foe: number, cash: number, income = 0) {
+      const inc = income > 0 ? ` &nbsp;·&nbsp; <span>resources</span> +$${income.toLocaleString()}/turn` : ''
+      statusEl.innerHTML = `<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}${inc}`
     },
     showShop(
       data: {

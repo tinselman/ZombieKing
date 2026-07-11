@@ -150,6 +150,7 @@ let scoreYou = 0
 let scoreFoe = 0
 const money = [START_CASH, START_CASH]
 let lastRoundResult = ''
+let lastIncome = 0 // resource income collected at the start of the player's current turn
 let roundSeed = 0
 // Match-persistent structure upgrades (taller main tower, extra towers).
 const forti: Fortifications[] = [
@@ -182,6 +183,12 @@ function sideIncome(side: number): number {
     sum += p.baseYield * world.integrityAt(p.cx, p.cz) * maturity(p.type, p.age)
   }
   return Math.round(sum)
+}
+
+// Refresh the top status bar, always showing the player's current resource income rate
+// so it's obvious the economy is paying out (the turn-start message is hidden by the market).
+function syncStatus(): void {
+  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0], sideIncome(0))
 }
 
 // ---------------------------------------------------------------- stratagem cards
@@ -242,7 +249,7 @@ function buyCard(side: number): void {
   hand[side].push(id)
   if (side === 0) {
     sfx.tick()
-    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    syncStatus()
     refreshHand()
     hud.msg(`drew ${cardDef(id).name}`)
   }
@@ -360,7 +367,7 @@ function cardArmy(side: number, foe: number): void {
   if (loot > 0) {
     money[foe] = Math.max(0, money[foe] - loot)
     money[side] += loot
-    if (side === 0) hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    if (side === 0) syncStatus()
   }
   hud.msg(side === 0 ? `the army raids for $${loot.toLocaleString()}` : `enemy army raids you for $${loot.toLocaleString()}`)
 }
@@ -449,7 +456,7 @@ function revealGhost(): void {
 // and bills you $1,000 (paid now if you can, else carried as debt off future income).
 function cardFireworks(side: number, foe: number): void {
   money[foe] += 1000
-  if (side === 0) hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  if (side === 0) syncStatus()
   fireworksSide = side
   setNight(true)
   spawnFireworks()
@@ -1159,6 +1166,7 @@ function enterAim(): void {
   hud.setPower(null, shotThisRound ? lastPlayerPower : null)
   refreshHand()
   refreshResources()
+  syncStatus()
 }
 
 function placeProducer(): void {
@@ -1175,6 +1183,8 @@ function placeProducer(): void {
   world.buildProducer(cx, cz, 0, type, spec.baseYield, 0)
   sfx.tick()
   refreshResources()
+  syncStatus() // update the "resources +$X/turn" readout right away
+  hud.msg(`${spec.name} placed — earning income each turn`)
   // Keep placing this type if you have more of it; otherwise back to aiming.
   if (pendingResources.includes(type)) plantHudMsg()
   else enterAim()
@@ -1223,6 +1233,11 @@ let castleCX = GX / 4
 let castleCZ = GZ / 2
 let castleGhost: THREE.Mesh | null = null
 const CASTLE_HALF = 4 // matches the fort's 9×9 footprint
+// Live-rebuild throttle: as you move the castle we regenerate the world (with the pad
+// under it) so the REAL tower + terrain follow the cursor, not a floating ghost.
+let castleBuildT = 0
+let castleBuiltCX = -1
+let castleBuiltCZ = -1
 
 function ensureCastleGhost(): THREE.Mesh {
   if (!castleGhost) {
@@ -1247,9 +1262,13 @@ function beginCastlePlacement(): void {
   const t = world.forts[0]?.towers[0]
   castleCX = t ? t.cx : GX / 4
   castleCZ = t ? t.cz : GZ / 2
-  ensureCastleGhost().visible = true
+  // The real tower is already built here, so mark it as such (no rebuild until you move).
+  castleBuiltCX = t ? t.cx : -1
+  castleBuiltCZ = t ? t.cz : -1
+  castleBuildT = 0
+  ensureCastleGhost().visible = false // the real (rebuilt) tower is the preview now
   hud.banner('PLACE YOUR CASTLE')
-  hud.setSetupHint('Position your castle — it can go anywhere, even on water', '← → ↑ ↓ move  ·  SPACE or ENTER to set it here')
+  hud.setSetupHint('Position your castle — the ground moves with it; go anywhere, even on water', '← → ↑ ↓ move  ·  SPACE or ENTER to set it here')
 }
 
 function placeCastle(): void {
@@ -1274,7 +1293,7 @@ function placeCastle(): void {
 
 function updateCastle(dt: number): void {
   if (phase !== 'castle') return
-  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 12 : 34) * dt
+  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 12 : 30) * dt
   if (keys.has('ArrowUp')) castleCX += speed
   if (keys.has('ArrowDown')) castleCX -= speed
   if (keys.has('ArrowRight')) castleCZ += speed
@@ -1283,8 +1302,16 @@ function updateCastle(dt: number): void {
   castleCZ = Math.max(CASTLE_HALF + 1, Math.min(GZ - CASTLE_HALF - 1, castleCZ))
   const cx = Math.round(castleCX)
   const cz = Math.round(castleCZ)
-  const g = ensureCastleGhost()
-  g.position.set(cx, world.surfaceY(cx, cz) + 9, cz)
+  // Rebuild the world with the castle here so the tower + its pad follow the cursor.
+  // Throttled and only when the cell changes, to keep the terrain regen affordable.
+  castleBuildT += dt
+  if ((cx !== castleBuiltCX || cz !== castleBuiltCZ) && castleBuildT > 0.09) {
+    castleBuildT = 0
+    castleBuiltCX = cx
+    castleBuiltCZ = cz
+    world.castleOverride[0] = { cx, cz }
+    rebuildRoundWorld()
+  }
 }
 
 function addShake(r: number, at: THREE.Vector3): void {
@@ -1605,7 +1632,8 @@ function startTurn(s: number): void {
       st.wsel = 0 // out of the fancy stuff — back to missiles
       updateWeaponHud()
     }
-    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    syncStatus()
+    lastIncome = income // surfaced in the market (the msg here is hidden by the overlay)
     if (income > 0) hud.msg(`income +$${income.toLocaleString()}`)
     refreshHand()
     refreshResources()
@@ -1924,7 +1952,7 @@ function finishResolve(force = false): void {
       setNight(false)
       rebuildRoundWorld() // the enemy castle is magically rebuilt
       hud.setIntegrity(world.integrity(0), world.integrity(1))
-      hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+      syncStatus()
       hud.banner('REBUILT!', 'fireworks spared the castle — billed $1,000')
       advanceTurn()
       return
@@ -1984,7 +2012,7 @@ function finishResolve(force = false): void {
     endT = 0
     endShown = false
     hud.setIntegrity(youDead ? 0 : iYou, foeDead ? 0 : iFoe)
-    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    syncStatus()
   } else if (wasCard) {
     // A played-card strike that didn't collapse anything — the shooter still shoots.
     phase = turn === 0 ? 'aim' : 'aiThink'
@@ -2138,7 +2166,7 @@ function shopResources() {
 }
 
 function refreshShop(): void {
-  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  syncStatus()
   hud.showShop(
     {
       round,
@@ -2146,7 +2174,7 @@ function refreshShop(): void {
       scoreYou,
       scoreFoe,
       money: money[0],
-      result: marketFull ? lastRoundResult : '',
+      result: marketFull ? lastRoundResult : lastIncome > 0 ? `Your resources paid +$${lastIncome.toLocaleString()} this turn.` : 'No resource income yet — buy resources below and place them on your turn.',
       full: marketFull,
       startLabel: marketFull ? 'START ROUND' : 'DONE — PLACE & AIM',
       cardCost: CARD_COST,
@@ -2184,7 +2212,7 @@ function buyResource(index: number): void {
 // Leaving the market: round-start goes through castle placement first; otherwise
 // straight to your turn (aim), where you place resources from the list and/or fire.
 function onMarketDone(): void {
-  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  syncStatus()
   if (marketFull) beginCastlePlacement()
   else enterAim()
 }
