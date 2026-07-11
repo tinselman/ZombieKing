@@ -18,7 +18,7 @@ const CSS = `
 #sc-status span { color: #7a838d; font-weight: 400; }
 #sc-windArrow { font-size: 22px; line-height: 1; display: inline-block; transition: transform 0.4s ease; }
 #sc-windSpeed { font-size: 13px; font-weight: 600; margin-top: 2px; }
-#sc-weapons { min-width: 170px; pointer-events: auto; }
+#sc-weapons { position: static; min-width: 170px; pointer-events: auto; }
 #sc-weapons .w { font-size: 13px; padding: 2px 6px; border-radius: 5px; display: flex; justify-content: space-between; gap: 14px; color: #6c757e; cursor: pointer; }
 #sc-weapons .w:hover { background: #e8ebef; }
 #sc-weapons .w.sel { background: #2c3138; color: #fff; font-weight: 600; }
@@ -63,14 +63,30 @@ const CSS = `
 #sc-shopStart { margin-top: 18px; width: 100%; font-size: 15px; font-weight: 800; letter-spacing: 0.08em; padding: 12px 0; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shopStart:hover { background: #454c55; }
 /* Bottom-left stack: the stratagem hand sits directly above the weapon list. */
+/* Bottom-left: three stacked lists — Cards (top), Resources, Weapons (bottom).
+   The panels must be position:static so they lay out in the flex column (the base
+   .panel rule makes them absolute, which is what broke the weapon/card lists). */
 #sc-blstack { position: absolute; bottom: 16px; left: 16px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
-#sc-hand { min-width: 170px; pointer-events: auto; display: none; }
+/* Beats the base "#sc-hud .panel { position:absolute }" rule (equal specificity, later)
+   so the three panels lay out in the flex column instead of stacking on one spot. */
+#sc-blstack .panel { position: static; }
+#sc-hand { position: static; min-width: 170px; pointer-events: auto; display: none; }
 #sc-hand.on { display: block; }
 #sc-hand .c { font-size: 13px; padding: 3px 6px; border-radius: 5px; display: flex; align-items: center; gap: 8px; color: #4a5158; cursor: pointer; }
 #sc-hand .c:hover { background: #e8ebef; }
 #sc-hand .c .emoji { font-size: 14px; line-height: 1; }
 #sc-hand .c .cn { flex: 1; font-weight: 600; }
 #sc-hand .c .go { font-size: 10px; color: #98a1aa; letter-spacing: 0.08em; }
+#sc-resources { position: static; min-width: 170px; pointer-events: auto; display: none; }
+#sc-resources.on { display: block; }
+#sc-resources .r { font-size: 13px; padding: 2px 6px; border-radius: 5px; display: flex; justify-content: space-between; gap: 14px; color: #6c757e; cursor: pointer; }
+#sc-resources .r:hover { background: #e8ebef; }
+#sc-resources .r .n { color: #4a5158; font-weight: 600; }
+#sc-resources .r .ct { color: #7a838d; }
+/* Bottom-center setup instructions, shown where the power bar sits during placement. */
+#sc-setupMsg { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); max-width: 620px; text-align: center; display: none; font-size: 13px; font-weight: 600; color: #2c3138; line-height: 1.5; }
+#sc-setupMsg.on { display: block; }
+#sc-setupMsg small { display: block; font-weight: 400; color: #7a838d; font-size: 12px; margin-top: 3px; }
 /* Big center card with a 3D flip. */
 #sc-cardModal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(20,24,28,0.55); backdrop-filter: blur(3px); pointer-events: auto; z-index: 6; }
 #sc-cardModal.on { display: flex; }
@@ -110,9 +126,11 @@ export function createHud(
     <div class="panel" id="sc-status"></div>
     <div id="sc-blstack">
       <div class="panel" id="sc-hand"><div class="label">Stratagems &nbsp;· click to view</div><div id="sc-handList"></div></div>
+      <div class="panel" id="sc-resources"><div class="label">Resources &nbsp;· click to place</div><div id="sc-resList"></div></div>
       <div class="panel" id="sc-weapons"><div class="label">Weapon &nbsp;⇥ / click</div><div id="sc-weaponList"></div></div>
     </div>
     <div class="panel" id="sc-power"><div class="label">Power — hold space, release to fire</div><div id="sc-powerBar"><div class="fill"></div><div id="sc-powerMark"></div></div><div id="sc-powerNum">–</div></div>
+    <div id="sc-setupMsg"></div>
     <div class="panel" id="sc-angles"></div>
     <div id="sc-side"><span class="tag">side view</span></div>
     <button id="sc-worldBtn">World View</button>
@@ -175,6 +193,10 @@ export function createHud(
   worldBtn.addEventListener('click', () => handlers.onWorldToggle?.())
   const handEl = q<HTMLElement>('#sc-hand')
   const handList = q<HTMLElement>('#sc-handList')
+  const resEl = q<HTMLElement>('#sc-resources')
+  const resList = q<HTMLElement>('#sc-resList')
+  const powerPanel = q<HTMLElement>('#sc-power')
+  const setupMsg = q<HTMLElement>('#sc-setupMsg')
   const cardModal = q<HTMLElement>('#sc-cardModal')
   const flip = q<HTMLElement>('#sc-flip')
   const flipFront = q<HTMLElement>('#sc-flip .front .fname')
@@ -428,10 +450,33 @@ export function createHud(
         })
       })
     },
-    // The hand list is a persistent readout; showCards kept for callers but the list
-    // also self-hides when empty (see setHand).
-    showCards(visible: boolean) {
-      handEl.classList.toggle('on', visible && handList.children.length > 0)
+    // The hand list is a persistent readout — always visible whenever you hold cards,
+    // so a freshly drawn card always shows. (The market overlay covers it anyway.)
+    showCards(_visible: boolean) {
+      handEl.classList.toggle('on', handList.children.length > 0)
+    },
+    // Resources list: your UNPLACED units by type. Click one to place it on the map.
+    // Hidden when you have nothing to place.
+    setResources(rows: { type: number; name: string; count: number }[], opts: { onSelect: (type: number) => void }) {
+      resEl.classList.toggle('on', rows.length > 0)
+      resList.innerHTML = rows
+        .map(r => `<div class="r" data-t="${r.type}"><span class="n">${r.name}</span><span class="ct">×${r.count} place ▸</span></div>`)
+        .join('')
+      resList.querySelectorAll('.r').forEach(el =>
+        el.addEventListener('click', () => opts.onSelect(parseInt((el as HTMLElement).dataset.t!)))
+      )
+    },
+    // Bottom-centre setup instructions during placement steps. Passing text hides the
+    // power/fire bar (you're not firing yet); passing '' restores it.
+    setSetupHint(text: string, sub = '') {
+      if (text) {
+        setupMsg.innerHTML = `${text}${sub ? `<small>${sub}</small>` : ''}`
+        setupMsg.classList.add('on')
+        powerPanel.style.display = 'none'
+      } else {
+        setupMsg.classList.remove('on')
+        powerPanel.style.display = ''
+      }
     },
   }
 }

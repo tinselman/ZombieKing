@@ -139,10 +139,9 @@ function applyCannonPose(side: number): void {
 type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
 
 // Match economy: best-of-ROUNDS. Income comes from producers (see sideIncome);
-// combat is rewarded by winning the round (WIN_BONUS + plunder), not per hit.
+// winning a round plunders half the loser's cash + one card (not per-hit pay).
 const ROUNDS = 3 // best-of-3: first side to 2 round wins takes the match
 const START_CASH = 3000
-const WIN_BONUS = 2500
 
 let phase: Phase = 'aim'
 let turn = 0
@@ -251,6 +250,17 @@ function playCard(side: number, idx: number): void {
     refreshHand()
   }
   applyCard(side, id)
+  refreshResources() // steal/zombie move producers between sides
+}
+
+// On a round win the victor lifts one random card from the loser's hand. Returns the
+// card's name (for the result message), or '' if the loser held none.
+function stealRandomCard(winner: number, loser: number): string {
+  if (!hand[loser].length) return ''
+  const i = Math.floor(Math.random() * hand[loser].length)
+  const id = hand[loser].splice(i, 1)[0]
+  hand[winner].push(id)
+  return cardDef(id).name
 }
 
 function applyCard(side: number, id: CardId): void {
@@ -384,6 +394,8 @@ let chargePower = 0
 let lastPlayerPower = 60
 let shotThisRound = false // power marker only shows after the first shot of a round
 let resolveT = 0
+let resolveTotal = 0 // wall-clock in 'resolve' (not reset by the settling guard) — safety net
+let flyTotal = 0 // wall-clock in 'fly' — forces a stuck shot (lingering proj/task) to resolve
 let aiT = 0
 let aiErr = 16 // enemy aim scatter — modest and human; ranges in slowly, never pinpoint
 let aiPlanned: { az: number; el: number; power: number } | null = null
@@ -979,58 +991,79 @@ function ensurePlantGhost(): THREE.Mesh {
   return plantGhost
 }
 
-function plantHudMsg(): void {
-  const spec = PRODUCER_SPECS[plantType]
-  hud.msg(`place ${spec.name} (${pendingResources.length} left) — +$${spec.baseYield}/turn`)
+// Four blinking hairline arrows around the ghost, one per side, cueing that the arrow
+// keys nudge the resource. They point outward (±X toward enemy/back, ±Z left/right).
+let plantArrows: THREE.Group | null = null
+let plantBlinkT = 0
+const PLANT_UP = new THREE.Vector3(0, 1, 0)
+const PLANT_ARROW_DIRS = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1)]
+function ensurePlantArrows(): THREE.Group {
+  if (!plantArrows) {
+    plantArrows = new THREE.Group()
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffef7a, transparent: true, opacity: 0.95, depthTest: false })
+    const geo = new THREE.ConeGeometry(1.0, 3.4, 4) // slim pyramid = arrowhead
+    for (const d of PLANT_ARROW_DIRS) {
+      const a = new THREE.Mesh(geo, mat)
+      a.quaternion.setFromUnitVectors(PLANT_UP, d) // point the tip outward
+      plantArrows.add(a)
+    }
+    plantArrows.renderOrder = 9
+    scene.add(plantArrows)
+  }
+  return plantArrows
 }
 
-// Placement step for resources bought in the market. Each pending resource is placed
-// in turn; when the queue is empty we go straight to aim. Unplaced ones carry over.
-function beginPlant(): void {
-  if (pendingResources.length === 0) {
-    finishPlant()
-    return
-  }
-  plantType = pendingResources[0]
+function plantHudMsg(): void {
+  const spec = PRODUCER_SPECS[plantType]
+  const left = pendingResources.filter(t => t === plantType).length
+  hud.setSetupHint(`Placing ${spec.name} (${left} left, +$${spec.baseYield}/turn) — anywhere, even on water`, '← → ↑ ↓ move  ·  SPACE or ENTER to place  ·  ESC back to aim')
+}
+
+// Enter placement mode for one resource type (clicked in the Resources list, during
+// your aim step). You place units of that type with SPACE/ENTER; ESC returns to aim.
+function beginPlaceResource(type: number): void {
+  if (phase !== 'aim' && phase !== 'plant') return
+  if (!pendingResources.includes(type)) return
+  plantType = type
   phase = 'plant'
   plantCX = GX / 4
   plantCZ = GZ / 2
   ensurePlantGhost().visible = true
-  hud.showCards(true)
-  hud.banner('PLACE RESOURCES', 'arrows move · space places · enter to skip')
   plantHudMsg()
 }
 
-function finishPlant(): void {
+// Leave any placement mode and return to aiming — the power/fire bar comes back.
+function enterAim(): void {
   if (plantGhost) plantGhost.visible = false
+  if (plantArrows) plantArrows.visible = false
   phase = 'aim'
-  hud.banner('YOUR TURN', 'wind has shifted')
+  hud.setSetupHint('') // restore the power/fire bar — you're ready to aim now
   hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+  refreshHand()
+  refreshResources()
 }
 
 function placeProducer(): void {
-  if (pendingResources.length === 0) return void finishPlant()
-  const type = pendingResources[0]
+  const type = plantType
+  const idx = pendingResources.indexOf(type)
+  if (idx < 0) return void enterAim()
   const spec = PRODUCER_SPECS[type]
   const cx = Math.round(plantCX)
   const cz = Math.round(plantCZ)
   if (!world.canPlaceProducer(cx, cz, type)) return void hud.msg('overlaps another structure')
   // Already paid for in the market — placement is free.
-  pendingResources.shift()
+  pendingResources.splice(idx, 1)
   planted[0].push({ cx, cz, type, baseYield: spec.baseYield, age: 0 })
   world.buildProducer(cx, cz, 0, type, spec.baseYield, 0)
   sfx.tick()
-  hud.msg(`${spec.name} placed`)
-  if (pendingResources.length === 0) finishPlant()
-  else {
-    plantType = pendingResources[0]
-    plantHudMsg()
-  }
+  refreshResources()
+  // Keep placing this type if you have more of it; otherwise back to aiming.
+  if (pendingResources.includes(type)) plantHudMsg()
+  else enterAim()
 }
 
 function updatePlant(dt: number): void {
   if (phase !== 'plant') return
-  plantType = pendingResources[0] ?? plantType
   const half = PRODUCER_SPECS[plantType].half
   // Coarse positioning — a fixed speed (Shift = slow) is plenty for a small plot.
   const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 10 : 30) * dt
@@ -1049,6 +1082,19 @@ function updatePlant(dt: number): void {
   g.position.set(cx, world.surfaceY(cx, cz) + spec.tall / 2 + 1, cz)
   const ok = world.canPlaceProducer(cx, cz, plantType)
   ;(g.material as THREE.MeshBasicMaterial).color.setHex(ok ? 0x4caf50 : 0xd23a3a)
+  // Blinking hairline arrows on all four sides, cueing the arrow-key nudge.
+  const arrows = ensurePlantArrows()
+  arrows.visible = true
+  plantBlinkT += dt
+  const blinkOn = plantBlinkT % 0.5 < 0.3
+  const ay = world.surfaceY(cx, cz) + spec.tall + 2.5
+  const reach = half + 3
+  for (let k = 0; k < arrows.children.length; k++) {
+    const a = arrows.children[k]
+    const d = PLANT_ARROW_DIRS[k]
+    a.position.set(cx + d.x * reach, ay, cz + d.z * reach)
+    a.visible = blinkOn
+  }
 }
 
 // ---------------------------------------------------------------- castle placement
@@ -1084,19 +1130,21 @@ function beginCastlePlacement(): void {
   castleCX = t ? t.cx : GX / 4
   castleCZ = t ? t.cz : GZ / 2
   ensureCastleGhost().visible = true
-  hud.banner('PLACE YOUR CASTLE', 'arrows move · space/enter to set')
-  hud.msg('position your castle — anywhere, even on water')
+  hud.banner('PLACE YOUR CASTLE')
+  hud.setSetupHint('Position your castle — it can go anywhere, even on water', '← → ↑ ↓ move  ·  SPACE or ENTER to set it here')
 }
 
 function placeCastle(): void {
   const cx = Math.round(castleCX)
   const cz = Math.round(castleCZ)
   if (castleGhost) castleGhost.visible = false
+  hud.setSetupHint('')
   world.castleOverride[0] = { cx, cz }
   rebuildRoundWorld() // rebuild the battlefield with both castles where they were placed
   sfx.tick()
-  // Income already ran (startTurn opened the market) — go straight to resource placement.
-  beginPlant()
+  // Income already ran (startTurn opened the market) — go to your turn (aim). Place
+  // resources from the left-hand list whenever you like before firing.
+  enterAim()
 }
 
 function updateCastle(dt: number): void {
@@ -1420,6 +1468,7 @@ function startTurn(s: number): void {
     hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
     if (income > 0) hud.msg(`income +$${income.toLocaleString()}`)
     refreshHand()
+    refreshResources()
     // Every turn opens the market (buy cards + resources; weapons only at round
     // start). Leaving it runs castle placement (round start) then resource placement.
     openMarket(roundStartPending)
@@ -1472,6 +1521,17 @@ function refreshHand(): void {
   hud.setHand(
     hand[0].map(id => ({ id, name: cardDef(id).name, blurb: cardDef(id).blurb, emoji: cardDef(id).emoji })),
     { onPlay: (i: number) => playCard(0, i) }
+  )
+}
+
+// Push the player's UNPLACED resources (bought in the market, awaiting placement) to
+// the HUD list. Clicking a type places one; the list empties as you place them.
+function refreshResources(): void {
+  const counts = new Map<number, number>()
+  for (const t of pendingResources) counts.set(t, (counts.get(t) ?? 0) + 1)
+  hud.setResources(
+    PRODUCER_TYPES.filter(t => (counts.get(t) ?? 0) > 0).map(t => ({ type: t, name: PRODUCER_SPECS[t].name, count: counts.get(t)! })),
+    { onSelect: (type: number) => beginPlaceResource(type) }
   )
 }
 
@@ -1691,9 +1751,10 @@ function detonateSaucer(p: Proj): void {
 
 // ---------------------------------------------------------------- resolve & match end
 
-function finishResolve(): void {
-  // One more support pass — settling rubble can undermine what's left.
-  if (world.updateSupport(Math.random) > 0) {
+function finishResolve(force = false): void {
+  // One more support pass — settling rubble can undermine what's left. The `force`
+  // path (safety timeout) skips this so perpetually-settling rubble can't wedge us.
+  if (!force && world.updateSupport(Math.random) > 0) {
     resolveT = 0.5
     return
   }
@@ -1730,36 +1791,31 @@ function finishResolve(): void {
     }
   }
   if (youDead || foeDead) {
-    // Combat no longer pays per hit — the reward for collapsing the tower is the
-    // win bonus PLUS seizing the loser's treasury/arsenal and razing their economy.
-    const payYou = foeDead && !youDead ? WIN_BONUS : 0
-    const payFoe = youDead && !foeDead ? WIN_BONUS : 0
-    // To the victor the spoils: the winner takes the loser's treasury and arsenal,
-    // and the loser's producers (their economy) are razed to nothing.
+    // Collapsing the enemy tower wins the round and plunders HALF the loser's cash plus
+    // one random card. Everything else — producers, weapons, remaining cards/cash —
+    // persists into the next round for both sides (no more razing or arsenal looting).
     let plunder = 0
+    let stole = ''
     if (foeDead && !youDead) {
       scoreYou++
-      plunder = money[1]
+      plunder = Math.floor(money[1] / 2)
       money[0] += plunder
-      money[1] = 0
-      lootArsenal(0, 1)
-      planted[1] = [] // their economy is razed to the ground
+      money[1] -= plunder
+      stole = stealRandomCard(0, 1)
     } else if (youDead && !foeDead) {
       scoreFoe++
-      plunder = money[0]
+      plunder = Math.floor(money[0] / 2)
       money[1] += plunder
-      money[0] = 0
-      lootArsenal(1, 0)
-      planted[0] = [] // our economy is razed to the ground
+      money[0] -= plunder
+      stole = stealRandomCard(1, 0)
     }
-    money[0] += payYou
-    money[1] += payFoe
+    const cardNote = stole ? ` and their ${stole} card` : ''
     lastRoundResult =
       youDead && foeDead
         ? `Round ${round} drawn — mutual destruction.`
         : foeDead
-          ? `Round ${round} won! Won $${payYou.toLocaleString()}, plundered $${plunder.toLocaleString()} + their arsenal, and razed their farms.`
-          : `Round ${round} lost — the enemy plundered your treasury and razed your farms.`
+          ? `Round ${round} won! Plundered half their treasury ($${plunder.toLocaleString()})${cardNote}.`
+          : `Round ${round} lost — the enemy took half your treasury ($${plunder.toLocaleString()})${cardNote}.`
     const losers: number[] = []
     if (youDead) losers.push(0)
     if (foeDead) losers.push(1)
@@ -1806,17 +1862,6 @@ function finishResolve(): void {
 }
 
 // ---------------------------------------------------------------- rounds & armory
-
-// Winner strips the loser's ammo stores; the loser restarts on the base loadout.
-function lootArsenal(winner: number, loser: number): void {
-  for (const w of WEAPONS) {
-    const l = sides[loser].arsenal.get(w.id) ?? 0
-    if (!Number.isFinite(l) || l <= 0) continue
-    sides[winner].arsenal.set(w.id, (sides[winner].arsenal.get(w.id) ?? 0) + l)
-  }
-  sides[loser].arsenal = newArsenal()
-  updateWeaponHud()
-}
 
 // (Re)build the current round's battlefield — same seed, so buying a tower in
 // the armory adds it to the already-visible terrain.
@@ -1990,11 +2035,12 @@ function buyResource(index: number): void {
 }
 
 // Leaving the market: round-start goes through castle placement first, then both
-// paths run resource placement (beginPlant) and finally aim.
+// Leaving the market: round-start goes through castle placement first; otherwise
+// straight to your turn (aim), where you place resources from the list and/or fire.
 function onMarketDone(): void {
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
   if (marketFull) beginCastlePlacement()
-  else beginPlant()
+  else enterAim()
 }
 
 function openMarket(full: boolean): void {
@@ -2088,7 +2134,8 @@ window.addEventListener('keydown', e => {
     }
   }
   if (e.code === 'Enter' && phase === 'castle') placeCastle()
-  if (e.code === 'Enter' && phase === 'plant') finishPlant()
+  if (e.code === 'Enter' && phase === 'plant') placeProducer() // Enter also places a resource
+  if (e.code === 'Escape' && phase === 'plant') enterAim() // back to aiming
   if (e.code === 'KeyV') toggleWorldView()
   if (/^Digit[1-9]$/.test(e.code)) {
     // Digits address the visible (owned) weapon list, not the full roster.
@@ -2216,13 +2263,25 @@ function tick(now: number): void {
   updateFx(dt)
   updateCannons(dt)
 
-  if (phase === 'fly' && projs.length === 0 && tasks.length === 0) {
+  // Safety net: if a shot lingers too long (a stuck projectile/task that never clears),
+  // force it to resolve so the round can't hang mid-flight.
+  flyTotal = phase === 'fly' ? flyTotal + dt : 0
+  if (phase === 'fly' && (flyTotal > 16 || (projs.length === 0 && tasks.length === 0))) {
+    for (const p of [...projs]) removeProj(p)
+    for (const t of tasks) {
+      if (t.kind === 'roller' || t.kind === 'toaster' || t.kind === 'king') scene.remove(t.mesh)
+      else if (t.kind === 'army') for (const r of t.runners) scene.remove(r)
+    }
+    tasks.length = 0
     phase = 'resolve'
     resolveT = 0
+    resolveTotal = 0
   }
   if (phase === 'resolve') {
     resolveT += dt
-    if (world.debris.length === 0 && resolveT > 1.1) finishResolve()
+    resolveTotal += dt
+    // Normal finish once rubble settles; hard fallback so it can never wedge forever.
+    if ((world.debris.length === 0 && resolveT > 1.1) || resolveTotal > 8) finishResolve(resolveTotal > 8)
   }
   if (phase === 'end') {
     endT += dt
@@ -2335,13 +2394,15 @@ window.__sv = {
   }),
   world,
   newMatch: fullReset,
-  // Test hooks for the plant phase: position the cursor + place, and skip to aim.
+  // Test hooks: select the first pending resource (if not already placing), position
+  // the cursor, and place; and return to aim.
   plantAt(cx: number, cz: number) {
+    if (phase !== 'plant' && pendingResources.length) beginPlaceResource(pendingResources[0])
     plantCX = cx
     plantCZ = cz
     placeProducer()
   },
-  finishPlant,
+  finishPlant: enterAim,
   // Castle test hook: set the cursor and confirm placement.
   placeCastleAt(cx: number, cz: number) {
     castleCX = cx
