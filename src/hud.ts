@@ -18,7 +18,7 @@ const CSS = `
 #sc-status span { color: #7a838d; font-weight: 400; }
 #sc-windArrow { font-size: 22px; line-height: 1; display: inline-block; transition: transform 0.4s ease; }
 #sc-windSpeed { font-size: 13px; font-weight: 600; margin-top: 2px; }
-#sc-weapons { bottom: 16px; left: 16px; min-width: 170px; pointer-events: auto; }
+#sc-weapons { min-width: 170px; pointer-events: auto; }
 #sc-weapons .w { font-size: 13px; padding: 2px 6px; border-radius: 5px; display: flex; justify-content: space-between; gap: 14px; color: #6c757e; cursor: pointer; }
 #sc-weapons .w:hover { background: #e8ebef; }
 #sc-weapons .w.sel { background: #2c3138; color: #fff; font-weight: 600; }
@@ -59,8 +59,38 @@ const CSS = `
 #sc-shop .srow button { font-size: 12px; font-weight: 700; padding: 4px 0; border-radius: 6px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shop .srow button:disabled { opacity: 0.25; cursor: default; }
 #sc-shop .slabel { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin: 12px 0 2px; }
+#sc-shop .snote { font-size: 12px; color: #9aa1a9; font-style: italic; margin: 10px 0 2px; }
 #sc-shopStart { margin-top: 18px; width: 100%; font-size: 15px; font-weight: 800; letter-spacing: 0.08em; padding: 12px 0; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-shopStart:hover { background: #454c55; }
+/* Bottom-left stack: the stratagem hand sits directly above the weapon list. */
+#sc-blstack { position: absolute; bottom: 16px; left: 16px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+#sc-hand { min-width: 170px; pointer-events: auto; display: none; }
+#sc-hand.on { display: block; }
+#sc-hand .c { font-size: 13px; padding: 3px 6px; border-radius: 5px; display: flex; align-items: center; gap: 8px; color: #4a5158; cursor: pointer; }
+#sc-hand .c:hover { background: #e8ebef; }
+#sc-hand .c .emoji { font-size: 14px; line-height: 1; }
+#sc-hand .c .cn { flex: 1; font-weight: 600; }
+#sc-hand .c .go { font-size: 10px; color: #98a1aa; letter-spacing: 0.08em; }
+/* Big center card with a 3D flip. */
+#sc-cardModal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(20,24,28,0.55); backdrop-filter: blur(3px); pointer-events: auto; z-index: 6; }
+#sc-cardModal.on { display: flex; }
+#sc-cardModal .stage { perspective: 1500px; display: flex; flex-direction: column; align-items: center; gap: 18px; }
+#sc-flip { position: relative; width: 300px; height: 424px; transform-style: preserve-3d; transition: transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1); cursor: pointer; }
+#sc-flip.flipped { transform: rotateY(180deg); }
+#sc-flip .face { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; border-radius: 20px; padding: 30px 26px; box-sizing: border-box; display: flex; flex-direction: column; box-shadow: 0 24px 70px rgba(0,0,0,0.45); border: 1px solid rgba(255,255,255,0.2); }
+#sc-flip .front { background: linear-gradient(165deg, #fdfdfd, #e3e8ee); color: #2c3138; align-items: center; text-align: center; }
+#sc-flip .front .fname { font-size: 26px; font-weight: 800; letter-spacing: 0.03em; margin-top: 6px; }
+#sc-flip .front .femoji { font-size: 128px; line-height: 1.1; margin: auto 0; }
+#sc-flip .front .fhint { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: #9aa1a9; }
+#sc-flip .back { transform: rotateY(180deg); background: linear-gradient(165deg, #2c3138, #434b55); color: #eef1f4; }
+#sc-flip .back .bname { font-size: 18px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 14px; color: #fff; }
+#sc-flip .back .bdesc { font-size: 18px; line-height: 1.5; font-weight: 300; color: #d3d9df; }
+#sc-cardModal .mbtns { display: flex; gap: 12px; }
+#sc-cardModal .mbtns button { font-size: 14px; font-weight: 700; letter-spacing: 0.06em; padding: 10px 26px; border-radius: 10px; cursor: pointer; border: 1px solid #2c3138; }
+#sc-cardPlay { background: #2c7d3a; border-color: #2c7d3a !important; color: #fff; }
+#sc-cardPlay:hover { background: #35953f; }
+#sc-cardClose { background: rgba(255,255,255,0.9); color: #2c3138; }
+#sc-cardClose:hover { background: #fff; }
 `
 
 export function createHud(
@@ -78,23 +108,40 @@ export function createHud(
     <div class="panel" id="sc-fortFoe"><div class="label">Enemy Fort</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
     <div class="panel" id="sc-wind"><div class="label">Wind</div><span id="sc-windArrow">➤</span><div id="sc-windSpeed"></div></div>
     <div class="panel" id="sc-status"></div>
-    <div class="panel" id="sc-weapons"><div class="label">Weapon &nbsp;⇥ / click</div><div id="sc-weaponList"></div></div>
+    <div id="sc-blstack">
+      <div class="panel" id="sc-hand"><div class="label">Stratagems &nbsp;· click to view</div><div id="sc-handList"></div></div>
+      <div class="panel" id="sc-weapons"><div class="label">Weapon &nbsp;⇥ / click</div><div id="sc-weaponList"></div></div>
+    </div>
     <div class="panel" id="sc-power"><div class="label">Power — hold space, release to fire</div><div id="sc-powerBar"><div class="fill"></div><div id="sc-powerMark"></div></div><div id="sc-powerNum">–</div></div>
     <div class="panel" id="sc-angles"></div>
     <div id="sc-side"><span class="tag">side view</span></div>
     <button id="sc-worldBtn">World View</button>
     <div id="sc-banner"></div>
     <div id="sc-msg"></div>
+    <div id="sc-cardModal"><div class="stage">
+      <div id="sc-flip">
+        <div class="face front"><div class="femoji"></div><div class="fname"></div><div class="fhint">tap card to flip</div></div>
+        <div class="face back"><div class="bname"></div><div class="bdesc"></div></div>
+      </div>
+      <div class="mbtns"><button id="sc-cardPlay">Play</button><button id="sc-cardClose">Close</button></div>
+    </div></div>
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-shop"><div class="box">
-      <h2>THE ARMORY</h2>
+      <h2>ZOMBIE KING MARKET</h2>
       <div id="sc-shopResult"></div>
       <div id="sc-shopStatus"></div>
-      <div class="slabel">Weapons</div>
-      <div id="sc-shopList"></div>
-      <div class="slabel">Fortifications</div>
-      <div id="sc-shopForts"></div>
+      <div class="slabel">Stratagem Cards</div>
+      <div id="sc-shopCards"></div>
+      <div class="slabel">Resources</div>
+      <div id="sc-shopRes"></div>
+      <div id="sc-shopArms">
+        <div class="slabel">Weapons</div>
+        <div id="sc-shopList"></div>
+        <div class="slabel">Fortifications</div>
+        <div id="sc-shopForts"></div>
+      </div>
+      <div id="sc-shopArmsNote" class="snote">Weapons &amp; fortifications restock between rounds — after a castle falls.</div>
       <button id="sc-shopStart">START ROUND</button>
     </div></div>
   `
@@ -113,6 +160,10 @@ export function createHud(
   const shopStatus = q<HTMLElement>('#sc-shopStatus')
   const shopList = q<HTMLElement>('#sc-shopList')
   const shopForts = q<HTMLElement>('#sc-shopForts')
+  const shopCards = q<HTMLElement>('#sc-shopCards')
+  const shopRes = q<HTMLElement>('#sc-shopRes')
+  const shopArms = q<HTMLElement>('#sc-shopArms')
+  const shopArmsNote = q<HTMLElement>('#sc-shopArmsNote')
   const shopStart = q<HTMLButtonElement>('#sc-shopStart')
   const weaponList = q<HTMLElement>('#sc-weaponList')
   const powerBar = q<HTMLElement>('#sc-powerBar > div.fill')
@@ -122,6 +173,16 @@ export function createHud(
   const sideEl = q<HTMLElement>('#sc-side')
   const worldBtn = q<HTMLButtonElement>('#sc-worldBtn')
   worldBtn.addEventListener('click', () => handlers.onWorldToggle?.())
+  const handEl = q<HTMLElement>('#sc-hand')
+  const handList = q<HTMLElement>('#sc-handList')
+  const cardModal = q<HTMLElement>('#sc-cardModal')
+  const flip = q<HTMLElement>('#sc-flip')
+  const flipFront = q<HTMLElement>('#sc-flip .front .fname')
+  const flipEmoji = q<HTMLElement>('#sc-flip .front .femoji')
+  const flipBackName = q<HTMLElement>('#sc-flip .back .bname')
+  const flipBackDesc = q<HTMLElement>('#sc-flip .back .bdesc')
+  const cardPlay = q<HTMLButtonElement>('#sc-cardPlay')
+  const cardClose = q<HTMLButtonElement>('#sc-cardClose')
   const banner = q<HTMLElement>('#sc-banner')
   const msgEl = q<HTMLElement>('#sc-msg')
   const end = q<HTMLElement>('#sc-end')
@@ -132,6 +193,13 @@ export function createHud(
   let bannerTimer = 0
   let msgTimer = 0
 
+  // The big card flips on click; Close (or a click on the backdrop) dismisses it.
+  flip.addEventListener('click', () => flip.classList.toggle('flipped'))
+  cardClose.addEventListener('click', () => cardModal.classList.remove('on'))
+  cardModal.addEventListener('click', e => {
+    if (e.target === cardModal) cardModal.classList.remove('on')
+  })
+
   weaponList.addEventListener('click', e => {
     const row = (e.target as HTMLElement).closest('.w') as HTMLElement | null
     if (row && row.dataset.i !== undefined) handlers.onWeapon?.(parseInt(row.dataset.i))
@@ -139,6 +207,8 @@ export function createHud(
 
   let shopOnBuy: (index: number) => void = () => {}
   let shopOnBuyFort: (index: number) => void = () => {}
+  let shopOnBuyCard: () => void = () => {}
+  let shopOnBuyRes: (index: number) => void = () => {}
   shopList.addEventListener('click', e => {
     const btn = (e.target as HTMLElement).closest('button') as HTMLElement | null
     if (btn && btn.dataset.i !== undefined) shopOnBuy(parseInt(btn.dataset.i))
@@ -146,6 +216,13 @@ export function createHud(
   shopForts.addEventListener('click', e => {
     const btn = (e.target as HTMLElement).closest('button') as HTMLElement | null
     if (btn && btn.dataset.i !== undefined) shopOnBuyFort(parseInt(btn.dataset.i))
+  })
+  shopCards.addEventListener('click', e => {
+    if ((e.target as HTMLElement).closest('button')) shopOnBuyCard()
+  })
+  shopRes.addEventListener('click', e => {
+    const btn = (e.target as HTMLElement).closest('button') as HTMLElement | null
+    if (btn && btn.dataset.i !== undefined) shopOnBuyRes(parseInt(btn.dataset.i))
   })
 
   // Screen-relative wind compass: the arrow always points where the wind pushes
@@ -258,17 +335,38 @@ export function createHud(
         scoreFoe: number
         money: number
         result: string
+        full: boolean // round-start market shows weapons + fortifications; per-turn hides them
+        startLabel: string
+        cardCost: number
+        cardHint: string // e.g. "Hand: 2 · one draw per turn" or "already drew this turn"
+        canBuyCard: boolean
+        resources: { name: string; price: number; queued: number }[]
         items: { name: string; owned: number; price: number; pack: number }[]
         forts: { name: string; owned: number; price: number; maxed: boolean }[]
       },
-      onBuy: (index: number) => void,
-      onBuyFort: (index: number) => void,
-      onStart: () => void
+      handlers: {
+        onBuy: (index: number) => void
+        onBuyFort: (index: number) => void
+        onBuyCard: () => void
+        onBuyRes: (index: number) => void
+        onStart: () => void
+      }
     ) {
-      shopOnBuy = onBuy
-      shopOnBuyFort = onBuyFort
+      shopOnBuy = handlers.onBuy
+      shopOnBuyFort = handlers.onBuyFort
+      shopOnBuyCard = handlers.onBuyCard
+      shopOnBuyRes = handlers.onBuyRes
       shopResult.textContent = data.result
       shopStatus.innerHTML = `<div><span>round</span> ${data.round}/${data.rounds} &nbsp;·&nbsp; <span>score</span> ${data.scoreYou} — ${data.scoreFoe}</div><div><span>cash</span> $${data.money.toLocaleString()}</div>`
+      shopCards.innerHTML = `<div class="srow"><div>Draw a stratagem</div><div class="own">${data.cardHint}</div><div class="price">$${data.cardCost.toLocaleString()}</div><button ${data.canBuyCard ? '' : 'disabled'}>DRAW</button></div>`
+      shopRes.innerHTML = data.resources
+        .map(
+          (r, i) =>
+            `<div class="srow"><div>${r.name}</div><div class="own">${r.queued ? '+' + r.queued : ''}</div><div class="price">$${r.price.toLocaleString()}</div><button data-i="${i}" ${data.money < r.price ? 'disabled' : ''}>BUY</button></div>`
+        )
+        .join('')
+      shopArms.style.display = data.full ? 'block' : 'none'
+      shopArmsNote.style.display = data.full ? 'none' : 'block'
       shopList.innerHTML = data.items
         .map(
           (it, i) =>
@@ -281,9 +379,10 @@ export function createHud(
             `<div class="srow"><div>${it.name}</div><div class="own">×${it.owned}</div><div class="price">$${it.price.toLocaleString()}</div><button data-i="${i}" ${it.maxed || data.money < it.price ? 'disabled' : ''}>${it.maxed ? 'MAX' : 'BUY'}</button></div>`
         )
         .join('')
+      shopStart.textContent = data.startLabel
       shopStart.onclick = () => {
         shop.style.display = 'none'
-        onStart()
+        handlers.onStart()
       }
       shop.style.display = 'flex'
     },
@@ -298,6 +397,41 @@ export function createHud(
         end.style.display = 'none'
         onRematch()
       }
+    },
+    // Render the stratagem hand as a compact list above the weapons. Clicking a card
+    // opens the big flip modal; playing is done from there (onPlay).
+    setHand(
+      cards: { id: string; name: string; blurb: string; emoji: string }[],
+      opts: { onPlay: (i: number) => void }
+    ) {
+      handEl.classList.toggle('on', cards.length > 0)
+      handList.innerHTML = cards
+        .map(
+          (c, i) =>
+            `<div class="c" data-i="${i}"><span class="emoji">${c.emoji}</span><span class="cn">${c.name}</span><span class="go">view ▸</span></div>`
+        )
+        .join('')
+      handList.querySelectorAll('.c').forEach(el => {
+        el.addEventListener('click', () => {
+          const i = parseInt((el as HTMLElement).dataset.i!)
+          const c = cards[i]
+          flip.classList.remove('flipped')
+          flipEmoji.textContent = c.emoji
+          flipFront.textContent = c.name
+          flipBackName.textContent = c.name
+          flipBackDesc.textContent = c.blurb
+          cardPlay.onclick = () => {
+            cardModal.classList.remove('on')
+            opts.onPlay(i)
+          }
+          cardModal.classList.add('on')
+        })
+      })
+    },
+    // The hand list is a persistent readout; showCards kept for callers but the list
+    // also self-hides when empty (see setHand).
+    showCards(visible: boolean) {
+      handEl.classList.toggle('on', visible && handList.children.length > 0)
     },
   }
 }

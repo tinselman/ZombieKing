@@ -14,6 +14,18 @@ export const FORT_A = 2 // player fort voxel
 export const FORT_B = 3 // enemy fort voxel
 export const WATER = 4 // lakes & rivers — solid light blue, stylized
 export const BARRICADE = 5 // bought defensive berm in front of a fort — soaks hits
+export const CROP = 6 // income-producer (crop bed) planted on a side's land
+export const MINE = 7 // income-producer (ore mine) — smaller, richer than a crop
+export const DERRICK = 8 // income-producer (oil derrick) — smallest, richest
+
+// Per-type producer geometry & economy. half = footprint radius (half=4 → 9×9),
+// tall = voxel height, baseYield = full per-turn income, cost = plant price.
+// matures: crops ramp up over a couple turns; mines/derricks pay in full at once.
+export const PRODUCER_SPECS: Record<number, { half: number; tall: number; baseYield: number; cost: number; name: string; matures: boolean }> = {
+  [CROP]: { half: 4, tall: 2, baseYield: 150, cost: 800, name: 'Crop farm', matures: true },
+  [MINE]: { half: 2, tall: 3, baseYield: 320, cost: 1500, name: 'Ore mine', matures: false },
+  [DERRICK]: { half: 1, tall: 6, baseYield: 560, cost: 3000, name: 'Oil derrick', matures: false },
+}
 
 export type Vec3 = { x: number; y: number; z: number }
 export type Wind = { x: number; z: number }
@@ -105,6 +117,9 @@ export type FortInfo = {
 // Purchasable, match-persistent structure upgrades per side.
 export type Fortifications = { height: number; towers: number; barricade: number }
 
+// A planted income-producer. Its income scales with how many of its voxels survive.
+export type ProducerInfo = { type: number; side: number; cx: number; cz: number; cells: number[]; origCount: number; baseYield: number; age: number }
+
 export type ShotResult = { hit: boolean; pos: Vec3; t: number }
 
 const FORT_HALF = 4 // 9x9 footprint
@@ -113,6 +128,13 @@ const FORT_HEIGHT = 17
 export class World {
   grid: Uint8Array
   forts: FortInfo[] = []
+  producers: ProducerInfo[] = []
+  // Player-chosen castle positions (per side); null = use the seed's random spot.
+  // Set by the castle-placement step, then honoured on the next generate().
+  castleOverride: ({ cx: number; cz: number } | null)[] = [null, null]
+  // Ghost Tower: which side's fort voxels to skip rendering (invisible), or -1. The
+  // cells stay solid (integrity/collisions intact) — only their instances are hidden.
+  hiddenFort = -1
   mesh: THREE.InstancedMesh
   debrisMesh: THREE.InstancedMesh
   debris: Debris[] = []
@@ -223,14 +245,20 @@ export class World {
     this.debris.length = 0
     this.debrisMesh.count = 0
     this.forts = []
+    this.producers = []
+    this.hiddenFort = -1
     this.colorSeed = seed & 0xffff
     const rand = mulberry32(seed)
 
     // Fort separation varies per battle: sometimes close-quarters, sometimes long-range.
-    const cxA = Math.round(12 + rand() * 20)
-    const cxB = Math.round(GX - 13 - rand() * 20)
-    const czA = Math.round(GZ / 2 + (rand() - 0.5) * 18)
-    const czB = Math.round(GZ / 2 + (rand() - 0.5) * 18)
+    // A castle-placement override (if the player/enemy positioned their castle) wins
+    // over the seed's random spot. Overrides may be anywhere, even on water.
+    let cxA = Math.round(12 + rand() * 20)
+    let cxB = Math.round(GX - 13 - rand() * 20)
+    let czA = Math.round(GZ / 2 + (rand() - 0.5) * 18)
+    let czB = Math.round(GZ / 2 + (rand() - 0.5) * 18)
+    if (this.castleOverride[0]) { cxA = this.castleOverride[0]!.cx; czA = this.castleOverride[0]!.cz }
+    if (this.castleOverride[1]) { cxB = this.castleOverride[1]!.cx; czB = this.castleOverride[1]!.cz }
 
     const nseed = Math.floor(rand() * 100000)
     // Per-match character: rolling plains, jagged peaks, ridged badlands, or
@@ -350,7 +378,97 @@ export class World {
     // Bought defensive berms sit in front of each fort, facing the enemy.
     this.buildBarricade(cxA, czA, 1, forti[0].barricade)
     this.buildBarricade(cxB, czB, -1, forti[1].barricade)
+    // Producers are player/AI-placed each turn; main.ts rebuilds them here from its
+    // persistent placement lists (see rebuildRoundWorld). generate() leaves the land bare.
     this.rebuild()
+  }
+
+  // ---------------------------------------------------------------- producers (economy)
+
+  // Can a producer of `type` sit at (cx,cz)? Producers may go anywhere on the map now
+  // — including water and rough terrain — so we only reject out-of-bounds and overlap
+  // with a fort, berm, or another producer. Public so main.ts can validate.
+  canPlaceProducer(cx: number, cz: number, type = CROP): boolean {
+    const half = PRODUCER_SPECS[type].half
+    for (let dx = -half; dx <= half; dx++) {
+      for (let dz = -half; dz <= half; dz++) {
+        const x = cx + dx
+        const z = cz + dz
+        if (!this.inBounds(x, 0, z)) return false
+        const sy = this.surfaceY(x, z)
+        if (sy < 0) return false
+        const top = this.cellAt(x, sy, z)
+        if (top === FORT_A || top === FORT_B || top === BARRICADE || top === CROP || top === MINE || top === DERRICK) return false
+      }
+    }
+    return true
+  }
+
+  // Raise one raised bed of producer voxels (footprint & height per type) on the
+  // terrain surface, recording its cells so income can scale with how many survive.
+  buildProducer(cx: number, cz: number, side: number, type = CROP, baseYield = PRODUCER_SPECS[type].baseYield, age = 0): ProducerInfo {
+    const spec = PRODUCER_SPECS[type]
+    const cells: number[] = []
+    for (let dx = -spec.half; dx <= spec.half; dx++) {
+      for (let dz = -spec.half; dz <= spec.half; dz++) {
+        const x = cx + dx
+        const z = cz + dz
+        if (!this.inBounds(x, 0, z)) continue
+        const base = this.surfaceY(x, z) + 1
+        for (let dy = 0; dy < spec.tall; dy++) {
+          if (!this.inBounds(x, base + dy, z)) continue
+          const i = this.idx(x, base + dy, z)
+          this.grid[i] = type
+          cells.push(i)
+        }
+      }
+    }
+    const p: ProducerInfo = { type, side, cx, cz, cells, origCount: cells.length, baseYield, age }
+    this.producers.push(p)
+    this.dirty = true
+    return p
+  }
+
+  // Nearest valid producer spot to (cx,cz) on `side`'s own half, or null if the land
+  // is full. Used by the enemy AI to auto-place; the player positions by hand.
+  findProducerSpot(side: number, cx: number, cz: number, type = CROP): { cx: number; cz: number } | null {
+    const xMin = side === 0 ? 8 : Math.round(GX / 2) + 6
+    const xMax = side === 0 ? Math.round(GX / 2) - 6 : GX - 8
+    const spots: { px: number; pz: number; d: number }[] = []
+    for (let px = xMin; px <= xMax; px += 6) {
+      for (let pz = 6; pz <= GZ - 6; pz += 6) {
+        spots.push({ px, pz, d: Math.hypot(px - cx, pz - cz) })
+      }
+    }
+    spots.sort((a, b) => a.d - b.d) // nearest the fort first
+    for (const s of spots) {
+      if (this.canPlaceProducer(s.px, s.pz, type)) return { cx: s.px, cz: s.pz }
+    }
+    return null
+  }
+
+  // Physical integrity (0..1) of the producer at (cx,cz), or 0 if none. Lets main.ts
+  // compute income from its persistent placement list without tracking cells itself.
+  integrityAt(cx: number, cz: number): number {
+    const p = this.producers.find(q => q.cx === cx && q.cz === cz)
+    return p ? this.producerIntegrity(p) : 0
+  }
+
+  // Fraction of a producer still standing (0..1) — drives its income.
+  producerIntegrity(p: ProducerInfo): number {
+    let n = 0
+    for (const i of p.cells) if (this.grid[i] === p.type) n++
+    return n / Math.max(1, p.origCount)
+  }
+
+  // A side's total per-turn income = Σ baseYield × integrity over its producers.
+  producerIncome(side: number): number {
+    let sum = 0
+    for (const p of this.producers) {
+      if (p.side !== side) continue
+      sum += p.baseYield * this.producerIntegrity(p)
+    }
+    return Math.round(sum)
   }
 
   // A destructible berm a few voxels in front of a fort (toward the enemy). It
@@ -982,6 +1100,9 @@ export class World {
         for (let x = 0; x < GX && i < MAX_INSTANCES; x++) {
           const c = this.grid[x + zOff]
           if (c === EMPTY) continue
+          // Ghost Tower: skip rendering the hidden side's fort voxels (still solid).
+          if (this.hiddenFort === 0 && c === FORT_A) continue
+          if (this.hiddenFort === 1 && c === FORT_B) continue
           const boundary = x === 0 || x === GX - 1 || z === 0 || z === GZ - 1
           const exposed = boundary ||
             y === GY - 1 ||
@@ -1009,6 +1130,18 @@ export class World {
             // Sandbag berm: earthy tan.
             const v = 0.62 + h * 0.08
             col.setRGB(Math.min(1, v + 0.14), v * 0.92, v * 0.66)
+          } else if (c === CROP) {
+            // Crop bed: lush green with a little variation.
+            const v = 0.5 + h * 0.12
+            col.setRGB(v * 0.55, Math.min(1, v + 0.18), v * 0.42)
+          } else if (c === MINE) {
+            // Ore mine: dark slate gray with a faint metallic glint.
+            const v = 0.34 + h * 0.1
+            col.setRGB(v, v * 1.02, v * 1.08)
+          } else if (c === DERRICK) {
+            // Oil derrick: near-black industrial with a warm-brown cast.
+            const v = 0.2 + h * 0.08
+            col.setRGB(v * 1.15, v * 0.95, v * 0.8)
           } else {
             // Enemy castle: light blue.
             const v = 0.92 + h * 0.05

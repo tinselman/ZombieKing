@@ -14,6 +14,8 @@ export type WeaponKind =
   | 'funky'
   | 'tracer'
   | 'riot'
+  | 'frisbee' // player steers the arc mid-flight
+  | 'saucer' // player pilots a drone top-down, space detonates
 
 export type WeaponDef = {
   id: string
@@ -31,13 +33,14 @@ export const WEAPONS: WeaponDef[] = [
   { id: 'bigmissile', name: 'Missile', ammo: 0, blast: 3.8, kind: 'blast', price: 500, pack: 10 },
   { id: 'babynuke', name: 'Baby Nuke', ammo: 1, blast: 6.0, kind: 'blast', price: 1200, pack: 2 },
   { id: 'nuke', name: 'Nuke', ammo: 0, blast: 9.5, kind: 'blast', price: 2800, pack: 1 },
+  { id: 'frisbee', name: 'Frisbee Bomb', ammo: 0, blast: 9.5, kind: 'frisbee', price: 3000, pack: 1 },
+  { id: 'saucer', name: 'Flying Saucer', ammo: 0, blast: 9.5, kind: 'saucer', price: 6000, pack: 1 },
   { id: 'leapfrog', name: 'Leap Frog', ammo: 0, blast: 3.4, kind: 'leap', price: 1000, pack: 2 },
   { id: 'funky', name: 'Funky Bomb', ammo: 0, blast: 5.0, kind: 'funky', split: 7, price: 1400, pack: 2 },
   { id: 'mirv', name: 'MIRV', ammo: 0, blast: 3.4, kind: 'mirv', split: 5, price: 2000, pack: 2 },
   { id: 'deathshead', name: "Death's Head", ammo: 0, blast: 5.5, kind: 'mirv', split: 7, price: 5000, pack: 1 },
   { id: 'napalm', name: 'Napalm', ammo: 0, blast: 1.6, kind: 'napalm', split: 10, price: 900, pack: 2 },
   { id: 'hotnapalm', name: 'Hot Napalm', ammo: 0, blast: 2.2, kind: 'napalm', split: 16, price: 1800, pack: 1 },
-  { id: 'tracer', name: 'Tracer', ammo: 0, blast: 0, kind: 'tracer', price: 200, pack: 10 },
   { id: 'babyroller', name: 'Baby Roller', ammo: 0, blast: 3.5, kind: 'roller', price: 500, pack: 2 },
   { id: 'roller', name: 'Roller', ammo: 0, blast: 5.5, kind: 'roller', price: 900, pack: 2 },
   { id: 'heavyroller', name: 'Heavy Roller', ammo: 0, blast: 8.0, kind: 'roller', price: 1800, pack: 1 },
@@ -47,9 +50,6 @@ export const WEAPONS: WeaponDef[] = [
   { id: 'babysandhog', name: 'Baby Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 8, price: 700, pack: 2 },
   { id: 'sandhog', name: 'Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 16, price: 1200, pack: 2 },
   { id: 'heavysandhog', name: 'Heavy Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 26, price: 2200, pack: 1 },
-  { id: 'dirtclod', name: 'Dirt Clod', ammo: 0, blast: 3.0, kind: 'dirt', price: 300, pack: 3 },
-  { id: 'dirtball', name: 'Dirt Ball', ammo: 2, blast: 5.5, kind: 'dirt', price: 700, pack: 2 },
-  { id: 'tondirt', name: 'Ton of Dirt', ammo: 0, blast: 8.5, kind: 'dirt', price: 1400, pack: 1 },
 ]
 
 // Bomblets spawned by the Funky Bomb (not purchasable, not in the roster).

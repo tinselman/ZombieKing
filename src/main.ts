@@ -1,6 +1,6 @@
 // Scorched Earth 3D — main entry: scene, game loop, turns, camera, input.
 import * as THREE from 'three'
-import { World, GX, GZ, GRAVITY, WIND_ACCEL, type Wind, type Fortifications } from './world'
+import { World, GX, GZ, GRAVITY, WIND_ACCEL, CROP, MINE, DERRICK, PRODUCER_SPECS, type Wind, type Fortifications } from './world'
 import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './weapons'
 import { planShot } from './ai'
 import { createHud } from './hud'
@@ -26,7 +26,8 @@ scene.fog = new THREE.Fog(0xeef1f4, 180, 460)
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1200)
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0xd4d9df, 1.2))
+const hemi = new THREE.HemisphereLight(0xffffff, 0xd4d9df, 1.2)
+scene.add(hemi)
 const sun = new THREE.DirectionalLight(0xffffff, 1.7)
 sun.position.set(GX / 2 + 70, 145, GZ / 2 - 55)
 sun.target.position.set(GX / 2, 0, GZ / 2)
@@ -135,13 +136,13 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
+type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
 
-// Match economy: a match is best-of-ROUNDS; damage earns cash, spent in the armory.
+// Match economy: best-of-ROUNDS. Income comes from producers (see sideIncome);
+// combat is rewarded by winning the round (WIN_BONUS + plunder), not per hit.
 const ROUNDS = 3 // best-of-3: first side to 2 round wins takes the match
 const START_CASH = 3000
 const WIN_BONUS = 2500
-const DMG_PAY = 4000 // pay for demolishing 100% of the enemy fort
 
 let phase: Phase = 'aim'
 let turn = 0
@@ -156,6 +157,227 @@ const forti: Fortifications[] = [
   { height: 0, towers: 0, barricade: 0 },
   { height: 0, towers: 0, barricade: 0 },
 ]
+// Producers the player and AI have planted, positioned on their own half. These
+// persist across rounds (rebuilt into each fresh world) until a lost round razes
+// them. type is the cell kind (CROP/MINE/DERRICK); baseYield is full per-turn income;
+// age counts owner-turns survived (drives crop maturation).
+type Planted = { cx: number; cz: number; type: number; baseYield: number; age: number }
+const planted: Planted[][] = [[], []]
+// Resources the player bought in the market this turn, awaiting placement (buy-then-
+// place). Carries over if unplaced. marketFull = the round-start market (weapons too).
+const pendingResources: number[] = []
+let marketFull = false
+let roundStartPending = false
+
+// Crops ramp in over a couple turns (40% → 100%); mines/derricks pay full at once.
+function maturity(type: number, age: number): number {
+  if (!PRODUCER_SPECS[type].matures) return 1
+  return Math.min(1, 0.4 + 0.3 * Math.max(0, age - 1))
+}
+
+// A side's per-turn income: full yield × physical integrity × maturity, summed over
+// its planted producers. Combat throttles income by shelling producers (integrity).
+function sideIncome(side: number): number {
+  let sum = 0
+  for (const p of planted[side]) {
+    sum += p.baseYield * world.integrityAt(p.cx, p.cz) * maturity(p.type, p.age)
+  }
+  return Math.round(sum)
+}
+
+// ---------------------------------------------------------------- stratagem cards
+// A weighted deck: weak cards are common, power cards rare. You buy one card per
+// turn ($1,500) from a random draw, hold a hand across turns, and play cards before
+// your shot. `impl` gates which cards are live (complex ones land in Phase 5).
+type CardId = 'army' | 'ghost' | 'steal' | 'fireworks' | 'toaster' | 'zombie'
+type CardDef = { id: CardId; name: string; blurb: string; weight: number; impl: boolean; emoji: string }
+const DECK: CardDef[] = [
+  { id: 'army', name: 'Army', weight: 28, impl: true, emoji: '🪖', blurb: '40 warriors zig-zag the field and raid the enemy economy — skimming about an eighth of their income to you.' },
+  { id: 'ghost', name: 'Ghost Tower', weight: 24, impl: true, emoji: '👻', blurb: 'Your tower turns invisible and jumps to a new spot. It reappears when an enemy shell lands within ten voxels.' },
+  { id: 'steal', name: 'Steal', weight: 18, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — its cells and its income become yours." },
+  { id: 'fireworks', name: 'Fireworks', weight: 14, impl: true, emoji: '🎆', blurb: 'Night falls and fireworks bloom; the enemy pockets $1,000. While it lasts, a killing blow rebuilds their castle and bills you $1,000 instead.' },
+  { id: 'toaster', name: 'Flying Toaster', weight: 10, impl: true, emoji: '🍞', blurb: "A winged toaster homes onto the enemy castle and strikes with Death's Head force — a free bonus attack on top of your shot." },
+  { id: 'zombie', name: 'Zombie King', weight: 6, impl: true, emoji: '🧟', blurb: "A giant king stomps the enemy's producers, razing HALF — and that half becomes your resources." },
+]
+const CARD_COST = 1500
+const hand: CardId[][] = [[], []] // cards each side is holding
+const cardBought = [false, false] // one purchase per side per turn
+// Ghost Tower state: which side's tower is currently ghosted (-1 none), and the decoy
+// (old) position the enemy AI keeps aiming at while your real tower is hidden/moved.
+let ghostSide = -1
+let ghostDecoy: { cx: number; cz: number } | null = null
+// Fireworks state: which side triggered it (kill-interception), or -1; plus any unpaid
+// $1,000 debt per side (charged when a killing blow is intercepted, paid from income).
+let fireworksSide = -1
+const fireworksDebt = [0, 0]
+function cardDef(id: CardId): CardDef {
+  return DECK.find(c => c.id === id)!
+}
+
+// Weighted draw over the live cards — weak cards (high weight) come up far more often.
+function drawCard(): CardId {
+  const pool = DECK.filter(c => c.impl)
+  const total = pool.reduce((s, c) => s + c.weight, 0)
+  let r = Math.random() * total
+  for (const c of pool) {
+    r -= c.weight
+    if (r <= 0) return c.id
+  }
+  return pool[pool.length - 1].id
+}
+
+function buyCard(side: number): void {
+  if (cardBought[side]) return void (side === 0 && hud.msg('one card per turn'))
+  if (money[side] < CARD_COST) return void (side === 0 && hud.msg('not enough cash'))
+  money[side] -= CARD_COST
+  cardBought[side] = true
+  const id = drawCard()
+  hand[side].push(id)
+  if (side === 0) {
+    sfx.tick()
+    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    refreshHand()
+    hud.msg(`drew ${cardDef(id).name}`)
+  }
+}
+
+function playCard(side: number, idx: number): void {
+  const id = hand[side][idx]
+  if (!id) return
+  if (side === 0 && phase !== 'aim' && phase !== 'plant') return void hud.msg('play cards before firing')
+  hand[side].splice(idx, 1)
+  if (side === 0) {
+    sfx.tick()
+    refreshHand()
+  }
+  applyCard(side, id)
+}
+
+function applyCard(side: number, id: CardId): void {
+  const foe = 1 - side
+  if (id === 'steal') cardSteal(side, foe)
+  else if (id === 'army') cardArmy(side, foe)
+  else if (id === 'toaster') cardToaster(side, foe)
+  else if (id === 'zombie') cardZombie(side, foe)
+  else if (id === 'ghost') cardGhost(side)
+  else if (id === 'fireworks') cardFireworks(side, foe)
+}
+
+// Steal: move the enemy's richest producer (cells + income) to your side. No world
+// rebuild — producers render side-agnostically, so flipping ownership is just data.
+function cardSteal(side: number, foe: number): void {
+  if (!planted[foe].length) return void (side === 0 && hud.msg('enemy has nothing to steal'))
+  let best = 0
+  for (let i = 1; i < planted[foe].length; i++) {
+    if (planted[foe][i].baseYield > planted[foe][best].baseYield) best = i
+  }
+  const p = planted[foe].splice(best, 1)[0]
+  p.age = Math.max(p.age, 2) // already established — pays you at a decent maturity
+  planted[side].push(p)
+  const wp = world.producers.find(q => q.cx === p.cx && q.cz === p.cz)
+  if (wp) wp.side = side
+  if (side === 0) hud.msg(`stole their ${PRODUCER_SPECS[p.type].name}`)
+  else hud.msg(`enemy stole your ${PRODUCER_SPECS[p.type].name}`)
+}
+
+// Army: a cosmetic charge of runners across the field plus an instant raid that
+// skims ~1/8 of the enemy's per-turn income from their treasury to yours.
+function cardArmy(side: number, foe: number): void {
+  spawnArmy(side)
+  const loot = Math.round(sideIncome(foe) / 8)
+  if (loot > 0) {
+    money[foe] = Math.max(0, money[foe] - loot)
+    money[side] += loot
+    if (side === 0) hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  }
+  hud.msg(side === 0 ? `the army raids for $${loot.toLocaleString()}` : `enemy army raids you for $${loot.toLocaleString()}`)
+}
+
+// Flying Toaster: a homing bonus strike on the enemy castle at Death's-Head power.
+// Routes through the normal fly→resolve pipeline (flyIsCard), then hands the turn
+// back to the shooter for their regular shot (unless it collapses the tower → win).
+function cardToaster(side: number, foe: number): void {
+  const fort = world.forts[foe]?.towers[0]
+  if (!fort) return
+  const m = muzzleOf(side)
+  const start = new THREE.Vector3(m.x, m.y + 24, m.z)
+  const target = new THREE.Vector3(fort.cx, fort.baseY + 9, fort.cz)
+  const mesh = makeToasterMesh()
+  mesh.position.copy(start)
+  scene.add(mesh)
+  tasks.push({ kind: 'toaster', mesh, pos: start.clone(), target, t: 0 })
+  clearLastTrails()
+  flyIsCard = true
+  worldView = false
+  hud.setWorldView(false)
+  hud.showCards(false)
+  phase = 'fly'
+  hud.msg(side === 0 ? 'flying toaster inbound!' : 'enemy toaster incoming!')
+}
+
+// Zombie King: a giant stomps the enemy's producers, seizing HALF of them (richest
+// first) — cells and income transfer to you. A cosmetic King marches the field.
+function cardZombie(side: number, foe: number): void {
+  const foeProd = planted[foe]
+  if (!foeProd.length) return void (side === 0 && hud.msg('the enemy has no resources to seize'))
+  const order = foeProd.map((_, i) => i).sort((a, b) => foeProd[b].baseYield - foeProd[a].baseYield)
+  const takeCount = Math.ceil(foeProd.length / 2)
+  const takeIdx = order.slice(0, takeCount).sort((a, b) => b - a) // descending → safe splice
+  let firstCx = world.forts[foe]?.towers[0]?.cx ?? GX / 2
+  let firstCz = GZ / 2
+  for (const i of takeIdx) {
+    const p = foeProd.splice(i, 1)[0]
+    p.age = Math.max(p.age, 2)
+    planted[side].push(p)
+    const wp = world.producers.find(q => q.cx === p.cx && q.cz === p.cz)
+    if (wp) wp.side = side
+    firstCx = p.cx
+    firstCz = p.cz
+  }
+  spawnZombieKing(side, firstCx, firstCz)
+  hud.msg(side === 0 ? `the Zombie King seizes ${takeCount} of their producers!` : `the enemy Zombie King seizes ${takeCount} of yours!`)
+}
+
+// Ghost Tower: your castle vanishes and jumps to a new random spot on your half. It
+// stays solid (still hittable) but unrendered; the enemy AI keeps aiming at the decoy
+// (old) spot until a shell lands within 10 voxels of the real tower, revealing it.
+function cardGhost(side: number): void {
+  const oldT = world.forts[side]?.towers[0]
+  ghostDecoy = oldT ? { cx: oldT.cx, cz: oldT.cz } : null
+  const lo = side === 0 ? 10 : Math.round(GX / 2) + 8
+  const hi = side === 0 ? Math.round(GX / 2) - 8 : GX - 10
+  const cx = Math.round(lo + Math.random() * (hi - lo))
+  const cz = Math.round(8 + Math.random() * (GZ - 16))
+  world.castleOverride[side] = { cx, cz }
+  rebuildRoundWorld()
+  world.hiddenFort = side
+  world.rebuild()
+  sides[side].cannon.group.visible = false
+  ghostSide = side
+  hud.msg(side === 0 ? 'your tower vanishes and jumps!' : 'the enemy tower vanishes!')
+}
+
+function revealGhost(): void {
+  if (ghostSide < 0) return
+  world.hiddenFort = -1
+  sides[ghostSide].cannon.group.visible = true
+  world.rebuild()
+  ghostSide = -1
+  ghostDecoy = null
+  hud.msg('the ghost tower reappears!')
+}
+
+// Fireworks: switch to night with a fireworks show; the enemy pockets $1,000. While it
+// lasts (this round), a blow that would collapse the enemy castle instead rebuilds it
+// and bills you $1,000 (paid now if you can, else carried as debt off future income).
+function cardFireworks(side: number, foe: number): void {
+  money[foe] += 1000
+  if (side === 0) hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  fireworksSide = side
+  setNight(true)
+  spawnFireworks()
+  hud.msg(side === 0 ? "fireworks! the enemy pockets $1,000" : 'the enemy lights fireworks — you get $1,000')
+}
 let wind: Wind = { x: 0, z: 0 }
 let chargeT = 0
 let chargePower = 0
@@ -182,6 +404,7 @@ type Proj = {
   pos: THREE.Vector3
   vel: THREE.Vector3
   hdir: THREE.Vector3 // horizontal travel direction — stable through the apex, used by the chase cam
+  launchDir: THREE.Vector3 // horizontal direction at launch — fixes the frisbee's steer/camera frame
   weapon: WeaponDef
   split: boolean
   side: number
@@ -194,9 +417,20 @@ type Proj = {
 const projs: Proj[] = []
 const projGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9)
 const projMat = new THREE.MeshLambertMaterial({ color: 0x23272c })
+// Piloted craft get a flat disc silhouette.
+const frisbeeGeo = new THREE.CylinderGeometry(2.0, 2.0, 0.5, 16)
+const frisbeeMat = new THREE.MeshLambertMaterial({ color: 0xd0563a })
+const saucerGeo = new THREE.CylinderGeometry(2.8, 1.6, 0.7, 18)
+const saucerMat = new THREE.MeshLambertMaterial({ color: 0x9aa7b5, emissive: 0x223040, emissiveIntensity: 0.5 })
+
+function projMesh(kind: string): THREE.Mesh {
+  if (kind === 'frisbee') return new THREE.Mesh(frisbeeGeo, frisbeeMat)
+  if (kind === 'saucer') return new THREE.Mesh(saucerGeo, saucerMat)
+  return new THREE.Mesh(projGeo, projMat)
+}
 
 function spawnProj(pos: THREE.Vector3, vel: THREE.Vector3, weapon: WeaponDef, split: boolean, side: number, hops = 0): void {
-  const mesh = new THREE.Mesh(projGeo, projMat)
+  const mesh = projMesh(weapon.kind)
   mesh.castShadow = true
   mesh.position.copy(pos)
   scene.add(mesh)
@@ -211,9 +445,9 @@ function spawnProj(pos: THREE.Vector3, vel: THREE.Vector3, weapon: WeaponDef, sp
   trailLine.frustumCulled = false
   scene.add(trailLine)
   const hdir = new THREE.Vector3(vel.x, 0, vel.z)
-  if (hdir.lengthSq() < 0.01) hdir.set(1, 0, 0)
+  if (hdir.lengthSq() < 0.01) hdir.set(side === 0 ? 1 : -1, 0, 0)
   hdir.normalize()
-  projs.push({ pos: pos.clone(), vel: vel.clone(), hdir, weapon, split, side, hops, mesh, trailPos, trailN: 0, trailLine })
+  projs.push({ pos: pos.clone(), vel: vel.clone(), hdir, launchDir: hdir.clone(), weapon, split, side, hops, mesh, trailPos, trailN: 0, trailLine })
 }
 
 // The player's arcs linger after impact (highlighted while lining up the next shot).
@@ -268,7 +502,13 @@ type Task =
   | { kind: 'dig'; pos: THREE.Vector3; dir: THREE.Vector3; steps: number; maxSteps: number; t: number }
   | { kind: 'roller'; x: number; z: number; dx: number; dz: number; flat: number; steps: number; t: number; mesh: THREE.Mesh }
   | { kind: 'napalm'; blobs: { x: number; z: number; life: number }[]; t: number }
+  | { kind: 'toaster'; mesh: THREE.Mesh; pos: THREE.Vector3; target: THREE.Vector3; t: number }
+  | { kind: 'army'; runners: THREE.Mesh[]; z0: number[]; x: number; dir: number; t: number }
+  | { kind: 'king'; mesh: THREE.Mesh; x: number; z: number; dir: number; t: number }
 const tasks: Task[] = []
+// When true, the current fly→resolve pass is a played card (Flying Toaster), not a
+// normal shot: on resolve it hands the turn back to the shooter instead of advancing.
+let flyIsCard = false
 
 function crater(at: THREE.Vector3, r: number, fire: boolean): void {
   world.carve(at.x, at.y, at.z, r)
@@ -278,6 +518,11 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
   sfx.boom(r)
   addShake(r, at)
   lastImpact.copy(at)
+  // A shell landing within 10 voxels of a ghosted tower snaps it back into view.
+  if (ghostSide >= 0) {
+    const t = world.forts[ghostSide]?.towers[0]
+    if (t && Math.hypot(at.x - t.cx, at.z - t.cz) < 10) revealGhost()
+  }
 }
 
 // Shell lost to the drink: white plume, no crater.
@@ -294,6 +539,7 @@ function impact(p: Proj, at: THREE.Vector3): void {
   switch (w.kind) {
     case 'blast':
     case 'mirv':
+    case 'frisbee':
       crater(at, w.blast, true)
       break
     case 'dirt':
@@ -449,6 +695,46 @@ function updateTasks(dt: number): void {
         }
       }
       if (done) tasks.splice(i, 1)
+    } else if (t.kind === 'toaster') {
+      // Homing bonus strike: fly toward the enemy castle, then detonate at
+      // Death's-Head power. Ease in, tumble the toaster as it goes.
+      const to = t.target.clone().sub(t.pos)
+      const dist = to.length()
+      const step = Math.min(dist, (16 + t.t * 26) * dt) // accelerates as it commits
+      t.pos.addScaledVector(to.normalize(), step)
+      t.mesh.position.copy(t.pos)
+      t.mesh.rotation.x += dt * 6
+      t.mesh.rotation.y += dt * 9
+      if (dist < 2.2) {
+        crater(t.target.clone(), 6, true)
+        scene.remove(t.mesh)
+        tasks.splice(i, 1)
+      }
+    } else if (t.kind === 'army') {
+      // Cosmetic charge: runners sweep toward the enemy with a zig-zag wobble, then
+      // vanish. The economic raid already happened when the card was played.
+      t.x += t.dir * 34 * dt
+      for (let k = 0; k < t.runners.length; k++) {
+        const rx = t.x + (k % 5) * t.dir * -2.4
+        const rz = t.z0[k] + Math.sin(t.t * 6 + k) * 4
+        const sy = world.surfaceY(Math.round(rx), Math.round(rz))
+        t.runners[k].position.set(rx, (sy < 0 ? 0 : sy) + 1.4, rz)
+      }
+      if (t.t > 3 || t.x < 4 || t.x > GX - 4) {
+        for (const r of t.runners) scene.remove(r)
+        tasks.splice(i, 1)
+      }
+    } else if (t.kind === 'king') {
+      // Lumber across the field with a heavy stomp; fade near the far edge.
+      t.x += t.dir * 16 * dt
+      const sy = world.surfaceY(Math.round(t.x), Math.round(t.z))
+      const stomp = Math.abs(Math.sin(t.t * 4)) * 3
+      t.mesh.position.set(t.x, (sy < 0 ? 0 : sy) + 8 + stomp, t.z)
+      t.mesh.rotation.y = t.dir > 0 ? 0 : Math.PI
+      if (t.t > 4 || t.x < 6 || t.x > GX - 6) {
+        scene.remove(t.mesh)
+        tasks.splice(i, 1)
+      }
     } else {
       let acted = false
       while (t.t > 0.09) {
@@ -479,6 +765,55 @@ function updateTasks(dt: number): void {
       }
     }
   }
+}
+
+// The army task uses `z0` as each runner's baseline z lane. `t.x` is the leading
+// column's x; `t.dir` is +1 (player charges toward +X) or −1 (enemy toward −X).
+const armyGeo = new THREE.BoxGeometry(1.2, 2.2, 1.2)
+const armyMatA = new THREE.MeshLambertMaterial({ color: 0xd5473a })
+const armyMatB = new THREE.MeshLambertMaterial({ color: 0x3a7bd5 })
+function spawnArmy(side: number): void {
+  const dir = side === 0 ? 1 : -1
+  const x0 = side === 0 ? 12 : GX - 12
+  const runners: THREE.Mesh[] = []
+  const z0: number[] = []
+  for (let k = 0; k < 40; k++) {
+    const m = new THREE.Mesh(armyGeo, side === 0 ? armyMatA : armyMatB)
+    const z = 6 + ((k * 37) % (GZ - 12))
+    m.position.set(x0, world.surfaceY(x0, z) + 1.4, z)
+    scene.add(m)
+    runners.push(m)
+    z0.push(z)
+  }
+  tasks.push({ kind: 'army', runners, z0, x: x0, dir, t: 0 })
+}
+
+// A tiny stylized toaster: chrome body with two little wings.
+const toasterGeo = new THREE.BoxGeometry(3, 2, 2.2)
+const toasterMat = new THREE.MeshLambertMaterial({ color: 0xc8cdd3, emissive: 0x303a44, emissiveIntensity: 0.4 })
+const wingGeo = new THREE.BoxGeometry(0.4, 1.6, 3.4)
+const wingMat = new THREE.MeshLambertMaterial({ color: 0xffffff })
+function makeToasterMesh(): THREE.Mesh {
+  const body = new THREE.Mesh(toasterGeo, toasterMat)
+  const wing = new THREE.Mesh(wingGeo, wingMat)
+  body.add(wing)
+  return body
+}
+
+// A giant zombie king: a hulking green body with a gold crown, spawned on the loser's
+// side; he stomps toward the winner's side dragging the plundered resources, then fades.
+const kingBodyGeo = new THREE.BoxGeometry(7, 14, 5)
+const kingBodyMat = new THREE.MeshLambertMaterial({ color: 0x4f7a3a, emissive: 0x152510, emissiveIntensity: 0.4 })
+const kingCrownGeo = new THREE.BoxGeometry(6, 2.4, 6)
+const kingCrownMat = new THREE.MeshLambertMaterial({ color: 0xe8c04a, emissive: 0x5a4410, emissiveIntensity: 0.5 })
+function spawnZombieKing(side: number, cx: number, cz: number): void {
+  const body = new THREE.Mesh(kingBodyGeo, kingBodyMat)
+  const crown = new THREE.Mesh(kingCrownGeo, kingCrownMat)
+  crown.position.y = 8
+  body.add(crown)
+  body.position.set(cx, world.surfaceY(cx, cz) + 8, cz)
+  scene.add(body)
+  tasks.push({ kind: 'king', mesh: body, x: cx, z: cz, dir: side === 0 ? -1 : 1, t: 0 })
 }
 
 // ---------------------------------------------------------------- explosion FX
@@ -538,6 +873,30 @@ function spawnFlash(at: THREE.Vector3, intensity: number, color: number): void {
   flashes.push({ light, age: 0, life: 0.18, base: intensity })
 }
 
+// Fireworks card: swap the bright day scene for a deep-blue night and dim the lights.
+let isNight = false
+function setNight(on: boolean): void {
+  if (isNight === on) return
+  isNight = on
+  const bg = on ? 0x2b3552 : 0xeef1f4 // dusky navy, still clearly readable
+  ;(scene.background as THREE.Color).setHex(bg)
+  ;(scene.fog as THREE.Fog).color.setHex(bg)
+  hemi.intensity = on ? 0.7 : 1.2
+  sun.intensity = on ? 0.85 : 1.7
+}
+
+// A burst of colourful fireworks over the battlefield (pure spectacle).
+function spawnFireworks(): void {
+  const colors = [0xff5a5a, 0xffd24a, 0x5adcff, 0x8affa0, 0xff8adf, 0xfff0a0]
+  for (let k = 0; k < 10; k++) {
+    const at = new THREE.Vector3(30 + Math.random() * (GX - 60), 40 + Math.random() * 34, 6 + Math.random() * (GZ - 12))
+    const c = colors[Math.floor(Math.random() * colors.length)]
+    spawnExplosion(at, 5 + Math.random() * 4, false)
+    spawnFlash(at, 40, c)
+  }
+  sfx.boom(6)
+}
+
 function updateFx(dt: number): void {
   for (let i = fxs.length - 1; i >= 0; i--) {
     const f = fxs[i]
@@ -592,6 +951,169 @@ function toggleWorldView(): void {
   sfx.tick()
 }
 
+// ---------------------------------------------------------------- plant mode
+// Each of your turns opens with a plant step: an overhead camera frames your half
+// and a ghost box shows where the next producer would land. Pick a type (1/2/3),
+// place as many as you can afford (they persist across rounds), then Enter to aim.
+let plantCX = GX / 4
+let plantCZ = GZ / 2
+let plantType = CROP
+let plantGhost: THREE.Mesh | null = null
+let ghostForType = -1 // the type the ghost geometry is currently sized for
+const PRODUCER_TYPES = [CROP, MINE, DERRICK]
+
+function ensurePlantGhost(): THREE.Mesh {
+  if (!plantGhost) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0x4caf50, transparent: true, opacity: 0.4, depthWrite: false })
+    plantGhost = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat)
+    plantGhost.renderOrder = 6
+    scene.add(plantGhost)
+  }
+  // Resize the ghost box to match the selected producer's footprint & height.
+  if (ghostForType !== plantType) {
+    ghostForType = plantType
+    const spec = PRODUCER_SPECS[plantType]
+    plantGhost.geometry.dispose()
+    plantGhost.geometry = new THREE.BoxGeometry(spec.half * 2 + 1, spec.tall + 1, spec.half * 2 + 1)
+  }
+  return plantGhost
+}
+
+function plantHudMsg(): void {
+  const spec = PRODUCER_SPECS[plantType]
+  hud.msg(`place ${spec.name} (${pendingResources.length} left) — +$${spec.baseYield}/turn`)
+}
+
+// Placement step for resources bought in the market. Each pending resource is placed
+// in turn; when the queue is empty we go straight to aim. Unplaced ones carry over.
+function beginPlant(): void {
+  if (pendingResources.length === 0) {
+    finishPlant()
+    return
+  }
+  plantType = pendingResources[0]
+  phase = 'plant'
+  plantCX = GX / 4
+  plantCZ = GZ / 2
+  ensurePlantGhost().visible = true
+  hud.showCards(true)
+  hud.banner('PLACE RESOURCES', 'arrows move · space places · enter to skip')
+  plantHudMsg()
+}
+
+function finishPlant(): void {
+  if (plantGhost) plantGhost.visible = false
+  phase = 'aim'
+  hud.banner('YOUR TURN', 'wind has shifted')
+  hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+}
+
+function placeProducer(): void {
+  if (pendingResources.length === 0) return void finishPlant()
+  const type = pendingResources[0]
+  const spec = PRODUCER_SPECS[type]
+  const cx = Math.round(plantCX)
+  const cz = Math.round(plantCZ)
+  if (!world.canPlaceProducer(cx, cz, type)) return void hud.msg('overlaps another structure')
+  // Already paid for in the market — placement is free.
+  pendingResources.shift()
+  planted[0].push({ cx, cz, type, baseYield: spec.baseYield, age: 0 })
+  world.buildProducer(cx, cz, 0, type, spec.baseYield, 0)
+  sfx.tick()
+  hud.msg(`${spec.name} placed`)
+  if (pendingResources.length === 0) finishPlant()
+  else {
+    plantType = pendingResources[0]
+    plantHudMsg()
+  }
+}
+
+function updatePlant(dt: number): void {
+  if (phase !== 'plant') return
+  plantType = pendingResources[0] ?? plantType
+  const half = PRODUCER_SPECS[plantType].half
+  // Coarse positioning — a fixed speed (Shift = slow) is plenty for a small plot.
+  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 10 : 30) * dt
+  if (keys.has('ArrowUp')) plantCX += speed
+  if (keys.has('ArrowDown')) plantCX -= speed
+  if (keys.has('ArrowRight')) plantCZ += speed
+  if (keys.has('ArrowLeft')) plantCZ -= speed
+  // Resources may be placed anywhere on the whole map now (water and rough terrain
+  // included) — clamp only to the world bounds so the footprint stays in-map.
+  plantCX = Math.max(half + 1, Math.min(GX - half - 1, plantCX))
+  plantCZ = Math.max(half + 1, Math.min(GZ - half - 1, plantCZ))
+  const cx = Math.round(plantCX)
+  const cz = Math.round(plantCZ)
+  const g = ensurePlantGhost()
+  const spec = PRODUCER_SPECS[plantType]
+  g.position.set(cx, world.surfaceY(cx, cz) + spec.tall / 2 + 1, cz)
+  const ok = world.canPlaceProducer(cx, cz, plantType)
+  ;(g.material as THREE.MeshBasicMaterial).color.setHex(ok ? 0x4caf50 : 0xd23a3a)
+}
+
+// ---------------------------------------------------------------- castle placement
+// At the start of every round you position your own castle anywhere on the map (water
+// and rough terrain included); the enemy AI positions its own. Then the world rebuilds
+// with the castles where they were placed and the round's first turn begins.
+let castleCX = GX / 4
+let castleCZ = GZ / 2
+let castleGhost: THREE.Mesh | null = null
+const CASTLE_HALF = 4 // matches the fort's 9×9 footprint
+
+function ensureCastleGhost(): THREE.Mesh {
+  if (!castleGhost) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xd5473a, transparent: true, opacity: 0.4, depthWrite: false })
+    castleGhost = new THREE.Mesh(new THREE.BoxGeometry(CASTLE_HALF * 2 + 1, 18, CASTLE_HALF * 2 + 1), mat)
+    castleGhost.renderOrder = 6
+    scene.add(castleGhost)
+  }
+  return castleGhost
+}
+
+// The enemy AI positions its own castle somewhere on its half each round.
+function aiPlaceCastle(): void {
+  const cx = Math.round(GX - 13 - Math.random() * 26)
+  const cz = Math.round(6 + CASTLE_HALF + Math.random() * (GZ - 12 - CASTLE_HALF * 2))
+  world.castleOverride[1] = { cx, cz }
+}
+
+function beginCastlePlacement(): void {
+  phase = 'castle'
+  // Start the cursor at the player's current castle so "keep it here" is one keypress.
+  const t = world.forts[0]?.towers[0]
+  castleCX = t ? t.cx : GX / 4
+  castleCZ = t ? t.cz : GZ / 2
+  ensureCastleGhost().visible = true
+  hud.banner('PLACE YOUR CASTLE', 'arrows move · space/enter to set')
+  hud.msg('position your castle — anywhere, even on water')
+}
+
+function placeCastle(): void {
+  const cx = Math.round(castleCX)
+  const cz = Math.round(castleCZ)
+  if (castleGhost) castleGhost.visible = false
+  world.castleOverride[0] = { cx, cz }
+  rebuildRoundWorld() // rebuild the battlefield with both castles where they were placed
+  sfx.tick()
+  // Income already ran (startTurn opened the market) — go straight to resource placement.
+  beginPlant()
+}
+
+function updateCastle(dt: number): void {
+  if (phase !== 'castle') return
+  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 12 : 34) * dt
+  if (keys.has('ArrowUp')) castleCX += speed
+  if (keys.has('ArrowDown')) castleCX -= speed
+  if (keys.has('ArrowRight')) castleCZ += speed
+  if (keys.has('ArrowLeft')) castleCZ -= speed
+  castleCX = Math.max(CASTLE_HALF + 1, Math.min(GX - CASTLE_HALF - 1, castleCX))
+  castleCZ = Math.max(CASTLE_HALF + 1, Math.min(GZ - CASTLE_HALF - 1, castleCZ))
+  const cx = Math.round(castleCX)
+  const cz = Math.round(castleCZ)
+  const g = ensureCastleGhost()
+  g.position.set(cx, world.surfaceY(cx, cz) + 9, cz)
+}
+
 function addShake(r: number, at: THREE.Vector3): void {
   const dist = camPosCur.distanceTo(at)
   const amp = Math.min(2.2, r * 0.35) * Math.max(0.15, 1 - dist / 180)
@@ -609,12 +1131,26 @@ function aimCamera(side: number, outPos: THREE.Vector3, outLook: THREE.Vector3):
   outLook.set(p.x + dx * 26, p.y + 2 + s.el * 3, p.z + dz * 26)
 }
 
+let topDownView = false
 function updateCamera(dt: number): void {
   const desiredPos = new THREE.Vector3()
   const desiredLook = new THREE.Vector3()
   let k = 3.5
+  topDownView = false
 
-  if (phase === 'aim' || phase === 'charge') {
+  if (phase === 'castle') {
+    // High wide bird's-eye over the WHOLE battlefield so the castle can be positioned
+    // anywhere. Screen-up is +X (toward the enemy), screen-right is +Z.
+    desiredPos.set(GX / 2 - 96, 150, GZ / 2)
+    desiredLook.set(GX / 2, 2, GZ / 2)
+    k = 3
+  } else if (phase === 'plant') {
+    // Wide bird's-eye over the whole map (resources can be placed anywhere now), angled
+    // toward the enemy (+X) so screen-up is +X and screen-right is +Z (see updatePlant).
+    desiredPos.set(GX / 2 - 96, 150, GZ / 2)
+    desiredLook.set(GX / 2, 2, GZ / 2)
+    k = 3
+  } else if (phase === 'aim' || phase === 'charge') {
     if (worldView) {
       desiredPos.set(GX / 2 - 115, 85, GZ / 2 + 70)
       desiredLook.set(GX / 2 + 8, 6, GZ / 2)
@@ -626,25 +1162,47 @@ function updateCamera(dt: number): void {
     aimCamera(1, desiredPos, desiredLook)
   } else if (phase === 'fly') {
     const lead = projs[0]
-    if (lead && !flyHold && lead.vel.y < 0) {
-      const pr = world.simShot(lead.pos, lead.vel, wind)
-      if (pr.hit && pr.t < 1.0) {
-        // Landing soon — stop advancing and watch the shell fly on to its target.
-        flyHold = camPosCur.clone()
-        flyHold.y = Math.max(flyHold.y + 2, world.surfaceY(flyHold.x, flyHold.z) + 6)
-      }
-    }
-    if (flyHold) {
-      desiredPos.copy(flyHold)
-      desiredLook.copy(lead ? lead.pos : lastImpact)
-      k = 2.2
-    } else if (lead) {
-      desiredPos.copy(lead.pos).addScaledVector(lead.hdir, -13).add(new THREE.Vector3(0, 5.5, 0))
+    const toast = tasks.find(t => t.kind === 'toaster') as { pos: THREE.Vector3; target: THREE.Vector3 } | undefined
+    if (toast) {
+      // Trail the flying toaster from behind and above, framed on its target castle.
+      const back = toast.pos.clone().sub(toast.target).setY(0).normalize()
+      desiredPos.copy(toast.pos).addScaledVector(back, 18).add(new THREE.Vector3(0, 12, 0))
+      desiredLook.copy(toast.target)
+      k = 4
+    } else if (lead && lead.weapon.kind === 'saucer') {
+      // Top-down drone view straight over the saucer (camera.up = +X so the enemy
+      // side is toward the top of the screen).
+      topDownView = true
+      desiredPos.set(lead.pos.x, lead.pos.y + 58, lead.pos.z)
       desiredLook.copy(lead.pos)
-      k = 6
+      k = 7
+    } else if (lead && lead.weapon.kind === 'frisbee') {
+      // Chase cam locked to the LAUNCH direction (not the live heading), so sliding
+      // left/right reads as left/right on screen instead of spinning the view.
+      desiredPos.copy(lead.pos).addScaledVector(lead.launchDir, -16).add(new THREE.Vector3(0, 8, 0))
+      desiredLook.copy(lead.pos).addScaledVector(lead.launchDir, 8)
+      k = 7
     } else {
-      desiredPos.copy(camPosCur)
-      desiredLook.copy(lastImpact)
+      if (lead && !flyHold && lead.vel.y < 0) {
+        const pr = world.simShot(lead.pos, lead.vel, wind)
+        if (pr.hit && pr.t < 1.0) {
+          // Landing soon — stop advancing and watch the shell fly on to its target.
+          flyHold = camPosCur.clone()
+          flyHold.y = Math.max(flyHold.y + 2, world.surfaceY(flyHold.x, flyHold.z) + 6)
+        }
+      }
+      if (flyHold) {
+        desiredPos.copy(flyHold)
+        desiredLook.copy(lead ? lead.pos : lastImpact)
+        k = 2.2
+      } else if (lead) {
+        desiredPos.copy(lead.pos).addScaledVector(lead.hdir, -13).add(new THREE.Vector3(0, 5.5, 0))
+        desiredLook.copy(lead.pos)
+        k = 6
+      } else {
+        desiredPos.copy(camPosCur)
+        desiredLook.copy(lastImpact)
+      }
     }
   } else if (phase === 'resolve') {
     if (flyHold) {
@@ -685,6 +1243,9 @@ function updateCamera(dt: number): void {
     camera.position.z += (Math.random() - 0.5) * shakeAmp
     shakeAmp *= Math.exp(-2.8 * dt)
   }
+  // The saucer's top-down view looks straight down; point "up" toward the enemy
+  // (+X) so the map reads consistently. Everything else uses world-up.
+  camera.up.set(topDownView ? 1 : 0, topDownView ? 0 : 1, 0)
   camera.lookAt(camLookCur)
 }
 
@@ -812,11 +1373,21 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
   const muzzle = muzzleOf(side)
   sfx.shot()
   spawnFlash(muzzle, 14, 0xffe0b0)
-  spawnProj(muzzle, dirOf(side).multiplyScalar(speedOf(power)), weapon, false, side)
+  if (weapon.kind === 'saucer') {
+    // The saucer doesn't arc — it rises to a cruising altitude and hovers, piloted.
+    const dir = dirOf(side)
+    const cruiseY = Math.max(muzzle.y + 12, world.surfaceY(muzzle.x, muzzle.z) + 42)
+    spawnProj(new THREE.Vector3(muzzle.x + dir.x * 5, cruiseY, muzzle.z + dir.z * 5), new THREE.Vector3(0, 0, 0), weapon, false, side)
+    if (side === 0) hud.msg('arrow keys fly the saucer · SPACE to detonate')
+  } else {
+    spawnProj(muzzle, dirOf(side).multiplyScalar(speedOf(power)), weapon, false, side)
+    if (side === 0 && weapon.kind === 'frisbee') hud.msg('← → curve the frisbee · ↑ ↓ flatten / dive the arc')
+  }
   if (side === 0) shotThisRound = true
   flyHold = null
   worldView = false
   hud.setWorldView(false)
+  hud.showCards(false)
   phase = 'fly'
   hud.setPower(null, shotThisRound ? lastPlayerPower : null)
 }
@@ -825,22 +1396,108 @@ function startTurn(s: number): void {
   turn = s
   rerollWind()
   flyHold = null
+  cardBought[s] = false // one card purchase allowed per turn
+  // Age this side's producers a turn (crops mature), then pay out — scaled by how
+  // intact each is (integrity) and how mature (crops ramp in over a couple turns).
+  for (const p of planted[s]) p.age++
+  const income = sideIncome(s)
+  if (income > 0) money[s] += income
+  // Modest AI catch-up: the enemy doesn't optimise its spending like a human, so a
+  // small per-turn subsidy keeps it able to field weapons, producers AND stratagems.
+  if (s === 1) money[1] += 400
+  // Pay down any Fireworks debt from this side's fresh income.
+  if (fireworksDebt[s] > 0 && money[s] > 0) {
+    const pay = Math.min(fireworksDebt[s], money[s])
+    money[s] -= pay
+    fireworksDebt[s] -= pay
+  }
   if (s === 0) {
     const st = sides[0]
     if ((st.arsenal.get(WEAPONS[st.wsel].id) ?? 0) <= 0) {
       st.wsel = 0 // out of the fancy stuff — back to missiles
       updateWeaponHud()
     }
-    phase = 'aim'
-    hud.banner('YOUR TURN', 'wind has shifted')
-    hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+    hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+    if (income > 0) hud.msg(`income +$${income.toLocaleString()}`)
+    refreshHand()
+    // Every turn opens the market (buy cards + resources; weapons only at round
+    // start). Leaving it runs castle placement (round start) then resource placement.
+    openMarket(roundStartPending)
+    roundStartPending = false
   } else {
-    phase = 'aiThink'
-    aiT = 0
-    aiPlanned = null
-    hud.banner('ENEMY TURN')
+    aiCards() // buy/play a stratagem first (so producers don't eat the card budget)
+    aiPlant() // then grow the economy with what's left
+    // A played Flying Toaster takes over the fly pipeline; don't stomp it with aiThink.
+    if (phase !== 'fly') {
+      phase = 'aiThink'
+      aiT = 0
+      aiPlanned = null
+      hud.banner('ENEMY TURN')
+    }
   }
 }
+
+// The enemy buys a card now and then, and plays its best applicable one by simple
+// heuristics — toaster to attack, ghost when hurt, seize/steal/army vs your economy.
+function aiCards(): void {
+  const s = 1
+  if (!cardBought[s] && money[s] >= CARD_COST + 300 && Math.random() < 0.55) {
+    money[s] -= CARD_COST
+    cardBought[s] = true
+    hand[s].push(drawCard())
+  }
+  if (!hand[s].length || Math.random() > 0.7) return
+  const id = pickAiCard(s)
+  if (!id) return
+  hand[s].splice(hand[s].indexOf(id), 1)
+  applyCard(s, id)
+}
+
+function pickAiCard(s: number): CardId | null {
+  const h = hand[s]
+  const foeHasProd = planted[1 - s].length > 0
+  const myHurt = world.integrity(s) < 0.7
+  if (h.includes('toaster')) return 'toaster'
+  if (foeHasProd && h.includes('zombie')) return 'zombie'
+  if (foeHasProd && h.includes('steal')) return 'steal'
+  if (foeHasProd && h.includes('army')) return 'army'
+  if (myHurt && h.includes('ghost')) return 'ghost'
+  // Fireworks gifts the opponent and blocks your own kills — only when well behind.
+  if (h.includes('fireworks') && scoreFoe < scoreYou && Math.random() < 0.3) return 'fireworks'
+  return null
+}
+
+// Push the player's current hand to the HUD list (above the weapons).
+function refreshHand(): void {
+  hud.setHand(
+    hand[0].map(id => ({ id, name: cardDef(id).name, blurb: cardDef(id).blurb, emoji: cardDef(id).emoji })),
+    { onPlay: (i: number) => playCard(0, i) }
+  )
+}
+
+// The enemy grows its economy at a measured pace: one producer per turn, a soft cap so
+// it doesn't snowball out of the player's reach, and a reserve so it can still afford
+// a stratagem. It auto-positions nearest its fort (players place by hand).
+function aiPlant(): void {
+  const fort = world.forts[1]?.towers[0]
+  if (!fort) return
+  if (planted[1].length >= 8) return // soft cap — keeps the AI economy in the player's range
+  // Buy the best producer that still leaves ~a card's worth in reserve.
+  const type = money[1] >= DERRICK_SPEC.cost + 1600 ? DERRICK
+    : money[1] >= MINE_SPEC.cost + 1600 ? MINE
+    : money[1] >= CROP_SPEC.cost + 900 ? CROP
+    : -1
+  if (type < 0) return
+  const spec = PRODUCER_SPECS[type]
+  const spot = world.findProducerSpot(1, fort.cx, fort.cz, type)
+  if (!spot) return
+  money[1] -= spec.cost
+  planted[1].push({ cx: spot.cx, cz: spot.cz, type, baseYield: spec.baseYield, age: 0 })
+  world.buildProducer(spot.cx, spot.cz, 1, type, spec.baseYield, 0)
+}
+const CROP_SPEC = PRODUCER_SPECS[CROP]
+const MINE_SPEC = PRODUCER_SPECS[MINE]
+const DERRICK_SPEC = PRODUCER_SPECS[DERRICK]
 
 function aiPickWeapon(): WeaponDef {
   const s = sides[1]
@@ -878,13 +1535,16 @@ function updateAi(dt: number): void {
     aiT += dt
     if (aiT < 0.75) return
     // Aim at wherever the player's cannon currently sits (it may have moved
-    // to a surviving tower).
+    // to a surviving tower). If the player's tower is ghosted, the AI can't see it and
+    // keeps firing at the decoy (old) spot — a near miss there reveals the real one.
     const seat = world.cannonSeat(0)
     const mainTower = world.forts[0].towers[0]
+    const aimX = ghostSide === 0 && ghostDecoy ? ghostDecoy.cx : seat.x
+    const aimZ = ghostSide === 0 && ghostDecoy ? ghostDecoy.cz : seat.z
     const target = {
-      x: seat.x,
+      x: aimX,
       y: Math.max(mainTower.rubbleY + 2, seat.y - 4),
-      z: seat.z,
+      z: aimZ,
     }
     // Approximate the muzzle for planning: turret centre nudged toward the target.
     const p1 = sides[1].cannon.group.position
@@ -927,12 +1587,73 @@ function updateAi(dt: number): void {
 
 // ---------------------------------------------------------------- projectile stepping
 
+// The player steers the Frisbee Bomb: left/right slide it sideways (opposite ways,
+// relative to the fixed chase view), up/down flatten or dive the arc. Gravity applies.
+function steerFrisbee(p: Proj, h: number): void {
+  const L = p.launchDir
+  // Screen-right of the (fixed) launch direction, in the horizontal plane
+  // (cross(up, -forward) for a camera looking along L with world-up).
+  const rx = -L.z
+  const rz = L.x
+  const strafe = 26 * h
+  let dir = 0
+  if (keys.has('ArrowRight')) dir += 1
+  if (keys.has('ArrowLeft')) dir -= 1
+  if (dir !== 0) {
+    p.vel.x += rx * strafe * dir
+    p.vel.z += rz * strafe * dir
+  }
+  if (keys.has('ArrowUp')) p.vel.y += 30 * h // flatten / extend
+  if (keys.has('ArrowDown')) p.vel.y -= 30 * h // steepen / dive
+}
+
+// The Flying Saucer hovers and is flown like a drone in the top-down view: arrows
+// glide it across the map (up = toward the enemy), altitude holds steady.
+function steerSaucer(p: Proj, h: number): void {
+  const SPEED = 17
+  let tx = 0
+  let tz = 0
+  if (keys.has('ArrowUp')) tx += 1 // screen-up = toward the enemy (+x)
+  if (keys.has('ArrowDown')) tx -= 1
+  if (keys.has('ArrowRight')) tz += 1
+  if (keys.has('ArrowLeft')) tz -= 1
+  const len = Math.hypot(tx, tz)
+  if (len > 0) {
+    tx /= len
+    tz /= len
+  }
+  const ease = Math.min(1, 5 * h)
+  p.vel.x += (tx * SPEED - p.vel.x) * ease
+  p.vel.z += (tz * SPEED - p.vel.z) * ease
+  p.vel.y += (0 - p.vel.y) * ease // hold altitude
+}
+
 function stepProjectiles(h: number): void {
   for (let i = projs.length - 1; i >= 0; i--) {
     const p = projs[i]
+    const piloted = i === 0 && p.side === 0
+    // Flying Saucer: a hovering drone — no gravity/wind, doesn't crash into terrain
+    // (it just holds above it); it detonates only when the player presses space.
+    if (p.weapon.kind === 'saucer') {
+      if (piloted) steerSaucer(p, h)
+      const nx = p.pos.x + p.vel.x * h
+      const ny = p.pos.y + p.vel.y * h
+      const nz = p.pos.z + p.vel.z * h
+      if (nx < -30 || nx > GX + 30 || nz < -30 || nz > GZ + 30) {
+        hud.msg('saucer lost to the void')
+        removeProj(p)
+        continue
+      }
+      const surf = world.surfaceY(Math.round(nx), Math.round(nz))
+      p.pos.set(nx, Math.max(ny, surf + 4), nz)
+      const hs = p.vel.x * p.vel.x + p.vel.z * p.vel.z
+      if (hs > 1) p.hdir.set(p.vel.x, 0, p.vel.z).multiplyScalar(1 / Math.sqrt(hs))
+      continue
+    }
     p.vel.y -= GRAVITY * h
     p.vel.x += wind.x * WIND_ACCEL * h
     p.vel.z += wind.z * WIND_ACCEL * h
+    if (p.weapon.kind === 'frisbee' && piloted) steerFrisbee(p, h)
     if (p.weapon.kind === 'mirv' && !p.split && p.vel.y < 0) {
       doSplit(p)
       continue
@@ -959,6 +1680,15 @@ function stepProjectiles(h: number): void {
   }
 }
 
+// Player triggers the saucer's nuke: it strikes the ground directly beneath it.
+function detonateSaucer(p: Proj): void {
+  const gx = Math.round(p.pos.x)
+  const gz = Math.round(p.pos.z)
+  const gy = Math.max(0, world.surfaceY(gx, gz))
+  crater(new THREE.Vector3(gx, gy, gz), p.weapon.blast, true)
+  removeProj(p)
+}
+
 // ---------------------------------------------------------------- resolve & match end
 
 function finishResolve(): void {
@@ -967,6 +1697,9 @@ function finishResolve(): void {
     resolveT = 0.5
     return
   }
+  // Was this resolve a played card (bonus strike) rather than the turn's shot?
+  const wasCard = flyIsCard
+  flyIsCard = false
   for (let s = 0; s < 2; s++) {
     const seat = world.cannonSeat(s)
     sides[s].targetX = seat.x
@@ -978,12 +1711,31 @@ function finishResolve(): void {
   hud.setIntegrity(iYou, iFoe)
   const youDead = iYou < COLLAPSE_AT
   const foeDead = iFoe < COLLAPSE_AT
+  // Fireworks interception: while active, the holder's killing blow on the enemy castle
+  // instead REBUILDS it and bills the holder $1,000 (debt if short). The round goes on.
+  if (fireworksSide >= 0) {
+    const targetDead = fireworksSide === 0 ? foeDead : youDead
+    if (targetDead) {
+      const pay = Math.min(1000, money[fireworksSide])
+      money[fireworksSide] -= pay
+      fireworksDebt[fireworksSide] += 1000 - pay
+      fireworksSide = -1
+      setNight(false)
+      rebuildRoundWorld() // the enemy castle is magically rebuilt
+      hud.setIntegrity(world.integrity(0), world.integrity(1))
+      hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+      hud.banner('REBUILT!', 'fireworks spared the castle — billed $1,000')
+      startTurn(1 - turn)
+      return
+    }
+  }
   if (youDead || foeDead) {
-    // Payout scales with damage dealt (measured before the collapse animation).
-    const payYou = Math.round((1 - iFoe) * DMG_PAY) + (foeDead && !youDead ? WIN_BONUS : 0)
-    const payFoe = Math.round((1 - iYou) * DMG_PAY) + (youDead && !foeDead ? WIN_BONUS : 0)
-    // To the victor the spoils: the winner takes the loser's treasury and
-    // arsenal before damage pay lands (so the loser isn't left with nothing).
+    // Combat no longer pays per hit — the reward for collapsing the tower is the
+    // win bonus PLUS seizing the loser's treasury/arsenal and razing their economy.
+    const payYou = foeDead && !youDead ? WIN_BONUS : 0
+    const payFoe = youDead && !foeDead ? WIN_BONUS : 0
+    // To the victor the spoils: the winner takes the loser's treasury and arsenal,
+    // and the loser's producers (their economy) are razed to nothing.
     let plunder = 0
     if (foeDead && !youDead) {
       scoreYou++
@@ -991,21 +1743,23 @@ function finishResolve(): void {
       money[0] += plunder
       money[1] = 0
       lootArsenal(0, 1)
+      planted[1] = [] // their economy is razed to the ground
     } else if (youDead && !foeDead) {
       scoreFoe++
       plunder = money[0]
       money[1] += plunder
       money[0] = 0
       lootArsenal(1, 0)
+      planted[0] = [] // our economy is razed to the ground
     }
     money[0] += payYou
     money[1] += payFoe
     lastRoundResult =
       youDead && foeDead
-        ? `Round ${round} drawn — mutual destruction. Salvage pay: $${payYou.toLocaleString()}`
+        ? `Round ${round} drawn — mutual destruction.`
         : foeDead
-          ? `Round ${round} won! Earned $${payYou.toLocaleString()} and plundered $${plunder.toLocaleString()} plus their arsenal.`
-          : `Round ${round} lost — the enemy plundered your treasury and arsenal. Damage pay: $${payYou.toLocaleString()}`
+          ? `Round ${round} won! Won $${payYou.toLocaleString()}, plundered $${plunder.toLocaleString()} + their arsenal, and razed their farms.`
+          : `Round ${round} lost — the enemy plundered your treasury and razed your farms.`
     const losers: number[] = []
     if (youDead) losers.push(0)
     if (foeDead) losers.push(1)
@@ -1035,6 +1789,17 @@ function finishResolve(): void {
     endShown = false
     hud.setIntegrity(youDead ? 0 : iYou, foeDead ? 0 : iFoe)
     hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  } else if (wasCard) {
+    // A played-card strike that didn't collapse anything — the shooter still shoots.
+    phase = turn === 0 ? 'aim' : 'aiThink'
+    if (turn === 0) {
+      hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+      hud.showCards(true)
+      hud.banner('YOUR TURN', 'take your shot')
+    } else {
+      aiT = 0
+      aiPlanned = null
+    }
   } else {
     startTurn(1 - turn)
   }
@@ -1057,6 +1822,13 @@ function lootArsenal(winner: number, loser: number): void {
 // the armory adds it to the already-visible terrain.
 function rebuildRoundWorld(): void {
   world.generate(roundSeed, forti)
+  // Re-raise every planted producer into the fresh terrain (skip any spot a new
+  // fort/berm now occupies). Terrain is fixed per match, so positions stay valid.
+  for (let s = 0; s < 2; s++) {
+    for (const p of planted[s]) {
+      if (world.canPlaceProducer(p.cx, p.cz, p.type)) world.buildProducer(p.cx, p.cz, s, p.type, p.baseYield, p.age)
+    }
+  }
   for (let s = 0; s < 2; s++) {
     const st = sides[s]
     const seat = world.cannonSeat(s)
@@ -1071,10 +1843,20 @@ function rebuildRoundWorld(): void {
 function setupRoundWorld(): void {
   for (const p of [...projs]) removeProj(p)
   for (const t of tasks) {
-    if (t.kind === 'roller') scene.remove(t.mesh)
+    if (t.kind === 'roller' || t.kind === 'toaster' || t.kind === 'king') scene.remove(t.mesh)
+    else if (t.kind === 'army') for (const r of t.runners) scene.remove(r)
   }
   tasks.length = 0
-  roundSeed = Math.floor(Math.random() * 1e9)
+  // Card effects don't carry between rounds: clear night/ghost and restore both cannons.
+  setNight(false)
+  fireworksSide = -1
+  ghostSide = -1
+  ghostDecoy = null
+  sides[0].cannon.group.visible = true
+  sides[1].cannon.group.visible = true
+  world.hiddenFort = -1
+  // Terrain is fixed for the whole match (seed set at match start) so producers you
+  // plant stay on valid ground round to round; each round just rebuilds the same land.
   rebuildRoundWorld()
   for (let s = 0; s < 2; s++) {
     sides[s].az = s === 0 ? 0 : Math.PI
@@ -1095,6 +1877,8 @@ function setupRoundWorld(): void {
 // The computer spends its winnings too: fortifications when flush, then
 // cheap weapon volume first, big-ticket when rich.
 function aiShop(): void {
+  // Farms are now planted per-turn (see aiPlant), not bought here. The shop spends
+  // the enemy's winnings on defenses and weapons.
   // A berm is cheap insurance — the enemy grabs one fairly often.
   if (money[1] >= 2500 && forti[1].barricade < 2 && Math.random() < 0.55) {
     money[1] -= 2500
@@ -1113,13 +1897,15 @@ function aiShop(): void {
     leapfrog: 2, heavyroller: 2, sandhog: 2, deathshead: 1,
   }
   const order = ['babynuke', 'mirv', 'bigmissile', 'nuke', 'roller', 'funky', 'leapfrog', 'heavyroller', 'sandhog', 'deathshead']
+  // Keep a war chest back so the enemy can still plant producers on its turns (aiPlant).
+  const PLANT_RESERVE = 2400
   let bought = true
   while (bought) {
     bought = false
     for (const id of order) {
       const w = WEAPONS.find(x => x.id === id)!
       const owned = sides[1].arsenal.get(id) ?? 0
-      if (w.price !== undefined && money[1] >= w.price && owned < (caps[id] ?? 2)) {
+      if (w.price !== undefined && money[1] - PLANT_RESERVE >= w.price && owned < (caps[id] ?? 2)) {
         money[1] -= w.price
         sides[1].arsenal.set(id, owned + (w.pack ?? 1))
         bought = true
@@ -1152,24 +1938,69 @@ function shopForts() {
   }))
 }
 
+function shopResources() {
+  return PRODUCER_TYPES.map(t => ({
+    name: `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield}/turn)`,
+    price: PRODUCER_SPECS[t].cost,
+    queued: pendingResources.filter(x => x === t).length,
+  }))
+}
+
 function refreshShop(): void {
   hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
   hud.showShop(
-    { round, rounds: ROUNDS, scoreYou, scoreFoe, money: money[0], result: lastRoundResult, items: shopItems(), forts: shopForts() },
-    buyWeapon,
-    buyFort,
-    () => {
-      hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
-      startTurn(0)
-      hud.banner(`ROUND ${round}`, 'your turn')
+    {
+      round,
+      rounds: ROUNDS,
+      scoreYou,
+      scoreFoe,
+      money: money[0],
+      result: marketFull ? lastRoundResult : '',
+      full: marketFull,
+      startLabel: marketFull ? 'START ROUND' : 'DONE — PLACE & AIM',
+      cardCost: CARD_COST,
+      cardHint: cardBought[0] ? 'drew this turn' : `hand ${hand[0].length}`,
+      canBuyCard: !cardBought[0] && money[0] >= CARD_COST,
+      resources: shopResources(),
+      items: shopItems(),
+      forts: shopForts(),
+    },
+    {
+      onBuy: buyWeapon,
+      onBuyFort: buyFort,
+      onBuyCard: () => {
+        buyCard(0)
+        refreshShop()
+      },
+      onBuyRes: buyResource,
+      onStart: onMarketDone,
     }
   )
 }
 
-function openShop(): void {
+// Buy a resource in the market — pay now, place it in the plant step afterward.
+function buyResource(index: number): void {
+  const type = PRODUCER_TYPES[index]
+  const spec = PRODUCER_SPECS[type]
+  if (money[0] < spec.cost) return void hud.msg('not enough cash')
+  money[0] -= spec.cost
+  pendingResources.push(type)
+  sfx.tick()
+  refreshShop()
+}
+
+// Leaving the market: round-start goes through castle placement first, then both
+// paths run resource placement (beginPlant) and finally aim.
+function onMarketDone(): void {
+  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0])
+  if (marketFull) beginCastlePlacement()
+  else beginPlant()
+}
+
+function openMarket(full: boolean): void {
   phase = 'shop'
-  aiShop()
-  rebuildRoundWorld() // the AI may have bought towers — show them
+  marketFull = full
+  hud.showCards(false)
   refreshShop()
 }
 
@@ -1194,10 +2025,19 @@ function buyFort(index: number): void {
   refreshShop()
 }
 
+// A per-round stipend seeds both treasuries so a plundered/razed loser can rebuild
+// its economy (guards against an unrecoverable snowball). Tuned further in balance.
+const ROUND_STIPEND = 1200
 function nextRound(): void {
   round++
+  money[0] += ROUND_STIPEND
+  money[1] += ROUND_STIPEND
+  aiPlaceCastle() // the enemy positions its own castle for the new round
+  aiShop() // the enemy restocks weapons/fortifications (round start only)
   setupRoundWorld()
-  openShop()
+  // The round's first player turn gets the FULL market (weapons/forts) + castle placement.
+  roundStartPending = true
+  startTurn(0)
 }
 
 function fullReset(): void {
@@ -1207,12 +2047,17 @@ function fullReset(): void {
   money[0] = START_CASH
   money[1] = START_CASH
   lastRoundResult = ''
+  // Fresh battlefield for the new match, fixed across this match's rounds. Producers
+  // can be placed anywhere (even water), so any seed is playable.
+  roundSeed = Math.floor(Math.random() * 1e9)
+  world.castleOverride = [null, null] // castles revert to the seed's spots until placed
   for (let s = 0; s < 2; s++) {
     sides[s].arsenal = newArsenal()
     sides[s].wsel = 0
     forti[s].height = 0
     forti[s].towers = 0
     forti[s].barricade = 0
+    planted[s] = []
   }
   nextRound()
 }
@@ -1228,17 +2073,27 @@ window.addEventListener('keydown', e => {
   }
   if (e.code === 'Space') {
     e.preventDefault()
-    if (phase === 'aim' && !e.repeat) {
+    if (phase === 'castle' && !e.repeat) {
+      placeCastle()
+    } else if (phase === 'plant' && !e.repeat) {
+      placeProducer()
+    } else if (phase === 'aim' && !e.repeat) {
       phase = 'charge'
       chargeT = 0
       chargePower = 0
+    } else if (phase === 'fly' && !e.repeat) {
+      // Detonate a piloted Flying Saucer wherever it's hovering.
+      const lead = projs[0]
+      if (lead && lead.side === 0 && lead.weapon.kind === 'saucer') detonateSaucer(lead)
     }
   }
+  if (e.code === 'Enter' && phase === 'castle') placeCastle()
+  if (e.code === 'Enter' && phase === 'plant') finishPlant()
   if (e.code === 'KeyV') toggleWorldView()
   if (/^Digit[1-9]$/.test(e.code)) {
-    // Digits address the visible (owned) list, not the full roster.
-    const list = visibleWeapons()
+    // Digits address the visible (owned) weapon list, not the full roster.
     const n = parseInt(e.code.slice(5)) - 1
+    const list = visibleWeapons()
     if (n < list.length) selectWeapon(list[n])
   }
 })
@@ -1321,6 +2176,8 @@ function tick(now: number): void {
   last = now
 
   updatePlayerAim(dt)
+  updatePlant(dt)
+  updateCastle(dt)
   updateAi(dt)
 
   acc += dt
@@ -1332,8 +2189,15 @@ function tick(now: number): void {
   // Trails advance once per frame, not per physics step.
   for (const p of projs) {
     p.mesh.position.copy(p.pos)
-    p.mesh.rotation.x += dt * 4
-    p.mesh.rotation.z += dt * 3
+    if (p.weapon.kind === 'frisbee' || p.weapon.kind === 'saucer') {
+      // A disc flies flat (horizontal) and spins about its vertical axis.
+      p.mesh.rotation.x = 0
+      p.mesh.rotation.z = 0
+      p.mesh.rotation.y += dt * 9
+    } else {
+      p.mesh.rotation.x += dt * 4
+      p.mesh.rotation.z += dt * 3
+    }
     if (p.trailN < 600) {
       p.trailPos[p.trailN * 3] = p.pos.x
       p.trailPos[p.trailN * 3 + 1] = p.pos.y
@@ -1420,7 +2284,20 @@ renderer.setAnimationLoop(tick)
 // (e.g. headless preview tabs). Harmless in normal play.
 declare global {
   interface Window {
-    __sv?: { pump: (seconds: number) => void; state: () => object; world: World; newMatch: () => void }
+    __sv?: {
+      pump: (seconds: number) => void
+      state: () => object
+      world: World
+      newMatch: () => void
+      plantAt: (cx: number, cz: number) => void
+      finishPlant: () => void
+      placeCastleAt: (cx: number, cz: number) => void
+      craterAt: (cx: number, cz: number, r: number) => void
+      giveCard: (id: string) => void
+      playCard: (i: number) => void
+      hand: () => string[]
+      sampleDraws: (n: number) => Record<string, number>
+    }
   }
 }
 let fakeNow = 0
@@ -1448,7 +2325,47 @@ window.__sv = {
     proj0: projs[0]
       ? { x: projs[0].pos.x, y: projs[0].pos.y, z: projs[0].pos.z, vx: projs[0].vel.x, vy: projs[0].vel.y, vz: projs[0].vel.z }
       : null,
+    money: [money[0], money[1]],
+    planted: [planted[0].length, planted[1].length],
+    plantCursor: { cx: Math.round(plantCX), cz: Math.round(plantCZ) },
+    hand: [...hand[0]],
+    enemyHand: hand[1].length,
+    ghostSide,
+    fireworksSide,
   }),
   world,
   newMatch: fullReset,
+  // Test hooks for the plant phase: position the cursor + place, and skip to aim.
+  plantAt(cx: number, cz: number) {
+    plantCX = cx
+    plantCZ = cz
+    placeProducer()
+  },
+  finishPlant,
+  // Castle test hook: set the cursor and confirm placement.
+  placeCastleAt(cx: number, cz: number) {
+    castleCX = cx
+    castleCZ = cz
+    placeCastle()
+  },
+  craterAt(cx: number, cz: number, r: number) {
+    crater(new THREE.Vector3(cx, world.surfaceY(cx, cz), cz), r, true)
+  },
+  // Card test hooks: add a specific card to the player's hand and play by index.
+  giveCard(id: string) {
+    hand[0].push(id as CardId)
+    refreshHand()
+  },
+  playCard(i: number) {
+    playCard(0, i)
+  },
+  hand: () => [...hand[0]],
+  sampleDraws(n: number) {
+    const counts: Record<string, number> = {}
+    for (let i = 0; i < n; i++) {
+      const id = drawCard()
+      counts[id] = (counts[id] ?? 0) + 1
+    }
+    return counts
+  },
 }
