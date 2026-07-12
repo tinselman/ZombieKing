@@ -1268,7 +1268,7 @@ function beginCastlePlacement(): void {
   castleBuildT = 0
   ensureCastleGhost().visible = false // the real (rebuilt) tower is the preview now
   hud.banner('PLACE YOUR CASTLE')
-  hud.setSetupHint('Position your castle — the ground moves with it; go anywhere, even on water', '← → ↑ ↓ move  ·  SPACE or ENTER to set it here')
+  hud.setSetupHint('Position your castle — it rides the terrain; go anywhere, even on water', '← → ↑ ↓ move  ·  SPACE or ENTER to set it here')
 }
 
 function placeCastle(): void {
@@ -1302,8 +1302,9 @@ function updateCastle(dt: number): void {
   castleCZ = Math.max(CASTLE_HALF + 1, Math.min(GZ - CASTLE_HALF - 1, castleCZ))
   const cx = Math.round(castleCX)
   const cz = Math.round(castleCZ)
-  // Rebuild the world with the castle here so the tower + its pad follow the cursor.
-  // Throttled and only when the cell changes, to keep the terrain regen affordable.
+  // Rebuild the world with the castle here so the real tower follows the cursor,
+  // riding up and down the existing terrain (the land itself never deforms).
+  // Throttled and only when the cell changes, to keep the regen affordable.
   castleBuildT += dt
   if ((cx !== castleBuiltCX || cz !== castleBuiltCZ) && castleBuildT > 0.09) {
     castleBuildT = 0
@@ -1311,6 +1312,20 @@ function updateCastle(dt: number): void {
     castleBuiltCZ = cz
     world.castleOverride[0] = { cx, cz }
     rebuildRoundWorld()
+  }
+  // Blinking hairline arrows on all four sides of the tower, cueing the arrow keys —
+  // shown whenever the castle is being positioned (round start or Ghost Tower).
+  const arrows = ensurePlantArrows()
+  arrows.visible = true
+  plantBlinkT += dt
+  const blinkOn = plantBlinkT % 0.5 < 0.3
+  const ay = world.surfaceY(cx, cz) + 12 // mid-tower height reads well from overhead
+  const reach = CASTLE_HALF + 4
+  for (let k = 0; k < arrows.children.length; k++) {
+    const a = arrows.children[k]
+    const d = PLANT_ARROW_DIRS[k]
+    a.position.set(cx + d.x * reach, ay, cz + d.z * reach)
+    a.visible = blinkOn
   }
 }
 

@@ -251,14 +251,17 @@ export class World {
     const rand = mulberry32(seed)
 
     // Fort separation varies per battle: sometimes close-quarters, sometimes long-range.
-    // A castle-placement override (if the player/enemy positioned their castle) wins
-    // over the seed's random spot. Overrides may be anywhere, even on water.
-    let cxA = Math.round(12 + rand() * 20)
-    let cxB = Math.round(GX - 13 - rand() * 20)
-    let czA = Math.round(GZ / 2 + (rand() - 0.5) * 18)
-    let czB = Math.round(GZ / 2 + (rand() - 0.5) * 18)
-    if (this.castleOverride[0]) { cxA = this.castleOverride[0]!.cx; czA = this.castleOverride[0]!.cz }
-    if (this.castleOverride[1]) { cxB = this.castleOverride[1]!.cx; czB = this.castleOverride[1]!.cz }
+    // The SEED sites shape the terrain (pads rise there and never move); a castle-
+    // placement override only moves the BUILT tower, which rides the existing surface
+    // wherever it goes — repositioning a castle must never deform the landscape.
+    const seedCxA = Math.round(12 + rand() * 20)
+    const seedCxB = Math.round(GX - 13 - rand() * 20)
+    const seedCzA = Math.round(GZ / 2 + (rand() - 0.5) * 18)
+    const seedCzB = Math.round(GZ / 2 + (rand() - 0.5) * 18)
+    const cxA = this.castleOverride[0] ? this.castleOverride[0]!.cx : seedCxA
+    const czA = this.castleOverride[0] ? this.castleOverride[0]!.cz : seedCzA
+    const cxB = this.castleOverride[1] ? this.castleOverride[1]!.cx : seedCxB
+    const czB = this.castleOverride[1] ? this.castleOverride[1]!.cz : seedCzB
 
     const nseed = Math.floor(rand() * 100000)
     // Per-match character: rolling plains, jagged peaks, ridged badlands, or
@@ -312,9 +315,13 @@ export class World {
     const sitesA = towerSites(cxA, czA, forti[0].towers, 1)
     const sitesB = towerSites(cxB, czB, forti[1].towers, -1)
 
+    // Terrain pads rise at the natural SEED sites only, so the land is identical no
+    // matter where the castles were placed — a moved tower stands on raw terrain.
+    const padSitesA = towerSites(seedCxA, seedCzA, forti[0].towers, 1)
+    const padSitesB = towerSites(seedCxB, seedCzB, forti[1].towers, -1)
     const pads = [
-      ...sitesA.map(s => ({ ...s, pad: padA })),
-      ...sitesB.map(s => ({ ...s, pad: padB })),
+      ...padSitesA.map(s => ({ ...s, pad: padA })),
+      ...padSitesB.map(s => ({ ...s, pad: padB })),
     ]
     this.waterY = waterY
     for (let x = 0; x < GX; x++) {
