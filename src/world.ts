@@ -390,6 +390,25 @@ export class World {
     this.rebuild()
   }
 
+  // Relocate one side's fort to (cx,cz) WITHOUT regenerating the world: the old fort's
+  // voxels vanish, the tower(s) rebuild on the current surface at the new spot, and all
+  // battlefield damage, craters, and producers stay exactly as they are.
+  moveFort(side: number, cx: number, cz: number, forti: Fortifications): void {
+    const cell = side === 0 ? FORT_A : FORT_B
+    for (let i = 0; i < this.grid.length; i++) if (this.grid[i] === cell) this.grid[i] = EMPTY
+    const dir = side === 0 ? 1 : -1
+    const sites = [{ cx, cz }]
+    if (forti.towers >= 1) sites.push({ cx: cx + dir * 3, cz: Math.min(GZ - 8, cz + 13) })
+    if (forti.towers >= 2) sites.push({ cx: cx + dir * 3, cz: Math.max(7, cz - 13) })
+    const fort: FortInfo = { cell, towers: [], origCount: 0 }
+    for (let ti = 0; ti < sites.length; ti++) {
+      const extraH = ti === 0 ? forti.height : 0
+      fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
+    }
+    this.forts[side] = fort
+    this.dirty = true
+  }
+
   // ---------------------------------------------------------------- producers (economy)
 
   // Can a producer of `type` sit at (cx,cz)? Producers may go anywhere on the map now
@@ -523,7 +542,7 @@ export class World {
   // A destructible berm a few voxels in front of a fort (toward the enemy). It
   // blocks and soaks flat shots so they must be lobbed over — bought in the shop,
   // taller/thicker with each level. Not counted in fort integrity.
-  private buildBarricade(cx: number, cz: number, dir: number, level: number): void {
+  buildBarricade(cx: number, cz: number, dir: number, level: number): void {
     if (level <= 0) return
     const height = 5 + level * 2 // level 1: 7 tall, level 2: 9
     const thick = 1 + level // level 1: 2 thick, level 2: 3 (a chunkier wall soaks more)

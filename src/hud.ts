@@ -45,11 +45,27 @@ const CSS = `
 #sc-end p { font-size: 16px; color: #7a838d; margin: 0 0 28px; }
 #sc-end button { pointer-events: auto; font-size: 16px; font-weight: 700; letter-spacing: 0.08em; padding: 12px 36px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-end button:hover { background: #454c55; }
+/* Hotseat handoff: gate each human turn behind a "pass the keyboard" screen. */
+#sc-handoff { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(244,246,248,0.94); backdrop-filter: blur(10px); pointer-events: auto; z-index: 8; }
+#sc-handoff h1 { font-size: 52px; font-weight: 800; letter-spacing: 0.05em; color: #2c3138; margin: 0 0 6px; }
+#sc-handoff p { font-size: 16px; color: #7a838d; margin: 0 0 26px; }
+#sc-handoff button { font-size: 16px; font-weight: 700; letter-spacing: 0.08em; padding: 12px 40px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
+#sc-handoff button:hover { background: #454c55; }
+/* Mode picker: shown at boot and after each match (Rematch routes back here). */
+#sc-mode { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(244,246,248,0.94); backdrop-filter: blur(10px); pointer-events: auto; z-index: 8; }
+#sc-mode h1 { font-size: 48px; font-weight: 800; letter-spacing: 0.06em; color: #2c3138; margin: 0 0 4px; }
+#sc-mode p { font-size: 14px; color: #7a838d; margin: 0 0 30px; letter-spacing: 0.04em; }
+#sc-mode .modes { display: flex; gap: 18px; }
+#sc-mode .modes button { width: 250px; padding: 22px 18px; border-radius: 14px; border: 1px solid #c4cad1; background: rgba(255,255,255,0.95); color: #2c3138; cursor: pointer; text-align: center; }
+#sc-mode .modes button:hover { border-color: #2c3138; background: #fff; transform: translateY(-2px); }
+#sc-mode .modes .mt { display: block; font-size: 20px; font-weight: 800; letter-spacing: 0.04em; margin-bottom: 6px; }
+#sc-mode .modes .ms { display: block; font-size: 12.5px; color: #7a838d; line-height: 1.45; }
 #sc-shop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(244,246,248,0.82); backdrop-filter: blur(8px); pointer-events: auto; }
 #sc-shop .box { background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 14px; padding: 24px 28px; width: 780px; max-height: 88vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(40,50,60,0.12); color: #2c3138; }
 #sc-shopList { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
 #sc-shopForts { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
-#sc-shop h2 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.06em; }
+#sc-shop h2 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.06em; display: flex; justify-content: space-between; align-items: baseline; }
+#sc-shopPlayer { font-size: 14px; font-weight: 800; letter-spacing: 0.1em; color: #d5473a; }
 #sc-shopResult { color: #7a838d; font-size: 13px; margin: 4px 0 10px; min-height: 16px; }
 #sc-shopStatus { font-size: 14px; font-weight: 700; margin-bottom: 14px; display: flex; justify-content: space-between; }
 #sc-shopStatus span { color: #7a838d; font-weight: 400; }
@@ -149,8 +165,13 @@ export function createHud(
     </div></div>
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
+    <div id="sc-handoff"><h1></h1><p>Pass the keyboard — everything on screen is now yours.</p><button>START TURN</button></div>
+    <div id="sc-mode"><h1>SCORCHED VOXELS</h1><p>ZOMBIE KING EDITION</p><div class="modes">
+      <button id="sc-mode1"><span class="mt">1 PLAYER</span><span class="ms">Battle the computer — it builds, schemes, and shoots back.</span></button>
+      <button id="sc-mode2"><span class="mt">2 PLAYERS</span><span class="ms">Hotseat duel — share the keyboard, take turns, last castle standing wins.</span></button>
+    </div></div>
     <div id="sc-shop"><div class="box">
-      <h2>ZOMBIE KING MARKET</h2>
+      <h2>ZOMBIE KING MARKET<span id="sc-shopPlayer"></span></h2>
       <div id="sc-shopResult"></div>
       <div id="sc-shopStatus"></div>
       <div class="slabel">Stratagem Cards</div>
@@ -212,10 +233,20 @@ export function createHud(
   const banner = q<HTMLElement>('#sc-banner')
   const msgEl = q<HTMLElement>('#sc-msg')
   const skipped = q<HTMLElement>('#sc-skipped')
+  const skippedText = q<HTMLElement>('#sc-skipped span')
   const end = q<HTMLElement>('#sc-end')
   const endTitle = q<HTMLElement>('#sc-end h1')
   const endSub = q<HTMLElement>('#sc-end p')
   const endBtn = q<HTMLButtonElement>('#sc-end button')
+  const handoff = q<HTMLElement>('#sc-handoff')
+  const handoffTitle = q<HTMLElement>('#sc-handoff h1')
+  const handoffBtn = q<HTMLButtonElement>('#sc-handoff button')
+  const modeEl = q<HTMLElement>('#sc-mode')
+  const mode1 = q<HTMLButtonElement>('#sc-mode1')
+  const mode2 = q<HTMLButtonElement>('#sc-mode2')
+  const shopPlayer = q<HTMLElement>('#sc-shopPlayer')
+  const fortYouLabel = q<HTMLElement>('#sc-fortYou .label')
+  const fortFoeLabel = q<HTMLElement>('#sc-fortFoe .label')
 
   let bannerTimer = 0
   let msgTimer = 0
@@ -352,9 +383,15 @@ export function createHud(
     sideRect(): DOMRect {
       return sideEl.getBoundingClientRect()
     },
-    setStatus(round: number, rounds: number, you: number, foe: number, cash: number, income = 0) {
+    // `player` (1 or 2) tags the readout with whose numbers these are in hotseat; 0 hides it.
+    setStatus(round: number, rounds: number, you: number, foe: number, cash: number, income = 0, player = 0) {
       const inc = income > 0 ? ` &nbsp;·&nbsp; <span>resources</span> +$${income.toLocaleString()}/turn` : ''
-      statusEl.innerHTML = `<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}${inc}`
+      const who = player > 0 ? `<b style="color:#d5473a">P${player}</b> &nbsp;·&nbsp; ` : ''
+      statusEl.innerHTML = `${who}<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}${inc}`
+    },
+    setFortLabels(you: string, foe: string) {
+      fortYouLabel.textContent = you
+      fortFoeLabel.textContent = foe
     },
     showShop(
       data: {
@@ -366,6 +403,7 @@ export function createHud(
         result: string
         full: boolean // round-start market shows weapons + fortifications; per-turn hides them
         startLabel: string
+        playerLabel: string // "PLAYER 1"/"PLAYER 2" in hotseat; '' hides it
         cardCost: number
         cardHint: string // e.g. "Hand: 2 · one draw per turn" or "already drew this turn"
         canBuyCard: boolean
@@ -385,6 +423,7 @@ export function createHud(
       shopOnBuyFort = handlers.onBuyFort
       shopOnBuyCard = handlers.onBuyCard
       shopOnBuyRes = handlers.onBuyRes
+      shopPlayer.textContent = data.playerLabel
       shopResult.textContent = data.result
       shopStatus.innerHTML = `<div><span>round</span> ${data.round}/${data.rounds} &nbsp;·&nbsp; <span>score</span> ${data.scoreYou} — ${data.scoreFoe}</div><div><span>cash</span> $${data.money.toLocaleString()}</div>`
       shopCards.innerHTML = `<div class="srow"><div>Draw a stratagem</div><div class="own">${data.cardHint}</div><div class="price">$${data.cardCost.toLocaleString()}</div><button ${data.canBuyCard ? '' : 'disabled'}>DRAW</button></div>`
@@ -486,10 +525,30 @@ export function createHud(
       }
     },
     // Big white "You've been SKIPPED!" for three seconds (Skip Player card on you).
-    showSkipped() {
+    showSkipped(text = "You've been SKIPPED!") {
+      skippedText.textContent = text
       skipped.classList.add('on')
       clearTimeout(skipTimer)
       skipTimer = window.setTimeout(() => skipped.classList.remove('on'), 3000)
+    },
+    // Hotseat turn gate: names the player, waits for a click, then starts their turn.
+    showHandoff(player: number, onReady: () => void) {
+      handoffTitle.textContent = `PLAYER ${player} — YOUR TURN`
+      handoff.style.display = 'flex'
+      handoffBtn.onclick = () => {
+        handoff.style.display = 'none'
+        onReady()
+      }
+    },
+    // Boot / rematch mode picker: resolves with true for 2-player hotseat.
+    showModePicker(onPick: (twoPlayer: boolean) => void) {
+      modeEl.style.display = 'flex'
+      const pick = (two: boolean) => {
+        modeEl.style.display = 'none'
+        onPick(two)
+      }
+      mode1.onclick = () => pick(false)
+      mode2.onclick = () => pick(true)
     },
   }
 }

@@ -150,8 +150,21 @@ let scoreYou = 0
 let scoreFoe = 0
 const money = [START_CASH, START_CASH]
 let lastRoundResult = ''
-let lastIncome = 0 // resource income collected at the start of the player's current turn
+const lastIncome = [0, 0] // resource income collected at the start of each side's turn
 let roundSeed = 0
+// Hotseat: when true, side 1 is a second human sharing the keyboard instead of the AI.
+// Every "current player" flow keys off `turn`; the AI paths are gated behind isHuman.
+let twoPlayer = false
+function isHuman(s: number): boolean {
+  return s === 0 || twoPlayer
+}
+function nameOf(s: number): string {
+  return twoPlayer ? `Player ${s + 1}` : s === 0 ? 'you' : 'the enemy'
+}
+function capName(s: number): string {
+  const n = nameOf(s)
+  return n[0].toUpperCase() + n.slice(1)
+}
 // Match-persistent structure upgrades (taller main tower, extra towers).
 const forti: Fortifications[] = [
   { height: 0, towers: 0, barricade: 0 },
@@ -163,11 +176,11 @@ const forti: Fortifications[] = [
 // age counts owner-turns survived (drives crop maturation).
 type Planted = { cx: number; cz: number; type: number; baseYield: number; age: number }
 const planted: Planted[][] = [[], []]
-// Resources the player bought in the market this turn, awaiting placement (buy-then-
-// place). Carries over if unplaced. marketFull = the round-start market (weapons too).
-const pendingResources: number[] = []
+// Resources each side bought in the market, awaiting placement (buy-then-place).
+// Carries over if unplaced. marketFull = the round-start market (fortifications too).
+const pendingResources: number[][] = [[], []]
 let marketFull = false
-let roundStartPending = false
+const roundStartPending = [false, false] // each side's first turn of a round gets the full market
 
 // Crops ramp in over a couple turns (40% → 100%); mines/derricks pay full at once.
 function maturity(type: number, age: number): number {
@@ -185,10 +198,11 @@ function sideIncome(side: number): number {
   return Math.round(sum)
 }
 
-// Refresh the top status bar, always showing the player's current resource income rate
-// so it's obvious the economy is paying out (the turn-start message is hidden by the market).
+// Refresh the top status bar for the acting player: their cash and resource income
+// rate (the turn-start income message is hidden by the market, so keep this visible).
 function syncStatus(): void {
-  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[0], sideIncome(0))
+  const s = isHuman(turn) ? turn : 0 // during AI turns keep showing the human's numbers
+  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[s], sideIncome(s), twoPlayer ? s + 1 : 0)
 }
 
 // ---------------------------------------------------------------- stratagem cards
@@ -243,11 +257,11 @@ function drawCard(): CardId {
 }
 
 function buyCard(side: number): void {
-  if (money[side] < CARD_COST) return void (side === 0 && hud.msg('not enough cash'))
+  if (money[side] < CARD_COST) return void (isHuman(side) && hud.msg('not enough cash'))
   money[side] -= CARD_COST
   const id = drawCard()
   hand[side].push(id)
-  if (side === 0) {
+  if (isHuman(side)) {
     sfx.tick()
     syncStatus()
     refreshHand()
@@ -258,9 +272,9 @@ function buyCard(side: number): void {
 function playCard(side: number, idx: number): void {
   const id = hand[side][idx]
   if (!id) return
-  if (side === 0 && phase !== 'aim' && phase !== 'plant') return void hud.msg('play cards before firing')
+  if (isHuman(side) && phase !== 'aim' && phase !== 'plant') return void hud.msg('play cards before firing')
   hand[side].splice(idx, 1)
-  if (side === 0) {
+  if (isHuman(side)) {
     sfx.tick()
     refreshHand()
   }
@@ -295,30 +309,30 @@ function applyCard(side: number, id: CardId): void {
 // Bumper Crop: double this side's NEXT income payout (applied and cleared in startTurn).
 function cardBumper(side: number): void {
   incomeBoost[side] = 2
-  hud.msg(side === 0 ? 'bumper crop! next income doubled' : 'the enemy banks a bumper crop')
+  hud.msg(`${capName(side)} banked a bumper crop — next income doubled`)
 }
 
 // Skip Player: the opponent's entire next turn is skipped; the caster goes again.
 function cardSkip(side: number, foe: number): void {
   skipNext[foe] = true
-  hud.msg(side === 0 ? 'the enemy will be skipped — you go again' : 'you are about to be skipped!')
+  hud.msg(`${capName(side)} played Skip — ${nameOf(foe)} loses the next turn`)
 }
 
 // Force Field: raise an invisible one-hit shield over your castle (see crater()).
 function cardForcefield(side: number): void {
   forceFieldSide = side
-  hud.msg(side === 0 ? 'force field up — your castle is shielded' : 'the enemy raises a force field')
+  hud.msg(`${capName(side)} raised a force field`)
 }
 
 // Rebuild: rip half the enemy tower out and fly those voxels over to patch yours.
 function cardRebuild(side: number, foe: number): void {
   const { from, to } = world.rebuildTransfer(foe, side)
-  if (!from.length) return void (side === 0 && hud.msg('the enemy tower has nothing left to take'))
+  if (!from.length) return void (isHuman(side) && hud.msg(`${nameOf(foe)}'s tower has nothing left to take`))
   world.rebuild()
   hud.setIntegrity(world.integrity(0), world.integrity(1))
   spawnVoxelFlight(from, to, side === 0 ? 0xffb0a0 : 0xa0c0ff)
   sfx.rumble()
-  hud.msg(side === 0 ? 'rebuild! their tower patches yours' : 'the enemy cannibalises your tower')
+  hud.msg(`${capName(side)} cannibalised ${nameOf(foe)}'s tower to rebuild`)
 }
 
 // Cosmetic: a sample of the transferred voxels arcs from the source cells to the
@@ -345,7 +359,7 @@ function spawnVoxelFlight(from: THREE.Vector3[] | { x: number; y: number; z: num
 // Steal: move the enemy's richest producer (cells + income) to your side. No world
 // rebuild — producers render side-agnostically, so flipping ownership is just data.
 function cardSteal(side: number, foe: number): void {
-  if (!planted[foe].length) return void (side === 0 && hud.msg('enemy has nothing to steal'))
+  if (!planted[foe].length) return void (isHuman(side) && hud.msg(`${nameOf(foe)} has nothing to steal`))
   let best = 0
   for (let i = 1; i < planted[foe].length; i++) {
     if (planted[foe][i].baseYield > planted[foe][best].baseYield) best = i
@@ -355,8 +369,7 @@ function cardSteal(side: number, foe: number): void {
   planted[side].push(p)
   const wp = world.producers.find(q => q.cx === p.cx && q.cz === p.cz)
   if (wp) wp.side = side
-  if (side === 0) hud.msg(`stole their ${PRODUCER_SPECS[p.type].name}`)
-  else hud.msg(`enemy stole your ${PRODUCER_SPECS[p.type].name}`)
+  hud.msg(`${capName(side)} stole ${nameOf(foe)}'s ${PRODUCER_SPECS[p.type].name}`)
 }
 
 // Army: a cosmetic charge of runners across the field plus an instant raid that
@@ -367,9 +380,9 @@ function cardArmy(side: number, foe: number): void {
   if (loot > 0) {
     money[foe] = Math.max(0, money[foe] - loot)
     money[side] += loot
-    if (side === 0) syncStatus()
+    if (isHuman(side)) syncStatus()
   }
-  hud.msg(side === 0 ? `the army raids for $${loot.toLocaleString()}` : `enemy army raids you for $${loot.toLocaleString()}`)
+  hud.msg(`${capName(side)}'s army raided $${loot.toLocaleString()} from ${nameOf(foe)}`)
 }
 
 // Flying Toaster: a homing bonus strike on the enemy castle at Death's-Head power.
@@ -391,14 +404,14 @@ function cardToaster(side: number, foe: number): void {
   hud.setWorldView(false)
   hud.showCards(false)
   phase = 'fly'
-  hud.msg(side === 0 ? 'flying toaster inbound!' : 'enemy toaster incoming!')
+  hud.msg(`${capName(side)}'s flying toaster is inbound!`)
 }
 
 // Zombie King: a giant stomps the enemy's producers, seizing HALF of them (richest
 // first) — cells and income transfer to you. A cosmetic King marches the field.
 function cardZombie(side: number, foe: number): void {
   const foeProd = planted[foe]
-  if (!foeProd.length) return void (side === 0 && hud.msg('the enemy has no resources to seize'))
+  if (!foeProd.length) return void (isHuman(side) && hud.msg(`${nameOf(foe)} has no resources to seize`))
   const order = foeProd.map((_, i) => i).sort((a, b) => foeProd[b].baseYield - foeProd[a].baseYield)
   const takeCount = Math.ceil(foeProd.length / 2)
   const takeIdx = order.slice(0, takeCount).sort((a, b) => b - a) // descending → safe splice
@@ -414,28 +427,30 @@ function cardZombie(side: number, foe: number): void {
     firstCz = p.cz
   }
   spawnZombieKing(side, firstCx, firstCz)
-  hud.msg(side === 0 ? `the Zombie King seizes ${takeCount} of their producers!` : `the enemy Zombie King seizes ${takeCount} of yours!`)
+  hud.msg(`${capName(side)}'s Zombie King seized ${takeCount} of ${nameOf(foe)}'s producers!`)
 }
 
-// Ghost Tower. You (side 0): reposition your castle by hand; it stays visible to YOU
-// but the enemy AI keeps firing at the decoy (old) spot until a shell lands within 10
-// of the real tower. Enemy (side 1): auto-jumps and vanishes from YOUR view instead.
+// Ghost Tower. A HUMAN caster repositions their castle by hand; it stays visible to
+// them but the opponent can't find it — the AI fires at the decoy (old) spot, and in
+// hotseat the tower is simply hidden during the other player's turn (see startTurn) —
+// until a shell lands within 10 of the real tower. The 1P AI auto-jumps instead.
 function cardGhost(side: number): void {
   const oldT = world.forts[side]?.towers[0]
   ghostDecoy = oldT ? { cx: oldT.cx, cz: oldT.cz } : null
-  if (side === 0) {
-    // Hand-reposition; ghostSide is set when you confirm placement (placeCastle).
+  if (isHuman(side)) {
+    // Hand-reposition; ghostSide is set when placement is confirmed (placeCastle).
     ghostReposition = true
     beginCastlePlacement()
     return
   }
-  // Enemy: jump to a random spot on its half and hide the tower from the human.
+  // 1P AI: jump to a random spot on its half and hide the tower from the human.
   const cx = Math.round(Math.round(GX / 2) + 8 + Math.random() * (GX / 2 - 18))
   const cz = Math.round(8 + Math.random() * (GZ - 16))
   world.castleOverride[1] = { cx, cz }
-  rebuildRoundWorld()
+  world.moveFort(1, cx, cz, forti[1])
   world.hiddenFort = 1
   world.rebuild()
+  snapCannonToSeat(1)
   sides[1].cannon.group.visible = false
   ghostSide = 1
   hud.msg('the enemy tower vanishes!')
@@ -446,7 +461,7 @@ function revealGhost(): void {
   world.hiddenFort = -1
   sides[ghostSide].cannon.group.visible = true
   world.rebuild()
-  hud.msg(ghostSide === 0 ? 'the enemy has spotted your tower!' : 'the enemy ghost tower reappears!')
+  hud.msg(ghostSide === turn ? 'the ghost tower has been spotted!' : `${capName(1 - ghostSide)} found the ghost tower!`)
   ghostSide = -1
   ghostDecoy = null
 }
@@ -456,17 +471,17 @@ function revealGhost(): void {
 // and bills you $1,000 (paid now if you can, else carried as debt off future income).
 function cardFireworks(side: number, foe: number): void {
   money[foe] += 1000
-  if (side === 0) syncStatus()
+  syncStatus()
   fireworksSide = side
   setNight(true)
   spawnFireworks()
-  hud.msg(side === 0 ? "fireworks! the enemy pockets $1,000" : 'the enemy lights fireworks — you get $1,000')
+  hud.msg(`Fireworks! ${capName(foe)} pockets $1,000`)
 }
 let wind: Wind = { x: 0, z: 0 }
 let chargeT = 0
 let chargePower = 0
-let lastPlayerPower = 60
-let shotThisRound = false // power marker only shows after the first shot of a round
+const lastPlayerPower = [60, 60] // per human side: last shot power (aim marker)
+const shotThisRound = [false, false] // power marker only shows after a side's first shot
 let resolveT = 0
 let resolveTotal = 0 // wall-clock in 'resolve' (not reset by the settling guard) — safety net
 let flyTotal = 0 // wall-clock in 'fly' — forces a stuck shot (lingering proj/task) to resolve
@@ -1140,7 +1155,7 @@ function ensurePlantArrows(): THREE.Group {
 
 function plantHudMsg(): void {
   const spec = PRODUCER_SPECS[plantType]
-  const left = pendingResources.filter(t => t === plantType).length
+  const left = pendingResources[turn].filter(t => t === plantType).length
   hud.setSetupHint(`Placing ${spec.name} (${left} left, +$${spec.baseYield}/turn) — anywhere, even on water`, '← → ↑ ↓ move  ·  SPACE or ENTER to place  ·  ESC back to aim')
 }
 
@@ -1148,10 +1163,10 @@ function plantHudMsg(): void {
 // your aim step). You place units of that type with SPACE/ENTER; ESC returns to aim.
 function beginPlaceResource(type: number): void {
   if (phase !== 'aim' && phase !== 'plant') return
-  if (!pendingResources.includes(type)) return
+  if (!pendingResources[turn].includes(type)) return
   plantType = type
   phase = 'plant'
-  plantCX = GX / 4
+  plantCX = turn === 0 ? GX / 4 : (3 * GX) / 4 // start the cursor on the placer's half
   plantCZ = GZ / 2
   ensurePlantGhost().visible = true
   plantHudMsg()
@@ -1163,7 +1178,8 @@ function enterAim(): void {
   if (plantArrows) plantArrows.visible = false
   phase = 'aim'
   hud.setSetupHint('') // restore the power/fire bar — you're ready to aim now
-  hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+  hud.setPower(null, shotThisRound[turn] ? lastPlayerPower[turn] : null)
+  updateWeaponHud()
   refreshHand()
   refreshResources()
   syncStatus()
@@ -1171,22 +1187,22 @@ function enterAim(): void {
 
 function placeProducer(): void {
   const type = plantType
-  const idx = pendingResources.indexOf(type)
+  const idx = pendingResources[turn].indexOf(type)
   if (idx < 0) return void enterAim()
   const spec = PRODUCER_SPECS[type]
   const cx = Math.round(plantCX)
   const cz = Math.round(plantCZ)
   if (!world.canPlaceProducer(cx, cz, type)) return void hud.msg('overlaps another structure')
   // Already paid for in the market — placement is free.
-  pendingResources.splice(idx, 1)
-  planted[0].push({ cx, cz, type, baseYield: spec.baseYield, age: 0 })
-  world.buildProducer(cx, cz, 0, type, spec.baseYield, 0)
+  pendingResources[turn].splice(idx, 1)
+  planted[turn].push({ cx, cz, type, baseYield: spec.baseYield, age: 0 })
+  world.buildProducer(cx, cz, turn, type, spec.baseYield, 0)
   sfx.tick()
   refreshResources()
   syncStatus() // update the "resources +$X/turn" readout right away
   hud.msg(`${spec.name} placed — earning income each turn`)
   // Keep placing this type if you have more of it; otherwise back to aiming.
-  if (pendingResources.includes(type)) plantHudMsg()
+  if (pendingResources[turn].includes(type)) plantHudMsg()
   else enterAim()
 }
 
@@ -1256,18 +1272,28 @@ function aiPlaceCastle(): void {
   world.castleOverride[1] = { cx, cz }
 }
 
+// After a fort moves, its cannon must sit on the new tower right away (no slow slide).
+function snapCannonToSeat(s: number): void {
+  const seat = world.cannonSeat(s)
+  sides[s].cannon.group.position.set(seat.x, seat.y, seat.z)
+  sides[s].targetX = seat.x
+  sides[s].targetY = seat.y
+  sides[s].targetZ = seat.z
+  sides[s].fallV = 0
+}
+
 function beginCastlePlacement(): void {
   phase = 'castle'
-  // Start the cursor at the player's current castle so "keep it here" is one keypress.
-  const t = world.forts[0]?.towers[0]
-  castleCX = t ? t.cx : GX / 4
+  // Start the cursor at the acting player's current castle so "keep it" is one keypress.
+  const t = world.forts[turn]?.towers[0]
+  castleCX = t ? t.cx : turn === 0 ? GX / 4 : (3 * GX) / 4
   castleCZ = t ? t.cz : GZ / 2
   // The real tower is already built here, so mark it as such (no rebuild until you move).
   castleBuiltCX = t ? t.cx : -1
   castleBuiltCZ = t ? t.cz : -1
   castleBuildT = 0
   ensureCastleGhost().visible = false // the real (rebuilt) tower is the preview now
-  hud.banner('PLACE YOUR CASTLE')
+  hud.banner(twoPlayer ? `PLAYER ${turn + 1} — PLACE YOUR CASTLE` : 'PLACE YOUR CASTLE')
   hud.setSetupHint('Position your castle — it rides the terrain; go anywhere, even on water', '← → ↑ ↓ move  ·  SPACE or ENTER to set it here')
 }
 
@@ -1276,15 +1302,18 @@ function placeCastle(): void {
   const cz = Math.round(castleCZ)
   if (castleGhost) castleGhost.visible = false
   hud.setSetupHint('')
-  world.castleOverride[0] = { cx, cz }
-  rebuildRoundWorld() // rebuild the battlefield with both castles where they were placed
+  world.castleOverride[turn] = { cx, cz } // honoured by the next full regen (new round)
+  world.moveFort(turn, cx, cz, forti[turn]) // move the fort NOW, damage preserved
+  world.rebuild()
+  snapCannonToSeat(turn)
   sfx.tick()
   if (ghostReposition) {
-    // Ghost Tower: your tower stays visible to you but the enemy can't see it (it aims
-    // at the decoy) until a shell lands within 10 of the real one.
+    // Ghost Tower: the tower stays visible to its owner but the opponent can't see it
+    // (AI aims at the decoy; in hotseat it hides on the other player's turn) until a
+    // shell lands within 10 of the real one.
     ghostReposition = false
-    ghostSide = 0
-    hud.msg('ghost tower set — the enemy is blind to it')
+    ghostSide = turn
+    hud.msg('ghost tower set — the opponent is blind to it')
   }
   // Income already ran (startTurn opened the market) — go to your turn (aim). Place
   // resources from the left-hand list whenever you like before firing.
@@ -1302,16 +1331,16 @@ function updateCastle(dt: number): void {
   castleCZ = Math.max(CASTLE_HALF + 1, Math.min(GZ - CASTLE_HALF - 1, castleCZ))
   const cx = Math.round(castleCX)
   const cz = Math.round(castleCZ)
-  // Rebuild the world with the castle here so the real tower follows the cursor,
-  // riding up and down the existing terrain (the land itself never deforms).
-  // Throttled and only when the cell changes, to keep the regen affordable.
+  // Move the fort (voxels only — no world regen, damage preserved) so the real tower
+  // follows the cursor, riding up and down the existing terrain. Throttled per cell.
   castleBuildT += dt
   if ((cx !== castleBuiltCX || cz !== castleBuiltCZ) && castleBuildT > 0.09) {
     castleBuildT = 0
     castleBuiltCX = cx
     castleBuiltCZ = cz
-    world.castleOverride[0] = { cx, cz }
-    rebuildRoundWorld()
+    world.moveFort(turn, cx, cz, forti[turn])
+    world.rebuild()
+    snapCannonToSeat(turn)
   }
   // Blinking hairline arrows on all four sides of the tower, cueing the arrow keys —
   // shown whenever the castle is being positioned (round start or Ghost Tower).
@@ -1367,11 +1396,13 @@ function updateCamera(dt: number): void {
     k = 3
   } else if (phase === 'aim' || phase === 'charge') {
     if (worldView) {
-      desiredPos.set(GX / 2 - 115, 85, GZ / 2 + 70)
-      desiredLook.set(GX / 2 + 8, 6, GZ / 2)
+      // Pulled-back vantage from the acting player's own side of the field.
+      const m = turn === 0 ? 1 : -1
+      desiredPos.set(GX / 2 - m * 115, 85, GZ / 2 + m * 70)
+      desiredLook.set(GX / 2 + m * 8, 6, GZ / 2)
       k = 2.5
     } else {
-      aimCamera(0, desiredPos, desiredLook)
+      aimCamera(turn, desiredPos, desiredLook)
     }
   } else if (phase === 'aiThink' || phase === 'aiAim') {
     aimCamera(1, desiredPos, desiredLook)
@@ -1458,9 +1489,10 @@ function updateCamera(dt: number): void {
     camera.position.z += (Math.random() - 0.5) * shakeAmp
     shakeAmp *= Math.exp(-2.8 * dt)
   }
-  // The saucer's top-down view looks straight down; point "up" toward the enemy
-  // (+X) so the map reads consistently. Everything else uses world-up.
-  camera.up.set(topDownView ? 1 : 0, topDownView ? 0 : 1, 0)
+  // The saucer's top-down view looks straight down; point "up" toward the pilot's
+  // enemy (+X for P1, -X for P2) so the map reads consistently. Else world-up.
+  const upX = turn === 0 ? 1 : -1
+  camera.up.set(topDownView ? upX : 0, topDownView ? 0 : 1, 0)
   camera.lookAt(camLookCur)
 }
 
@@ -1474,7 +1506,7 @@ function renderSideView(): void {
   const active = phase === 'aim' || phase === 'charge'
   hud.showSide(active)
   if (!active) return
-  const s = sides[0]
+  const s = sides[turn]
   const p = s.cannon.group.position
   // Camera sits perpendicular to the firing direction, so the barrel points
   // screen-right and its pitch is the on-screen angle.
@@ -1509,10 +1541,10 @@ function updateHint(): void {
   const show = phase === 'aim' || phase === 'charge'
   hintLine.visible = show
   if (!show) return
-  const power = phase === 'charge' ? chargePower : lastPlayerPower
-  const vel = dirOf(0).multiplyScalar(speedOf(Math.max(8, power)))
+  const power = phase === 'charge' ? chargePower : lastPlayerPower[turn]
+  const vel = dirOf(turn).multiplyScalar(speedOf(Math.max(8, power)))
   const path: { x: number; y: number; z: number }[] = []
-  world.simShot(muzzleOf(0), vel, { x: 0, z: 0 }, path) // hint ignores wind — reading the wind is the game
+  world.simShot(muzzleOf(turn), vel, { x: 0, z: 0 }, path) // hint ignores wind — reading the wind is the game
   const pts = path.slice(0, 42).map(p => new THREE.Vector3(p.x, p.y, p.z))
   if (pts.length < 2) {
     hintLine.visible = false
@@ -1532,14 +1564,14 @@ function rerollWind(): void {
   hud.setWind(wind.x, wind.z)
 }
 
-// The in-game list shows only weapons you own (the full roster lives in the shop).
+// The in-game list shows only weapons the acting player owns (full roster in the shop).
 function visibleWeapons(): number[] {
-  const s = sides[0]
+  const s = sides[isHuman(turn) ? turn : 0]
   return WEAPONS.map((_, i) => i).filter(i => i === s.wsel || (s.arsenal.get(WEAPONS[i].id) ?? 0) > 0)
 }
 
 function updateWeaponHud(): void {
-  const s = sides[0]
+  const s = sides[isHuman(turn) ? turn : 0]
   hud.setWeapons(
     visibleWeapons().map(i => ({
       idx: i,
@@ -1551,7 +1583,7 @@ function updateWeaponHud(): void {
 }
 
 function cycleWeapon(dirn: number): void {
-  const s = sides[0]
+  const s = sides[turn]
   for (let i = 1; i <= WEAPONS.length; i++) {
     const j = (s.wsel + dirn * i + WEAPONS.length * i) % WEAPONS.length
     if ((s.arsenal.get(WEAPONS[j].id) ?? 0) > 0) {
@@ -1567,8 +1599,8 @@ function cycleWeapon(dirn: number): void {
 function selectWeapon(idx: number): void {
   if (phase !== 'aim' && phase !== 'charge') return
   if (idx < 0 || idx >= WEAPONS.length) return
-  if ((sides[0].arsenal.get(WEAPONS[idx].id) ?? 0) > 0) {
-    sides[0].wsel = idx
+  if ((sides[turn].arsenal.get(WEAPONS[idx].id) ?? 0) > 0) {
+    sides[turn].wsel = idx
     sfx.tick()
     updateWeaponHud()
   } else {
@@ -1580,7 +1612,7 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
   const s = sides[side]
   const ammo = s.arsenal.get(weapon.id) ?? 0
   if (Number.isFinite(ammo)) s.arsenal.set(weapon.id, Math.max(0, ammo - 1))
-  if (side === 0) {
+  if (isHuman(side)) {
     updateWeaponHud()
     clearLastTrails()
   }
@@ -1593,18 +1625,18 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
     const dir = dirOf(side)
     const cruiseY = Math.max(muzzle.y + 12, world.surfaceY(muzzle.x, muzzle.z) + 42)
     spawnProj(new THREE.Vector3(muzzle.x + dir.x * 5, cruiseY, muzzle.z + dir.z * 5), new THREE.Vector3(0, 0, 0), weapon, false, side)
-    if (side === 0) hud.msg('arrow keys fly the saucer · SPACE to detonate')
+    if (isHuman(side)) hud.msg('arrow keys fly the saucer · SPACE to detonate')
   } else {
     spawnProj(muzzle, dirOf(side).multiplyScalar(speedOf(power)), weapon, false, side)
-    if (side === 0 && weapon.kind === 'frisbee') hud.msg('← → curve the frisbee · ↑ ↓ flatten / dive the arc')
+    if (isHuman(side) && weapon.kind === 'frisbee') hud.msg('← → curve the frisbee · ↑ ↓ flatten / dive the arc')
   }
-  if (side === 0) shotThisRound = true
+  if (isHuman(side)) shotThisRound[side] = true
   flyHold = null
   worldView = false
   hud.setWorldView(false)
   hud.showCards(false)
   phase = 'fly'
-  hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+  hud.setPower(null, shotThisRound[side] ? lastPlayerPower[side] : null)
 }
 
 // Hand off to the other side — unless Skip Player flagged them, in which case their
@@ -1613,7 +1645,7 @@ function advanceTurn(): void {
   const next = 1 - turn
   if (skipNext[next]) {
     skipNext[next] = false
-    if (next === 0) hud.showSkipped()
+    if (isHuman(next)) hud.showSkipped(twoPlayer ? `Player ${next + 1}, you've been SKIPPED!` : "You've been SKIPPED!")
     else hud.msg('the enemy is skipped — go again!')
     startTurn(turn) // Skip's caster takes another turn
   } else {
@@ -1622,9 +1654,26 @@ function advanceTurn(): void {
 }
 
 function startTurn(s: number): void {
+  // Hotseat: gate every human turn behind a "pass the keyboard" screen so the other
+  // player's leftover keypresses can't act, and it's unmistakable whose turn it is.
+  if (twoPlayer && isHuman(s)) {
+    hud.showHandoff(s + 1, () => reallyStartTurn(s))
+  } else {
+    reallyStartTurn(s)
+  }
+}
+
+function reallyStartTurn(s: number): void {
   turn = s
   rerollWind()
   flyHold = null
+  // Ghost Tower in hotseat: the ghosted tower is visible only on its owner's turn —
+  // the opponent looks at the same screen, so hide it while they act.
+  if (twoPlayer && ghostSide >= 0) {
+    world.hiddenFort = s === ghostSide ? -1 : ghostSide
+    sides[ghostSide].cannon.group.visible = s === ghostSide
+    world.rebuild()
+  }
   // Age this side's producers a turn (crops mature), then pay out — scaled by how
   // intact each is (integrity) and how mature (crops ramp in over a couple turns).
   for (const p of planted[s]) p.age++
@@ -1632,30 +1681,30 @@ function startTurn(s: number): void {
   const income = Math.round(sideIncome(s) * incomeBoost[s])
   incomeBoost[s] = 1
   if (income > 0) money[s] += income
-  // Modest AI catch-up: the enemy doesn't optimise its spending like a human, so a
+  // Modest AI catch-up: the computer doesn't optimise its spending like a human, so a
   // small per-turn subsidy keeps it able to field weapons, producers AND stratagems.
-  if (s === 1) money[1] += 400
+  if (s === 1 && !twoPlayer) money[1] += 400
   // Pay down any Fireworks debt from this side's fresh income.
   if (fireworksDebt[s] > 0 && money[s] > 0) {
     const pay = Math.min(fireworksDebt[s], money[s])
     money[s] -= pay
     fireworksDebt[s] -= pay
   }
-  if (s === 0) {
-    const st = sides[0]
+  if (isHuman(s)) {
+    const st = sides[s]
     if ((st.arsenal.get(WEAPONS[st.wsel].id) ?? 0) <= 0) {
       st.wsel = 0 // out of the fancy stuff — back to missiles
-      updateWeaponHud()
     }
+    updateWeaponHud()
     syncStatus()
-    lastIncome = income // surfaced in the market (the msg here is hidden by the overlay)
+    lastIncome[s] = income // surfaced in the market (the msg here is hidden by the overlay)
     if (income > 0) hud.msg(`income +$${income.toLocaleString()}`)
     refreshHand()
     refreshResources()
     // Every turn opens the market (buy cards + resources; weapons only at round
     // start). Leaving it runs castle placement (round start) then resource placement.
-    openMarket(roundStartPending)
-    roundStartPending = false
+    openMarket(roundStartPending[s])
+    roundStartPending[s] = false
   } else {
     aiCards() // buy/play a stratagem first (so producers don't eat the card budget)
     aiPlant() // then grow the economy with what's left
@@ -1699,19 +1748,21 @@ function pickAiCard(s: number): CardId | null {
   return null
 }
 
-// Push the player's current hand to the HUD list (above the weapons).
+// Push the acting player's hand to the HUD list (above the weapons).
 function refreshHand(): void {
+  const s = isHuman(turn) ? turn : 0
   hud.setHand(
-    hand[0].map(id => ({ id, name: cardDef(id).name, blurb: cardDef(id).blurb, emoji: cardDef(id).emoji })),
-    { onPlay: (i: number) => playCard(0, i) }
+    hand[s].map(id => ({ id, name: cardDef(id).name, blurb: cardDef(id).blurb, emoji: cardDef(id).emoji })),
+    { onPlay: (i: number) => playCard(s, i) }
   )
 }
 
 // Push the player's UNPLACED resources (bought in the market, awaiting placement) to
 // the HUD list. Clicking a type places one; the list empties as you place them.
 function refreshResources(): void {
+  const s = isHuman(turn) ? turn : 0
   const counts = new Map<number, number>()
-  for (const t of pendingResources) counts.set(t, (counts.get(t) ?? 0) + 1)
+  for (const t of pendingResources[s]) counts.set(t, (counts.get(t) ?? 0) + 1)
   hud.setResources(
     PRODUCER_TYPES.filter(t => (counts.get(t) ?? 0) > 0).map(t => ({ type: t, name: PRODUCER_SPECS[t].name, count: counts.get(t)! })),
     { onSelect: (type: number) => beginPlaceResource(type) }
@@ -1851,15 +1902,16 @@ function steerFrisbee(p: Proj, h: number): void {
 }
 
 // The Flying Saucer hovers and is flown like a drone in the top-down view: arrows
-// glide it across the map (up = toward the enemy), altitude holds steady.
+// glide it across the map (up = toward the pilot's enemy), altitude holds steady.
 function steerSaucer(p: Proj, h: number): void {
   const SPEED = 17
+  const m = p.side === 0 ? 1 : -1 // the top-down camera flips for Player 2
   let tx = 0
   let tz = 0
-  if (keys.has('ArrowUp')) tx += 1 // screen-up = toward the enemy (+x)
-  if (keys.has('ArrowDown')) tx -= 1
-  if (keys.has('ArrowRight')) tz += 1
-  if (keys.has('ArrowLeft')) tz -= 1
+  if (keys.has('ArrowUp')) tx += m // screen-up = toward the pilot's enemy
+  if (keys.has('ArrowDown')) tx -= m
+  if (keys.has('ArrowRight')) tz += m
+  if (keys.has('ArrowLeft')) tz -= m
   const len = Math.hypot(tx, tz)
   if (len > 0) {
     tx /= len
@@ -1874,7 +1926,7 @@ function steerSaucer(p: Proj, h: number): void {
 function stepProjectiles(h: number): void {
   for (let i = projs.length - 1; i >= 0; i--) {
     const p = projs[i]
-    const piloted = i === 0 && p.side === 0
+    const piloted = i === 0 && isHuman(p.side) && p.side === turn
     // Flying Saucer: a hovering drone — no gravity/wind, doesn't crash into terrain
     // (it just holds above it); it detonates only when the player presses space.
     if (p.weapon.kind === 'saucer') {
@@ -1996,9 +2048,11 @@ function finishResolve(force = false): void {
     lastRoundResult =
       youDead && foeDead
         ? `Round ${round} drawn — mutual destruction.`
-        : foeDead
-          ? `Round ${round} won! Plundered half their treasury ($${plunder.toLocaleString()})${cardNote}.`
-          : `Round ${round} lost — the enemy took half your treasury ($${plunder.toLocaleString()})${cardNote}.`
+        : twoPlayer
+          ? `Round ${round}: ${foeDead ? 'Player 1' : 'Player 2'} wins! Plundered half of ${foeDead ? "Player 2's" : "Player 1's"} treasury ($${plunder.toLocaleString()})${cardNote}.`
+          : foeDead
+            ? `Round ${round} won! Plundered half their treasury ($${plunder.toLocaleString()})${cardNote}.`
+            : `Round ${round} lost — the enemy took half your treasury ($${plunder.toLocaleString()})${cardNote}.`
     const losers: number[] = []
     if (youDead) losers.push(0)
     if (foeDead) losers.push(1)
@@ -2020,9 +2074,11 @@ function finishResolve(force = false): void {
     endInfo =
       losers.length === 2
         ? { title: 'MUTUAL DESTRUCTION', sub: 'Both forts have fallen.', center }
-        : youDead
-          ? { title: 'ROUND LOST', sub: 'Your fort has crumbled to rubble.', center }
-          : { title: 'ROUND WON', sub: 'The enemy fort is demolished.', center }
+        : twoPlayer
+          ? { title: `PLAYER ${youDead ? 2 : 1} WINS THE ROUND`, sub: `Player ${youDead ? 1 : 2}'s fort has crumbled to rubble.`, center }
+          : youDead
+            ? { title: 'ROUND LOST', sub: 'Your fort has crumbled to rubble.', center }
+            : { title: 'ROUND WON', sub: 'The enemy fort is demolished.', center }
     phase = 'end'
     endT = 0
     endShown = false
@@ -2030,11 +2086,11 @@ function finishResolve(force = false): void {
     syncStatus()
   } else if (wasCard) {
     // A played-card strike that didn't collapse anything — the shooter still shoots.
-    phase = turn === 0 ? 'aim' : 'aiThink'
-    if (turn === 0) {
-      hud.setPower(null, shotThisRound ? lastPlayerPower : null)
+    phase = isHuman(turn) ? 'aim' : 'aiThink'
+    if (isHuman(turn)) {
+      hud.setPower(null, shotThisRound[turn] ? lastPlayerPower[turn] : null)
       hud.showCards(true)
-      hud.banner('YOUR TURN', 'take your shot')
+      hud.banner(twoPlayer ? `PLAYER ${turn + 1} — TAKE YOUR SHOT` : 'YOUR TURN', 'take your shot')
     } else {
       aiT = 0
       aiPlanned = null
@@ -2100,7 +2156,8 @@ function setupRoundWorld(): void {
   aiErr = 16
   endInfo = null
   flyHold = null
-  shotThisRound = false
+  shotThisRound[0] = false
+  shotThisRound[1] = false
   clearLastTrails()
   hud.setIntegrity(1, 1)
   updateWeaponHud()
@@ -2149,15 +2206,15 @@ function aiShop(): void {
 }
 
 const FORT_UPGRADES = [
-  { name: 'Defensive berm (blocks flat shots)', price: 2500, max: 2, owned: () => forti[0].barricade, apply: () => (forti[0].barricade += 1) },
-  { name: 'Raise main tower (+6 levels)', price: 5000, max: 2, owned: () => forti[0].height / 6, apply: () => (forti[0].height += 6) },
-  { name: 'Extra tower', price: 8000, max: 2, owned: () => forti[0].towers, apply: () => (forti[0].towers += 1) },
+  { name: 'Defensive berm (blocks flat shots)', price: 2500, max: 2, owned: (s: number) => forti[s].barricade, apply: (s: number) => (forti[s].barricade += 1) },
+  { name: 'Raise main tower (+6 levels)', price: 5000, max: 2, owned: (s: number) => forti[s].height / 6, apply: (s: number) => (forti[s].height += 6) },
+  { name: 'Extra tower', price: 8000, max: 2, owned: (s: number) => forti[s].towers, apply: (s: number) => (forti[s].towers += 1) },
 ]
 
 function shopItems() {
   return WEAPONS.filter(w => w.price !== undefined).map(w => ({
     name: w.name,
-    owned: sides[0].arsenal.get(w.id) ?? 0,
+    owned: sides[turn].arsenal.get(w.id) ?? 0,
     price: w.price!,
     pack: w.pack ?? 1,
   }))
@@ -2166,9 +2223,9 @@ function shopItems() {
 function shopForts() {
   return FORT_UPGRADES.map(u => ({
     name: u.name,
-    owned: u.owned(),
+    owned: u.owned(turn),
     price: u.price,
-    maxed: u.owned() >= u.max,
+    maxed: u.owned(turn) >= u.max,
   }))
 }
 
@@ -2176,25 +2233,31 @@ function shopResources() {
   return PRODUCER_TYPES.map(t => ({
     name: `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield}/turn)`,
     price: PRODUCER_SPECS[t].cost,
-    queued: pendingResources.filter(x => x === t).length,
+    queued: pendingResources[turn].filter(x => x === t).length,
   }))
 }
 
 function refreshShop(): void {
   syncStatus()
+  const s = turn
   hud.showShop(
     {
       round,
       rounds: ROUNDS,
       scoreYou,
       scoreFoe,
-      money: money[0],
-      result: marketFull ? lastRoundResult : lastIncome > 0 ? `Your resources paid +$${lastIncome.toLocaleString()} this turn.` : 'No resource income yet — buy resources below and place them on your turn.',
+      money: money[s],
+      result: marketFull
+        ? lastRoundResult
+        : lastIncome[s] > 0
+          ? `Your resources paid +$${lastIncome[s].toLocaleString()} this turn.`
+          : 'No resource income yet — buy resources below and place them on your turn.',
       full: marketFull,
       startLabel: marketFull ? 'START ROUND' : 'DONE — PLACE & AIM',
+      playerLabel: twoPlayer ? `PLAYER ${s + 1}` : '',
       cardCost: CARD_COST,
-      cardHint: `hand ${hand[0].length} · buy as many as you like`,
-      canBuyCard: money[0] >= CARD_COST,
+      cardHint: `hand ${hand[s].length} · buy as many as you like`,
+      canBuyCard: money[s] >= CARD_COST,
       resources: shopResources(),
       items: shopItems(),
       forts: shopForts(),
@@ -2203,7 +2266,7 @@ function refreshShop(): void {
       onBuy: buyWeapon,
       onBuyFort: buyFort,
       onBuyCard: () => {
-        buyCard(0)
+        buyCard(s)
         refreshShop()
       },
       onBuyRes: buyResource,
@@ -2216,14 +2279,13 @@ function refreshShop(): void {
 function buyResource(index: number): void {
   const type = PRODUCER_TYPES[index]
   const spec = PRODUCER_SPECS[type]
-  if (money[0] < spec.cost) return void hud.msg('not enough cash')
-  money[0] -= spec.cost
-  pendingResources.push(type)
+  if (money[turn] < spec.cost) return void hud.msg('not enough cash')
+  money[turn] -= spec.cost
+  pendingResources[turn].push(type)
   sfx.tick()
   refreshShop()
 }
 
-// Leaving the market: round-start goes through castle placement first, then both
 // Leaving the market: round-start goes through castle placement first; otherwise
 // straight to your turn (aim), where you place resources from the list and/or fire.
 function onMarketDone(): void {
@@ -2242,9 +2304,9 @@ function openMarket(full: boolean): void {
 function buyWeapon(index: number): void {
   const forSale = WEAPONS.filter(w => w.price !== undefined)
   const w = forSale[index]
-  if (!w || money[0] < w.price!) return
-  money[0] -= w.price!
-  sides[0].arsenal.set(w.id, (sides[0].arsenal.get(w.id) ?? 0) + (w.pack ?? 1))
+  if (!w || money[turn] < w.price!) return
+  money[turn] -= w.price!
+  sides[turn].arsenal.set(w.id, (sides[turn].arsenal.get(w.id) ?? 0) + (w.pack ?? 1))
   sfx.tick()
   updateWeaponHud()
   refreshShop()
@@ -2252,11 +2314,19 @@ function buyWeapon(index: number): void {
 
 function buyFort(index: number): void {
   const u = FORT_UPGRADES[index]
-  if (!u || money[0] < u.price || u.owned() >= u.max) return
-  money[0] -= u.price
-  u.apply()
+  if (!u || money[turn] < u.price || u.owned(turn) >= u.max) return
+  money[turn] -= u.price
+  u.apply(turn)
+  // Construction happens on the spot, behind the shop — scoped to the buyer's own
+  // fort so mid-round purchases never regenerate (and heal) the battlefield.
+  const t = world.forts[turn]?.towers[0]
+  if (t) {
+    if (index === 0) world.buildBarricade(t.cx, t.cz, turn === 0 ? 1 : -1, forti[turn].barricade)
+    else world.moveFort(turn, t.cx, t.cz, forti[turn]) // re-raise towers with the upgrade
+    world.rebuild()
+    snapCannonToSeat(turn)
+  }
   sfx.tick()
-  rebuildRoundWorld() // construction happens on the spot, behind the shop
   refreshShop()
 }
 
@@ -2267,11 +2337,14 @@ function nextRound(): void {
   round++
   money[0] += ROUND_STIPEND
   money[1] += ROUND_STIPEND
-  aiPlaceCastle() // the enemy positions its own castle for the new round
-  aiShop() // the enemy restocks weapons/fortifications (round start only)
+  if (!twoPlayer) {
+    aiPlaceCastle() // the computer positions its own castle for the new round
+    aiShop() // ...and restocks weapons/fortifications (round start only)
+  }
   setupRoundWorld()
-  // The round's first player turn gets the FULL market (weapons/forts) + castle placement.
-  roundStartPending = true
+  // Each side's first turn of the round gets the FULL market + castle placement.
+  roundStartPending[0] = true
+  roundStartPending[1] = true
   startTurn(0)
 }
 
@@ -2293,7 +2366,12 @@ function fullReset(): void {
     forti[s].towers = 0
     forti[s].barricade = 0
     planted[s] = []
+    pendingResources[s] = []
+    hand[s] = []
+    lastIncome[s] = 0
+    shotThisRound[s] = false
   }
+  hud.setFortLabels(twoPlayer ? 'Player 1 fort' : 'Your fort', twoPlayer ? 'Player 2 fort' : 'Enemy fort')
   nextRound()
 }
 
@@ -2319,7 +2397,7 @@ window.addEventListener('keydown', e => {
     } else if (phase === 'fly' && !e.repeat) {
       // Detonate a piloted Flying Saucer wherever it's hovering.
       const lead = projs[0]
-      if (lead && lead.side === 0 && lead.weapon.kind === 'saucer') detonateSaucer(lead)
+      if (lead && isHuman(lead.side) && lead.side === turn && lead.weapon.kind === 'saucer') detonateSaucer(lead)
     }
   }
   if (e.code === 'Enter' && phase === 'castle') placeCastle()
@@ -2338,9 +2416,9 @@ window.addEventListener('keyup', e => {
   keys.delete(e.code)
   if (e.code === 'Space' && phase === 'charge') {
     const power = Math.max(8, chargePower)
-    lastPlayerPower = power
-    const weapon = WEAPONS[sides[0].wsel]
-    fireShot(0, weapon, power)
+    lastPlayerPower[turn] = power
+    const weapon = WEAPONS[sides[turn].wsel]
+    fireShot(turn, weapon, power)
   }
 })
 
@@ -2353,7 +2431,7 @@ let elHoldT = 0
 
 function updatePlayerAim(dt: number): void {
   if (phase !== 'aim' && phase !== 'charge') return
-  const s = sides[0]
+  const s = sides[turn]
   const fine = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 0.28 : 1
   // Exponential acceleration: a quick tap barely nudges the barrel; the longer you
   // hold, the faster it sweeps. The hold timer resets the instant you let go of the
@@ -2368,7 +2446,7 @@ function updatePlayerAim(dt: number): void {
   if (keys.has('ArrowRight')) s.az += azRate
   if (keys.has('ArrowUp')) s.el = Math.min(85 * DEG, s.el + elRate)
   if (keys.has('ArrowDown')) s.el = Math.max(12 * DEG, s.el - elRate)
-  applyCannonPose(0)
+  applyCannonPose(turn)
   let azDeg = (s.az * 180) / Math.PI
   while (azDeg > 180) azDeg -= 360
   while (azDeg < -180) azDeg += 360
@@ -2377,7 +2455,7 @@ function updatePlayerAim(dt: number): void {
     chargeT += dt
     const cyc = (chargeT * 62) % 200
     chargePower = cyc <= 100 ? cyc : 200 - cyc
-    hud.setPower(chargePower, shotThisRound ? lastPlayerPower : null)
+    hud.setPower(chargePower, shotThisRound[turn] ? lastPlayerPower[turn] : null)
   }
 }
 
@@ -2494,8 +2572,11 @@ function tick(now: number): void {
       endShown = true
       const decided = round >= ROUNDS || scoreYou > ROUNDS / 2 || scoreFoe > ROUNDS / 2
       if (decided) {
-        const title = scoreYou > scoreFoe ? 'VICTORY' : scoreYou < scoreFoe ? 'DEFEAT' : 'DRAW'
-        hud.showEnd(title, `Final score ${scoreYou} — ${scoreFoe} over ${round} rounds.`, fullReset)
+        const title = twoPlayer
+          ? scoreYou === scoreFoe ? 'DRAW' : `PLAYER ${scoreYou > scoreFoe ? 1 : 2} WINS`
+          : scoreYou > scoreFoe ? 'VICTORY' : scoreYou < scoreFoe ? 'DEFEAT' : 'DRAW'
+        // Rematch returns to the mode picker so you can switch 1P/2P between matches.
+        hud.showEnd(title, `Final score ${scoreYou} — ${scoreFoe} over ${round} rounds.`, showModePicker)
       } else {
         nextRound()
       }
@@ -2524,8 +2605,21 @@ function tick(now: number): void {
 
 let skipRender = false
 
-fullReset()
-hud.banner('SCORCHED VOXELS', 'demolish the enemy fort before yours falls', 2600)
+// Boot: pick a mode first (1 Player vs computer / 2 Players hotseat), then the match
+// starts. The Rematch button routes back here so the mode can change between matches.
+function showModePicker(): void {
+  phase = 'shop' // inert while the picker is up — no aiming/firing behind the overlay
+  hud.showModePicker(two => {
+    twoPlayer = two
+    fullReset()
+    hud.banner(
+      'SCORCHED VOXELS',
+      two ? 'two players, one keyboard — demolish the other castle' : 'demolish the enemy fort before yours falls',
+      2600
+    )
+  })
+}
+showModePicker()
 renderer.setAnimationLoop(tick)
 
 // Debug hook: lets automated tooling drive the simulation when rAF is throttled
@@ -2545,6 +2639,7 @@ declare global {
       playCard: (i: number) => void
       hand: () => string[]
       sampleDraws: (n: number) => Record<string, number>
+      setMode: (two: boolean) => void
     }
   }
 }
@@ -2586,7 +2681,7 @@ window.__sv = {
   // Test hooks: select the first pending resource (if not already placing), position
   // the cursor, and place; and return to aim.
   plantAt(cx: number, cz: number) {
-    if (phase !== 'plant' && pendingResources.length) beginPlaceResource(pendingResources[0])
+    if (phase !== 'plant' && pendingResources[turn].length) beginPlaceResource(pendingResources[turn][0])
     plantCX = cx
     plantCZ = cz
     placeProducer()
@@ -2601,15 +2696,15 @@ window.__sv = {
   craterAt(cx: number, cz: number, r: number) {
     crater(new THREE.Vector3(cx, world.surfaceY(cx, cz), cz), r, true)
   },
-  // Card test hooks: add a specific card to the player's hand and play by index.
+  // Card test hooks: add a card to the ACTING player's hand and play by index.
   giveCard(id: string) {
-    hand[0].push(id as CardId)
+    hand[isHuman(turn) ? turn : 0].push(id as CardId)
     refreshHand()
   },
   playCard(i: number) {
-    playCard(0, i)
+    playCard(isHuman(turn) ? turn : 0, i)
   },
-  hand: () => [...hand[0]],
+  hand: () => [...hand[isHuman(turn) ? turn : 0]],
   sampleDraws(n: number) {
     const counts: Record<string, number> = {}
     for (let i = 0; i < n; i++) {
@@ -2617,5 +2712,10 @@ window.__sv = {
       counts[id] = (counts[id] ?? 0) + 1
     }
     return counts
+  },
+  // Mode test hook: pick 1P/2P headlessly (the UI picker does the same).
+  setMode(two: boolean) {
+    twoPlayer = two
+    fullReset()
   },
 }
