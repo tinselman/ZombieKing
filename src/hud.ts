@@ -51,15 +51,19 @@ const CSS = `
 #sc-handoff p { font-size: 16px; color: #7a838d; margin: 0 0 26px; }
 #sc-handoff button { font-size: 16px; font-weight: 700; letter-spacing: 0.08em; padding: 12px 40px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-handoff button:hover { background: #454c55; }
-/* Mode picker: shown at boot and after each match (Rematch routes back here). */
-#sc-mode { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(244,246,248,0.94); backdrop-filter: blur(10px); pointer-events: auto; z-index: 8; }
-#sc-mode h1 { font-size: 48px; font-weight: 800; letter-spacing: 0.06em; color: #2c3138; margin: 0 0 4px; }
-#sc-mode p { font-size: 14px; color: #7a838d; margin: 0 0 30px; letter-spacing: 0.04em; }
+/* Mode picker / title screen: shown at boot and after each match (Rematch routes
+   back here). Old-English blackletter title in neon green on black. */
+#sc-mode { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #000; pointer-events: auto; z-index: 8; }
+#sc-mode h1 { font-family: 'UnifrakturMaguntia', 'Old English Text MT', 'Luminari', fantasy, serif; font-weight: 400; color: #39ff14; text-align: center; margin: 0 0 18px; line-height: 1.04; text-shadow: 0 0 8px rgba(57,255,20,0.9), 0 0 24px rgba(57,255,20,0.55), 0 0 64px rgba(57,255,20,0.35); }
+#sc-mode h1 .rt { display: block; font-size: 40px; letter-spacing: 0.03em; }
+#sc-mode h1 .zk { display: block; font-size: 96px; letter-spacing: 0.02em; }
+#sc-mode p { font-size: 13px; color: #8fdd80; margin: 0 0 34px; letter-spacing: 0.06em; text-align: center; max-width: 560px; line-height: 1.5; }
+#sc-mode p b { color: #39ff14; letter-spacing: 0.12em; }
 #sc-mode .modes { display: flex; gap: 18px; }
-#sc-mode .modes button { width: 250px; padding: 22px 18px; border-radius: 14px; border: 1px solid #c4cad1; background: rgba(255,255,255,0.95); color: #2c3138; cursor: pointer; text-align: center; }
-#sc-mode .modes button:hover { border-color: #2c3138; background: #fff; transform: translateY(-2px); }
-#sc-mode .modes .mt { display: block; font-size: 20px; font-weight: 800; letter-spacing: 0.04em; margin-bottom: 6px; }
-#sc-mode .modes .ms { display: block; font-size: 12.5px; color: #7a838d; line-height: 1.45; }
+#sc-mode .modes button { width: 250px; padding: 22px 18px; border-radius: 14px; border: 1px solid #1f6b12; background: #050a04; color: #baffae; cursor: pointer; text-align: center; }
+#sc-mode .modes button:hover { border-color: #39ff14; background: #0a140a; transform: translateY(-2px); box-shadow: 0 0 18px rgba(57,255,20,0.35); }
+#sc-mode .modes .mt { display: block; font-size: 20px; font-weight: 800; letter-spacing: 0.04em; margin-bottom: 6px; color: #39ff14; }
+#sc-mode .modes .ms { display: block; font-size: 12.5px; color: #7fae74; line-height: 1.45; }
 #sc-shop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(244,246,248,0.82); backdrop-filter: blur(8px); pointer-events: auto; }
 #sc-shop .box { background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 14px; padding: 24px 28px; width: 780px; max-height: 88vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(40,50,60,0.12); color: #2c3138; }
 #sc-shopList { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
@@ -166,7 +170,9 @@ export function createHud(
     <div id="sc-help">←→↑↓ aim &nbsp;·&nbsp; shift = fine &nbsp;·&nbsp; V = world view &nbsp;·&nbsp; tab / 1–9 weapon &nbsp;·&nbsp; space = power &amp; fire</div>
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-handoff"><h1></h1><p>Pass the keyboard — everything on screen is now yours.</p><button>START TURN</button></div>
-    <div id="sc-mode"><h1>SCORCHED VOXELS</h1><p>ZOMBIE KING EDITION</p><div class="modes">
+    <div id="sc-mode"><h1><span class="rt">Return of the</span><span class="zk">ZOMBIE KING</span></h1>
+    <p><b>WARNING:</b> This game includes massive violence, death, destruction, and war. Play at your own risk.</p>
+    <div class="modes">
       <button id="sc-mode1"><span class="mt">1 PLAYER</span><span class="ms">Battle the computer — it builds, schemes, and shoots back.</span></button>
       <button id="sc-mode2"><span class="mt">2 PLAYERS</span><span class="ms">Hotseat duel — share the keyboard, take turns, last castle standing wins.</span></button>
     </div></div>

@@ -2615,7 +2615,7 @@ function showModePicker(): void {
     twoPlayer = two
     fullReset()
     hud.banner(
-      'SCORCHED VOXELS',
+      'RETURN OF THE ZOMBIE KING',
       two ? 'two players, one keyboard — demolish the other castle' : 'demolish the enemy fort before yours falls',
       2600
     )
