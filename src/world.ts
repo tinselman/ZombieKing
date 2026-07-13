@@ -849,8 +849,11 @@ export class World {
           const c = this.grid[i]
           if (c !== FORT_A && c !== FORT_B) continue
           fortCells.push(i)
+          // Rooted on ANY solid ground — terrain, water, a berm, or a producer bed.
+          // (Castles may be placed anywhere now, so water/crops must count as footing
+          // or a fort standing there shreds on the first support pass.)
           const below = y === 0 ? TERRAIN : this.grid[i - GX * GZ]
-          if (y === 0 || below === TERRAIN) {
+          if (y === 0 || (below !== EMPTY && below !== FORT_A && below !== FORT_B)) {
             supported.add(i)
             queue.push(i)
           }
@@ -1054,8 +1057,10 @@ export class World {
               sumZ += z
               if (y < minY) minY = y
               if (y > maxY) maxY = y
+              // Footing = any solid ground (terrain, water, berm, producer bed) —
+              // matches updateSupport's rooting rule for castles placed anywhere.
               const below = y === 0 ? TERRAIN : this.grid[this.idx(x, y - 1, z)]
-              if (below === TERRAIN) {
+              if (below !== EMPTY && below !== FORT_A && below !== FORT_B) {
                 baseSumX += x
                 baseSumZ += z
                 baseCols.push({ x, z })
