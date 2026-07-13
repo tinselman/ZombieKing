@@ -17,6 +17,7 @@ export const BARRICADE = 5 // bought defensive berm in front of a fort — soaks
 export const CROP = 6 // income-producer (crop bed) planted on a side's land
 export const MINE = 7 // income-producer (ore mine) — smaller, richer than a crop
 export const DERRICK = 8 // income-producer (oil derrick) — smallest, richest
+export const CEMETERY = 9 // no income — launches ghosts when its owner plays Full Moon
 
 // Per-type producer geometry & economy. half = footprint radius (half=4 → 9×9),
 // tall = voxel height, baseYield = full per-turn income, cost = plant price.
@@ -25,6 +26,7 @@ export const PRODUCER_SPECS: Record<number, { half: number; tall: number; baseYi
   [CROP]: { half: 4, tall: 2, baseYield: 150, cost: 800, name: 'Crop farm', matures: true },
   [MINE]: { half: 2, tall: 3, baseYield: 320, cost: 1500, name: 'Ore mine', matures: false },
   [DERRICK]: { half: 1, tall: 6, baseYield: 560, cost: 3000, name: 'Oil derrick', matures: false },
+  [CEMETERY]: { half: 3, tall: 2, baseYield: 0, cost: 1000, name: 'Cemetery', matures: false },
 }
 
 export type Vec3 = { x: number; y: number; z: number }
@@ -425,7 +427,7 @@ export class World {
         const sy = this.surfaceY(x, z)
         if (sy < 0) return false
         const top = this.cellAt(x, sy, z)
-        if (top === FORT_A || top === FORT_B || top === BARRICADE || top === CROP || top === MINE || top === DERRICK) return false
+        if (top === FORT_A || top === FORT_B || top === BARRICADE || top === CROP || top === MINE || top === DERRICK || top === CEMETERY) return false
       }
     }
     return true
@@ -567,6 +569,34 @@ export class World {
     }
     this.dirty = true
     return { from, to }
+  }
+
+  // Ghost strike (Full Moon): knock out `frac` of a side's STANDING fort voxels,
+  // top-first so the tower visibly shortens. frac>=1 razes it entirely (a collapse).
+  // The voxels are removed cleanly (no settling debris — the ghosts spirit them away,
+  // and re-settling bricks would just restack onto the tower and heal it). Returns the
+  // removed positions so the caller can play a spooky poof there.
+  damageFortFraction(side: number, frac: number, rand: () => number): Vec3[] {
+    const f = this.forts[side]
+    if (!f) return []
+    const cells: Vec3[] = []
+    for (const t of f.towers) {
+      for (let y = t.rubbleY; y < GY; y++)
+        for (let x = t.cx - FORT_HALF - 1; x <= t.cx + FORT_HALF + 1; x++)
+          for (let z = t.cz - FORT_HALF - 1; z <= t.cz + FORT_HALF + 1; z++)
+            if (this.cellAt(x, y, z) === f.cell) cells.push({ x, y, z })
+    }
+    cells.sort((a, b) => b.y - a.y) // top of the towers first
+    const n = Math.min(cells.length, Math.ceil(cells.length * frac))
+    const removed: Vec3[] = []
+    for (let k = 0; k < n; k++) {
+      const c = cells[k]
+      this.grid[this.idx(c.x, c.y, c.z)] = EMPTY
+      removed.push(c)
+    }
+    this.updateSupport(rand)
+    this.dirty = true
+    return removed
   }
 
   // Remove a placed producer entirely (Steal / Zombie King seizures): its surviving
@@ -1292,6 +1322,10 @@ export class World {
             // Oil derrick: near-black industrial with a warm-brown cast.
             const v = 0.2 + h * 0.08
             col.setRGB(v * 1.15, v * 0.95, v * 0.8)
+          } else if (c === CEMETERY) {
+            // Cemetery: cold desaturated purple-gray, like weathered headstones.
+            const v = 0.4 + h * 0.12
+            col.setRGB(v * 0.86, v * 0.8, v * 0.98)
           } else {
             // Enemy castle: light blue.
             const v = 0.92 + h * 0.05

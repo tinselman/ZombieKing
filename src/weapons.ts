@@ -11,6 +11,7 @@ export type WeaponKind =
   | 'leap'
   | 'funky'
   | 'tracer'
+  | 'flashlight' // not fired — the defender shines it to repel Full Moon ghosts
   | 'frisbee' // player steers the arc mid-flight
   | 'saucer' // player pilots a drone top-down, space detonates
 
@@ -41,6 +42,7 @@ export const WEAPONS: WeaponDef[] = [
   { id: 'babyroller', name: 'Baby Roller', ammo: 0, blast: 3.5, kind: 'roller', price: 500, pack: 2 },
   { id: 'roller', name: 'Roller', ammo: 0, blast: 5.5, kind: 'roller', price: 900, pack: 2 },
   { id: 'heavyroller', name: 'Heavy Roller', ammo: 0, blast: 8.0, kind: 'roller', price: 1800, pack: 1 },
+  { id: 'flashlight', name: 'Flashlight', ammo: 0, blast: 0, kind: 'flashlight', price: 1500, pack: 1 },
 ]
 
 // Bomblets spawned by the Funky Bomb (not purchasable, not in the roster).
