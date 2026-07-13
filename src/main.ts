@@ -1210,11 +1210,13 @@ function updatePlant(dt: number): void {
   if (phase !== 'plant') return
   const half = PRODUCER_SPECS[plantType].half
   // Coarse positioning — a fixed speed (Shift = slow) is plenty for a small plot.
+  // Screen-relative arrows: mirrored for Player 2 (camera sits on their side).
+  const m = turn === 0 ? 1 : -1
   const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 10 : 30) * dt
-  if (keys.has('ArrowUp')) plantCX += speed
-  if (keys.has('ArrowDown')) plantCX -= speed
-  if (keys.has('ArrowRight')) plantCZ += speed
-  if (keys.has('ArrowLeft')) plantCZ -= speed
+  if (keys.has('ArrowUp')) plantCX += m * speed
+  if (keys.has('ArrowDown')) plantCX -= m * speed
+  if (keys.has('ArrowRight')) plantCZ += m * speed
+  if (keys.has('ArrowLeft')) plantCZ -= m * speed
   // Resources may be placed anywhere on the whole map now (water and rough terrain
   // included) — clamp only to the world bounds so the footprint stays in-map.
   plantCX = Math.max(half + 1, Math.min(GX - half - 1, plantCX))
@@ -1322,11 +1324,14 @@ function placeCastle(): void {
 
 function updateCastle(dt: number): void {
   if (phase !== 'castle') return
+  // Screen-relative arrows: the placement camera sits on the acting player's side,
+  // so Player 2's axes mirror — Up always pushes toward the enemy / top of screen.
+  const m = turn === 0 ? 1 : -1
   const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 12 : 30) * dt
-  if (keys.has('ArrowUp')) castleCX += speed
-  if (keys.has('ArrowDown')) castleCX -= speed
-  if (keys.has('ArrowRight')) castleCZ += speed
-  if (keys.has('ArrowLeft')) castleCZ -= speed
+  if (keys.has('ArrowUp')) castleCX += m * speed
+  if (keys.has('ArrowDown')) castleCX -= m * speed
+  if (keys.has('ArrowRight')) castleCZ += m * speed
+  if (keys.has('ArrowLeft')) castleCZ -= m * speed
   castleCX = Math.max(CASTLE_HALF + 1, Math.min(GX - CASTLE_HALF - 1, castleCX))
   castleCZ = Math.max(CASTLE_HALF + 1, Math.min(GZ - CASTLE_HALF - 1, castleCZ))
   const cx = Math.round(castleCX)
@@ -1382,16 +1387,13 @@ function updateCamera(dt: number): void {
   let k = 3.5
   topDownView = false
 
-  if (phase === 'castle') {
-    // High wide bird's-eye over the WHOLE battlefield so the castle can be positioned
-    // anywhere. Screen-up is +X (toward the enemy), screen-right is +Z.
-    desiredPos.set(GX / 2 - 96, 150, GZ / 2)
-    desiredLook.set(GX / 2, 2, GZ / 2)
-    k = 3
-  } else if (phase === 'plant') {
-    // Wide bird's-eye over the whole map (resources can be placed anywhere now), angled
-    // toward the enemy (+X) so screen-up is +X and screen-right is +Z (see updatePlant).
-    desiredPos.set(GX / 2 - 96, 150, GZ / 2)
+  if (phase === 'castle' || phase === 'plant') {
+    // High wide bird's-eye over the WHOLE battlefield, seen from the ACTING player's
+    // side — Player 2 places from the opposite end, own territory nearest the camera,
+    // enemy at the top of the screen. Screen-up is "toward the enemy" for both, and
+    // the arrow keys in updateCastle/updatePlant mirror to stay screen-relative.
+    const m = turn === 0 ? 1 : -1
+    desiredPos.set(GX / 2 - m * 96, 150, GZ / 2)
     desiredLook.set(GX / 2, 2, GZ / 2)
     k = 3
   } else if (phase === 'aim' || phase === 'charge') {
