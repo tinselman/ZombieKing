@@ -246,6 +246,7 @@ export class World {
     this.debrisMesh.count = 0
     this.forts = []
     this.producers = []
+    this.raidedCells = null
     this.hiddenFort = -1
     this.colorSeed = seed & 0xffff
     const rand = mulberry32(seed)
@@ -480,46 +481,118 @@ export class World {
     return p ? this.producerIntegrity(p) : 0
   }
 
-  // Rebuild card: rip the top half of `fromSide`'s standing tower out and use those
-  // voxels to patch `toSide`'s walls from the base up. Returns the removed and filled
-  // world positions so the caller can animate the voxels flying across.
-  rebuildTransfer(fromSide: number, toSide: number): { from: Vec3[]; to: Vec3[] } {
+  // Every voxel position a tower at (cx,cz,baseY) is SUPPOSED to occupy — the same
+  // geometry buildTower raises (walls, floors, roof, crenellations, doorway gap, and
+  // foundations rooted to the current ground). Used by repairTransfer to find holes.
+  private towerBlueprint(cx: number, cz: number, baseY: number, cell: number, extraH: number): Vec3[] {
+    const height = FORT_HEIGHT + extraH
+    const facing = cell === FORT_A ? 1 : -1
+    const out: Vec3[] = []
+    const add = (x: number, y: number, z: number) => {
+      if (this.inBounds(x, y, z)) out.push({ x, y, z })
+    }
+    for (let dy = 0; dy < height; dy++) {
+      for (let dx = -FORT_HALF; dx <= FORT_HALF; dx++) {
+        for (let dz = -FORT_HALF; dz <= FORT_HALF; dz++) {
+          const onWall = Math.abs(dx) === FORT_HALF || Math.abs(dz) === FORT_HALF
+          const isFloor = dy > 0 && dy < height - 1 && dy % 5 === 0
+          const isTop = dy === height - 1
+          if (!onWall && !isFloor && !isTop) continue
+          if (onWall && dx === facing * FORT_HALF && Math.abs(dz) <= 1 && dy >= 1 && dy <= 3) continue
+          add(cx + dx, baseY + dy, cz + dz)
+        }
+      }
+    }
+    for (let dx = -FORT_HALF; dx <= FORT_HALF; dx++) {
+      for (let dz = -FORT_HALF; dz <= FORT_HALF; dz++) {
+        const onWall = Math.abs(dx) === FORT_HALF || Math.abs(dz) === FORT_HALF
+        if (!onWall) continue
+        if (((dx + dz) & 1) === 0) add(cx + dx, baseY + height, cz + dz)
+        if (Math.abs(dx) === FORT_HALF && Math.abs(dz) === FORT_HALF) {
+          add(cx + dx, baseY + height, cz + dz)
+          add(cx + dx, baseY + height + 1, cz + dz)
+        }
+        let fy = baseY - 1
+        while (fy >= 0 && this.cellAt(cx + dx, fy, cz + dz) === EMPTY) {
+          add(cx + dx, fy, cz + dz)
+          fy--
+        }
+      }
+    }
+    return out
+  }
+
+  // Rebuild card: repair `toSide`'s towers voxel by voxel — every blueprint cell that
+  // is currently missing refills, from the ground up, using voxels ripped off the top
+  // of `fromSide`'s tower. Spends at most HALF the donor tower's current size, and
+  // never builds past the original shape (no stacking above the turret top). Returns
+  // the removed and filled positions so the caller can animate the voxels flying.
+  repairTransfer(fromSide: number, toSide: number, forti: Fortifications): { from: Vec3[]; to: Vec3[] } {
     const ff = this.forts[fromSide]
     const tf = this.forts[toSide]
     const from: Vec3[] = []
     const to: Vec3[] = []
     if (!ff || !tf || !tf.towers.length) return { from, to }
-    const cells: Vec3[] = []
-    for (const t of ff.towers) {
-      for (let y = t.rubbleY; y < GY; y++)
-        for (let x = t.cx - FORT_HALF; x <= t.cx + FORT_HALF; x++)
-          for (let z = t.cz - FORT_HALF; z <= t.cz + FORT_HALF; z++)
-            if (this.cellAt(x, y, z) === ff.cell) cells.push({ x, y, z })
+    const seen = new Set<number>()
+    const missing: Vec3[] = []
+    for (let ti = 0; ti < tf.towers.length; ti++) {
+      const t = tf.towers[ti]
+      const extraH = ti === 0 ? forti.height : 0
+      for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, tf.cell, extraH)) {
+        const i = this.idx(p.x, p.y, p.z)
+        if (seen.has(i)) continue
+        seen.add(i)
+        if (this.grid[i] === EMPTY) missing.push(p)
+      }
     }
-    cells.sort((a, b) => b.y - a.y) // rip the top off first
-    for (const c of cells.slice(0, Math.floor(cells.length / 2))) {
+    if (!missing.length) return { from, to }
+    missing.sort((a, b) => a.y - b.y) // brick by brick, from the ground up
+    const donor: Vec3[] = []
+    for (const t of ff.towers) {
+      for (let y = 0; y < GY; y++)
+        for (let x = t.cx - FORT_HALF - 1; x <= t.cx + FORT_HALF + 1; x++)
+          for (let z = t.cz - FORT_HALF - 1; z <= t.cz + FORT_HALF + 1; z++)
+            if (this.cellAt(x, y, z) === ff.cell) donor.push({ x, y, z })
+    }
+    const used = Math.min(Math.floor(donor.length / 2), missing.length)
+    if (used <= 0) return { from, to }
+    donor.sort((a, b) => b.y - a.y) // rip their top off first
+    for (let k = 0; k < used; k++) {
+      const c = donor[k]
       this.grid[this.idx(c.x, c.y, c.z)] = EMPTY
       from.push(c)
-    }
-    // Patch the recipient's wall columns with that many voxels, from the base upward.
-    const tt = tf.towers[0]
-    const need = from.length
-    for (let dy = 0; dy < FORT_HEIGHT + 6 && to.length < need; dy++) {
-      for (let dx = -FORT_HALF; dx <= FORT_HALF && to.length < need; dx++) {
-        for (let dz = -FORT_HALF; dz <= FORT_HALF && to.length < need; dz++) {
-          if (Math.abs(dx) !== FORT_HALF && Math.abs(dz) !== FORT_HALF) continue // walls only
-          const x = tt.cx + dx
-          const y = tt.baseY + dy
-          const z = tt.cz + dz
-          if (this.inBounds(x, y, z) && this.cellAt(x, y, z) === EMPTY) {
-            this.grid[this.idx(x, y, z)] = tf.cell
-            to.push({ x, y, z })
-          }
-        }
-      }
+      const m = missing[k]
+      this.grid[this.idx(m.x, m.y, m.z)] = tf.cell
+      to.push(m)
     }
     this.dirty = true
     return { from, to }
+  }
+
+  // Remove a placed producer entirely (Steal / Zombie King seizures): its surviving
+  // voxels vanish from the map and it stops earning. Returns its type, or -1.
+  removeProducer(cx: number, cz: number): number {
+    const k = this.producers.findIndex(p => p.cx === cx && p.cz === cz)
+    if (k < 0) return -1
+    const p = this.producers[k]
+    for (const i of p.cells) if (this.grid[i] === p.type) this.grid[i] = EMPTY
+    this.producers.splice(k, 1)
+    this.dirty = true
+    return p.type
+  }
+
+  // Army raid: the victim's producers glow pink until their turn is over. The set
+  // holds the raided cells; rebuild() tints them.
+  raidedCells: Set<number> | null = null
+  setRaided(side: number): void {
+    this.raidedCells = new Set<number>()
+    for (const p of this.producers) if (p.side === side) for (const i of p.cells) this.raidedCells.add(i)
+    this.dirty = true
+  }
+  clearRaided(): void {
+    if (!this.raidedCells) return
+    this.raidedCells = null
+    this.dirty = true
   }
 
   // Fraction of a producer still standing (0..1) — drives its income.
@@ -1203,6 +1276,10 @@ export class World {
             // Sandbag berm: earthy tan.
             const v = 0.62 + h * 0.08
             col.setRGB(Math.min(1, v + 0.14), v * 0.92, v * 0.66)
+          } else if ((c === CROP || c === MINE || c === DERRICK) && this.raidedCells && this.raidedCells.has(x + zOff)) {
+            // Army-raided producers glow pink until the victim's turn is over.
+            const v = 0.82 + h * 0.08
+            col.setRGB(Math.min(1, v + 0.18), v * 0.62, v * 0.74)
           } else if (c === CROP) {
             // Crop bed: lush green with a little variation.
             const v = 0.5 + h * 0.12

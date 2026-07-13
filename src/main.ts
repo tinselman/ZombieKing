@@ -209,19 +209,21 @@ function syncStatus(): void {
 // A weighted deck: common cards (Skip, Bumper Crop) come up far more often than the
 // rare power cards (Zombie King, Toaster). Buy as many as you can afford each turn,
 // hold a hand across turns, and play cards before your shot.
-type CardId = 'skip' | 'bumper' | 'army' | 'ghost' | 'forcefield' | 'steal' | 'rebuild' | 'fireworks' | 'toaster' | 'zombie'
+type CardId = 'skip' | 'bumper' | 'army' | 'ghost' | 'forcefield' | 'steal' | 'rebuild' | 'toaster' | 'zombie' | 'money1' | 'money2' | 'money5'
 type CardDef = { id: CardId; name: string; blurb: string; weight: number; impl: boolean; emoji: string }
 const DECK: CardDef[] = [
   { id: 'skip', name: 'Skip Player', weight: 30, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
   { id: 'bumper', name: 'Bumper Crop', weight: 28, impl: true, emoji: '🌾', blurb: 'A bounty harvest! Your next income payout from resources is doubled.' },
-  { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: '40 warriors zig-zag the field and raid the enemy economy — skimming about an eighth of their income to you.' },
+  { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: "An army overruns the enemy's resources — their producers glow pink and their ENTIRE next payout is delivered to you instead. They collect nothing." },
   { id: 'ghost', name: 'Ghost Tower', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
-  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks your castle. The next shot that actually hits it is blocked completely — any weapon, no penetration.' },
-  { id: 'steal', name: 'Steal', weight: 12, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — its cells and its income become yours." },
-  { id: 'rebuild', name: 'Rebuild', weight: 11, impl: true, emoji: '🧱', blurb: "Rip half the enemy's tower apart and fly the voxels over to repair your own castle." },
-  { id: 'fireworks', name: 'Fireworks', weight: 9, impl: true, emoji: '🎆', blurb: 'Night falls and fireworks bloom; the enemy pockets $1,000. While it lasts, a killing blow rebuilds their castle and bills you $1,000 instead.' },
-  { id: 'toaster', name: 'Flying Toaster', weight: 6, impl: true, emoji: '🍞', blurb: "A winged toaster homes onto the enemy castle and strikes with Death's Head force — a free bonus attack on top of your shot." },
-  { id: 'zombie', name: 'Zombie King', weight: 4, impl: true, emoji: '🧟', blurb: "A giant king stomps the enemy's producers, razing HALF — and that half becomes your resources." },
+  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks you. The next hostile act — a shell on your castle, a toaster, an army, a theft, or the Zombie King himself — is blocked completely, then the field is spent.' },
+  { id: 'steal', name: 'Steal', weight: 12, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — it's ripped off the map and added to YOUR resources, to place anywhere you like." },
+  { id: 'rebuild', name: 'Rebuild', weight: 11, impl: true, emoji: '🧱', blurb: "Repair your castle voxel by voxel — every missing block refills using bricks ripped from the enemy tower, spending up to half their tower. Never builds past the turret top." },
+  { id: 'toaster', name: 'Flying Toaster', weight: 6, impl: true, emoji: '🍞', blurb: 'A winged toaster homes onto the enemy castle and strikes with the power of a nuke — a free bonus attack on top of your shot.' },
+  { id: 'zombie', name: 'Zombie King', weight: 4, impl: true, emoji: '🧟', blurb: 'The Zombie King AWAKENS — the enemy is warned. At the start of your NEXT turn he stomps the field and seizes HALF their producers as your own placeable resources. Only a Force Field stops him.' },
+  { id: 'money1', name: 'Money: $1,000', weight: 6, impl: true, emoji: '💵', blurb: 'Found money. Play to pocket $1,000.' },
+  { id: 'money2', name: 'Money: $2,000', weight: 4, impl: true, emoji: '💰', blurb: 'A fat purse. Play to pocket $2,000.' },
+  { id: 'money5', name: 'Money: $5,000', weight: 2, impl: true, emoji: '🤑', blurb: "A king's ransom. Play to pocket $5,000." },
 ]
 const CARD_COST = 1500
 const hand: CardId[][] = [[], []] // cards each side is holding
@@ -229,10 +231,12 @@ const hand: CardId[][] = [[], []] // cards each side is holding
 // (old) position the enemy AI keeps aiming at while your real tower is hidden/moved.
 let ghostSide = -1
 let ghostDecoy: { cx: number; cz: number } | null = null
-// Fireworks state: which side triggered it (kill-interception), or -1; plus any unpaid
-// $1,000 debt per side (charged when a killing blow is intercepted, paid from income).
-let fireworksSide = -1
-const fireworksDebt = [0, 0]
+// Zombie King: awakened on play (the defender is warned), stomps at the start of the
+// caster's NEXT turn — one full turn's window for the victim to raise a Force Field.
+let zombiePending: { caster: number } | null = null
+// Army raid: the victim's next resource payout is delivered whole to the raider; the
+// victim's producers glow pink until their turn is over.
+let armyRaid: { caster: number; victim: number; done: boolean } | null = null
 // Force Field: side with an active (as-yet-unhit) shield, or -1. Bumper Crop: a ×2
 // multiplier on a side's NEXT income payout. Skip Player: this side's next turn is skipped.
 let forceFieldSide = -1
@@ -299,11 +303,30 @@ function applyCard(side: number, id: CardId): void {
   else if (id === 'toaster') cardToaster(side, foe)
   else if (id === 'zombie') cardZombie(side, foe)
   else if (id === 'ghost') cardGhost(side)
-  else if (id === 'fireworks') cardFireworks(side, foe)
   else if (id === 'bumper') cardBumper(side)
   else if (id === 'skip') cardSkip(side, foe)
   else if (id === 'forcefield') cardForcefield(side)
   else if (id === 'rebuild') cardRebuild(side, foe)
+  else if (id === 'money1') cardMoney(side, 1000)
+  else if (id === 'money2') cardMoney(side, 2000)
+  else if (id === 'money5') cardMoney(side, 5000)
+}
+
+// Force Field: if the victim has an active shield, it eats this hostile act — flare
+// at their castle, shield spent — and the act is fully blocked.
+function shieldBlocks(victim: number): boolean {
+  if (forceFieldSide !== victim) return false
+  forceFieldSide = -1
+  const t = world.forts[victim]?.towers[0]
+  if (t) spawnShieldBlock(t.cx, t.cz)
+  return true
+}
+
+// Money cards: rare found cash, banked the moment they're played.
+function cardMoney(side: number, amount: number): void {
+  money[side] += amount
+  syncStatus()
+  hud.msg(`${capName(side)} pocketed $${amount.toLocaleString()}`)
 }
 
 // Bumper Crop: double this side's NEXT income payout (applied and cleared in startTurn).
@@ -324,15 +347,18 @@ function cardForcefield(side: number): void {
   hud.msg(`${capName(side)} raised a force field`)
 }
 
-// Rebuild: rip half the enemy tower out and fly those voxels over to patch yours.
+// Rebuild: repair your own tower's missing voxels, brick by brick from the ground up,
+// using voxels ripped from the enemy tower (at most half of it). Never exceeds the
+// original blueprint — a whole tower gains nothing.
 function cardRebuild(side: number, foe: number): void {
-  const { from, to } = world.rebuildTransfer(foe, side)
-  if (!from.length) return void (isHuman(side) && hud.msg(`${nameOf(foe)}'s tower has nothing left to take`))
+  if (shieldBlocks(foe)) return void hud.msg('the force field guards their bricks!')
+  const { from, to } = world.repairTransfer(foe, side, forti[side])
+  if (!to.length) return void (isHuman(side) && hud.msg('your castle has no missing voxels to repair'))
   world.rebuild()
   hud.setIntegrity(world.integrity(0), world.integrity(1))
   spawnVoxelFlight(from, to, side === 0 ? 0xffb0a0 : 0xa0c0ff)
   sfx.rumble()
-  hud.msg(`${capName(side)} cannibalised ${nameOf(foe)}'s tower to rebuild`)
+  hud.msg(`${capName(side)} repaired ${to.length} voxels with ${nameOf(foe)}'s bricks`)
 }
 
 // Cosmetic: a sample of the transferred voxels arcs from the source cells to the
@@ -358,31 +384,32 @@ function spawnVoxelFlight(from: THREE.Vector3[] | { x: number; y: number; z: num
 
 // Steal: move the enemy's richest producer (cells + income) to your side. No world
 // rebuild — producers render side-agnostically, so flipping ownership is just data.
+// Steal: the enemy's richest producer is ripped off the map and lands in YOUR
+// unplaced-resources list — place it anywhere you like on your turns.
 function cardSteal(side: number, foe: number): void {
   if (!planted[foe].length) return void (isHuman(side) && hud.msg(`${nameOf(foe)} has nothing to steal`))
+  if (shieldBlocks(foe)) return void hud.msg('the force field repels the thief!')
   let best = 0
   for (let i = 1; i < planted[foe].length; i++) {
     if (planted[foe][i].baseYield > planted[foe][best].baseYield) best = i
   }
   const p = planted[foe].splice(best, 1)[0]
-  p.age = Math.max(p.age, 2) // already established — pays you at a decent maturity
-  planted[side].push(p)
-  const wp = world.producers.find(q => q.cx === p.cx && q.cz === p.cz)
-  if (wp) wp.side = side
-  hud.msg(`${capName(side)} stole ${nameOf(foe)}'s ${PRODUCER_SPECS[p.type].name}`)
+  world.removeProducer(p.cx, p.cz)
+  pendingResources[side].push(p.type)
+  if (isHuman(side)) refreshResources()
+  syncStatus()
+  hud.msg(`${capName(side)} stole ${nameOf(foe)}'s ${PRODUCER_SPECS[p.type].name} — it's in ${side === turn ? 'your' : 'their'} Resources list`)
 }
 
-// Army: a cosmetic charge of runners across the field plus an instant raid that
-// skims ~1/8 of the enemy's per-turn income from their treasury to yours.
+// Army: overruns the enemy economy. Their producers glow pink and their ENTIRE next
+// resource payout is delivered to the raider — the victim collects nothing that turn.
+// The pink lifts when the victim's turn is over.
 function cardArmy(side: number, foe: number): void {
+  if (shieldBlocks(foe)) return void hud.msg('the force field turns the army away!')
   spawnArmy(side)
-  const loot = Math.round(sideIncome(foe) / 8)
-  if (loot > 0) {
-    money[foe] = Math.max(0, money[foe] - loot)
-    money[side] += loot
-    if (isHuman(side)) syncStatus()
-  }
-  hud.msg(`${capName(side)}'s army raided $${loot.toLocaleString()} from ${nameOf(foe)}`)
+  armyRaid = { caster: side, victim: foe, done: false }
+  world.setRaided(foe)
+  hud.msg(`${capName(side)}'s army overruns ${nameOf(foe)}'s resources — their next payout is forfeit!`)
 }
 
 // Flying Toaster: a homing bonus strike on the enemy castle at Death's-Head power.
@@ -407,27 +434,38 @@ function cardToaster(side: number, foe: number): void {
   hud.msg(`${capName(side)}'s flying toaster is inbound!`)
 }
 
-// Zombie King: a giant stomps the enemy's producers, seizing HALF of them (richest
-// first) — cells and income transfer to you. A cosmetic King marches the field.
+// Zombie King, part 1: playing the card only AWAKENS him — the defender is warned
+// loudly and has one full turn to raise a Force Field before the stomp.
 function cardZombie(side: number, foe: number): void {
+  if (zombiePending) return void (isHuman(side) && hud.msg('the Zombie King is already awake'))
+  zombiePending = { caster: side }
+  sfx.rumble()
+  hud.banner('THE ZOMBIE KING HAS AWAKENED', `he stomps ${nameOf(foe)}'s lands next turn — only a Force Field can stop him`, 3400)
+}
+
+// Zombie King, part 2: at the start of the caster's next turn he stomps the field,
+// seizing HALF the victim's producers (richest first) into the caster's Resources
+// list to re-place anywhere — unless a Force Field eats the stomp.
+function resolveZombieStomp(caster: number): void {
+  const foe = 1 - caster
+  zombiePending = null
+  if (shieldBlocks(foe)) return void hud.msg('the force field stops the Zombie King cold!')
   const foeProd = planted[foe]
-  if (!foeProd.length) return void (isHuman(side) && hud.msg(`${nameOf(foe)} has no resources to seize`))
+  if (!foeProd.length) return void hud.msg('the Zombie King stomps… and finds nothing to seize')
   const order = foeProd.map((_, i) => i).sort((a, b) => foeProd[b].baseYield - foeProd[a].baseYield)
-  const takeCount = Math.ceil(foeProd.length / 2)
-  const takeIdx = order.slice(0, takeCount).sort((a, b) => b - a) // descending → safe splice
-  let firstCx = world.forts[foe]?.towers[0]?.cx ?? GX / 2
-  let firstCz = GZ / 2
+  const takeIdx = order.slice(0, Math.ceil(foeProd.length / 2)).sort((a, b) => b - a) // descending → safe splice
+  let atX = world.forts[foe]?.towers[0]?.cx ?? GX / 2
+  let atZ = GZ / 2
   for (const i of takeIdx) {
     const p = foeProd.splice(i, 1)[0]
-    p.age = Math.max(p.age, 2)
-    planted[side].push(p)
-    const wp = world.producers.find(q => q.cx === p.cx && q.cz === p.cz)
-    if (wp) wp.side = side
-    firstCx = p.cx
-    firstCz = p.cz
+    world.removeProducer(p.cx, p.cz)
+    pendingResources[caster].push(p.type)
+    atX = p.cx
+    atZ = p.cz
   }
-  spawnZombieKing(side, firstCx, firstCz)
-  hud.msg(`${capName(side)}'s Zombie King seized ${takeCount} of ${nameOf(foe)}'s producers!`)
+  spawnZombieKing(caster, atX, atZ)
+  if (isHuman(caster)) refreshResources()
+  hud.msg(`${capName(caster)}'s Zombie King seized ${takeIdx.length} producers — re-place them from the Resources list`)
 }
 
 // Ghost Tower. A HUMAN caster repositions their castle by hand; it stays visible to
@@ -466,17 +504,6 @@ function revealGhost(): void {
   ghostDecoy = null
 }
 
-// Fireworks: switch to night with a fireworks show; the enemy pockets $1,000. While it
-// lasts (this round), a blow that would collapse the enemy castle instead rebuilds it
-// and bills you $1,000 (paid now if you can, else carried as debt off future income).
-function cardFireworks(side: number, foe: number): void {
-  money[foe] += 1000
-  syncStatus()
-  fireworksSide = side
-  setNight(true)
-  spawnFireworks()
-  hud.msg(`Fireworks! ${capName(foe)} pockets $1,000`)
-}
 let wind: Wind = { x: 0, z: 0 }
 let chargeT = 0
 let chargePower = 0
@@ -835,7 +862,7 @@ function updateTasks(dt: number): void {
       t.mesh.rotation.x += dt * 6
       t.mesh.rotation.y += dt * 9
       if (dist < 2.2) {
-        crater(t.target.clone(), 6, true)
+        crater(t.target.clone(), 5, true) // nuke-class single blast, toned down a tier
         scene.remove(t.mesh)
         tasks.splice(i, 1)
       }
@@ -1023,30 +1050,6 @@ function spawnFlash(at: THREE.Vector3, intensity: number, color: number): void {
   light.position.copy(at)
   scene.add(light)
   flashes.push({ light, age: 0, life: 0.18, base: intensity })
-}
-
-// Fireworks card: swap the bright day scene for a deep-blue night and dim the lights.
-let isNight = false
-function setNight(on: boolean): void {
-  if (isNight === on) return
-  isNight = on
-  const bg = on ? 0x2b3552 : 0xeef1f4 // dusky navy, still clearly readable
-  ;(scene.background as THREE.Color).setHex(bg)
-  ;(scene.fog as THREE.Fog).color.setHex(bg)
-  hemi.intensity = on ? 0.7 : 1.2
-  sun.intensity = on ? 0.85 : 1.7
-}
-
-// A burst of colourful fireworks over the battlefield (pure spectacle).
-function spawnFireworks(): void {
-  const colors = [0xff5a5a, 0xffd24a, 0x5adcff, 0x8affa0, 0xff8adf, 0xfff0a0]
-  for (let k = 0; k < 10; k++) {
-    const at = new THREE.Vector3(30 + Math.random() * (GX - 60), 40 + Math.random() * 34, 6 + Math.random() * (GZ - 12))
-    const c = colors[Math.floor(Math.random() * colors.length)]
-    spawnExplosion(at, 5 + Math.random() * 4, false)
-    spawnFlash(at, 40, c)
-  }
-  sfx.boom(6)
 }
 
 function updateFx(dt: number): void {
@@ -1676,22 +1679,33 @@ function reallyStartTurn(s: number): void {
     sides[ghostSide].cannon.group.visible = s === ghostSide
     world.rebuild()
   }
-  // Age this side's producers a turn (crops mature), then pay out — scaled by how
+  // The pink lifts once the raided player's turn is over.
+  if (armyRaid && armyRaid.done && s !== armyRaid.victim) {
+    world.clearRaided()
+    armyRaid = null
+  }
+  // An awakened Zombie King stomps at the start of his caster's turn.
+  if (zombiePending && zombiePending.caster === s) resolveZombieStomp(s)
+  // Age this side's producers a turn (crops mature), then produce — scaled by how
   // intact each is (integrity) and how mature (crops ramp in over a couple turns).
   for (const p of planted[s]) p.age++
   // Bumper Crop doubles this one payout, then the boost is spent.
-  const income = Math.round(sideIncome(s) * incomeBoost[s])
+  const produced = Math.round(sideIncome(s) * incomeBoost[s])
   incomeBoost[s] = 1
-  if (income > 0) money[s] += income
+  // Army raid: the victim's whole payout is carried off to the raider instead.
+  let received = produced
+  if (armyRaid && armyRaid.victim === s && !armyRaid.done) {
+    armyRaid.done = true
+    received = 0
+    if (produced > 0) {
+      money[armyRaid.caster] += produced
+      hud.msg(`${capName(armyRaid.caster)}'s army carries off ${nameOf(s)}'s whole harvest — $${produced.toLocaleString()}`)
+    }
+  }
+  if (received > 0) money[s] += received
   // Modest AI catch-up: the computer doesn't optimise its spending like a human, so a
   // small per-turn subsidy keeps it able to field weapons, producers AND stratagems.
   if (s === 1 && !twoPlayer) money[1] += 400
-  // Pay down any Fireworks debt from this side's fresh income.
-  if (fireworksDebt[s] > 0 && money[s] > 0) {
-    const pay = Math.min(fireworksDebt[s], money[s])
-    money[s] -= pay
-    fireworksDebt[s] -= pay
-  }
   if (isHuman(s)) {
     const st = sides[s]
     if ((st.arsenal.get(WEAPONS[st.wsel].id) ?? 0) <= 0) {
@@ -1699,8 +1713,8 @@ function reallyStartTurn(s: number): void {
     }
     updateWeaponHud()
     syncStatus()
-    lastIncome[s] = income // surfaced in the market (the msg here is hidden by the overlay)
-    if (income > 0) hud.msg(`income +$${income.toLocaleString()}`)
+    lastIncome[s] = received // surfaced in the market (the msg here is hidden by the overlay)
+    if (received > 0) hud.msg(`income +$${received.toLocaleString()}`)
     refreshHand()
     refreshResources()
     // Every turn opens the market (buy cards + resources; weapons only at round
@@ -1729,6 +1743,11 @@ function aiCards(): void {
     money[s] -= CARD_COST
     hand[s].push(drawCard())
   }
+  // Defend first: an awakened Zombie King is answered with a Force Field immediately.
+  if (zombiePending && zombiePending.caster === 1 - s && hand[s].includes('forcefield') && forceFieldSide !== s) {
+    hand[s].splice(hand[s].indexOf('forcefield'), 1)
+    applyCard(s, 'forcefield')
+  }
   if (!hand[s].length || Math.random() > 0.7) return
   const id = pickAiCard(s)
   if (!id) return
@@ -1740,13 +1759,15 @@ function pickAiCard(s: number): CardId | null {
   const h = hand[s]
   const foeHasProd = planted[1 - s].length > 0
   const myHurt = world.integrity(s) < 0.7
+  if (h.includes('money5')) return 'money5' // free cash — always cash it in
+  if (h.includes('money2')) return 'money2'
+  if (h.includes('money1')) return 'money1'
   if (h.includes('toaster')) return 'toaster'
-  if (foeHasProd && h.includes('zombie')) return 'zombie'
+  if (foeHasProd && h.includes('zombie') && !zombiePending) return 'zombie'
   if (foeHasProd && h.includes('steal')) return 'steal'
-  if (foeHasProd && h.includes('army')) return 'army'
+  if (foeHasProd && h.includes('army') && !armyRaid) return 'army'
   if (myHurt && h.includes('ghost')) return 'ghost'
-  // Fireworks gifts the opponent and blocks your own kills — only when well behind.
-  if (h.includes('fireworks') && scoreFoe < scoreYou && Math.random() < 0.3) return 'fireworks'
+  if (myHurt && h.includes('forcefield') && forceFieldSide !== s) return 'forcefield'
   return null
 }
 
@@ -2009,24 +2030,6 @@ function finishResolve(force = false): void {
   hud.setIntegrity(iYou, iFoe)
   const youDead = iYou < COLLAPSE_AT
   const foeDead = iFoe < COLLAPSE_AT
-  // Fireworks interception: while active, the holder's killing blow on the enemy castle
-  // instead REBUILDS it and bills the holder $1,000 (debt if short). The round goes on.
-  if (fireworksSide >= 0) {
-    const targetDead = fireworksSide === 0 ? foeDead : youDead
-    if (targetDead) {
-      const pay = Math.min(1000, money[fireworksSide])
-      money[fireworksSide] -= pay
-      fireworksDebt[fireworksSide] += 1000 - pay
-      fireworksSide = -1
-      setNight(false)
-      rebuildRoundWorld() // the enemy castle is magically rebuilt
-      hud.setIntegrity(world.integrity(0), world.integrity(1))
-      syncStatus()
-      hud.banner('REBUILT!', 'fireworks spared the castle — billed $1,000')
-      advanceTurn()
-      return
-    }
-  }
   if (youDead || foeDead) {
     // Collapsing the enemy tower wins the round and plunders HALF the loser's cash plus
     // one random card. Everything else — producers, weapons, remaining cards/cash —
@@ -2133,13 +2136,14 @@ function setupRoundWorld(): void {
     else if (t.kind === 'army') for (const r of t.runners) scene.remove(r)
   }
   tasks.length = 0
-  // Card effects don't carry between rounds: clear night/ghost/field and restore cannons.
-  setNight(false)
-  fireworksSide = -1
+  // Card effects don't carry between rounds: clear ghost/field/king/raid, restore cannons.
   ghostSide = -1
   ghostDecoy = null
   ghostReposition = false
   forceFieldSide = -1
+  zombiePending = null
+  armyRaid = null
+  world.clearRaided()
   incomeBoost[0] = 1
   incomeBoost[1] = 1
   skipNext[0] = false
@@ -2676,7 +2680,9 @@ window.__sv = {
     hand: [...hand[0]],
     enemyHand: hand[1].length,
     ghostSide,
-    fireworksSide,
+    zombieAwake: zombiePending ? zombiePending.caster : -1,
+    armyRaidOn: armyRaid ? armyRaid.victim : -1,
+    forceFieldSide,
   }),
   world,
   newMatch: fullReset,
