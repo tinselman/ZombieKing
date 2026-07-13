@@ -519,10 +519,13 @@ let aiAnimT = 0
 let aiStart = { az: 0, el: 0 }
 let endT = 0
 let endShown = false
-let endInfo: { title: string; sub: string; center: THREE.Vector3 } | null = null
+let endInfo: { line1: string; line2: string; winner: number; center: THREE.Vector3 } | null = null
 // Defeated towers crumble first, THEN explode once the rubble has settled.
 let pendingBlasts: { cx: number; cz: number; y: number }[] = []
 let blastFired = true
+// Celebratory fireworks that keep popping over the wreckage after the first burst.
+let victoryT = 0
+let victoryBursts = 0
 const lastImpact = new THREE.Vector3(GX / 2, 12, GZ / 2)
 const keys = new Set<string>()
 
@@ -1050,6 +1053,47 @@ function spawnFlash(at: THREE.Vector3, intensity: number, color: number): void {
   light.position.copy(at)
   scene.add(light)
   flashes.push({ light, age: 0, life: 0.18, base: intensity })
+}
+
+// A big celebratory particle burst when a castle is destroyed — a dense, colourful
+// fountain of confetti/sparks in the winner's colours plus festive gold, far larger
+// and longer-lived than a shell explosion. Gravity (in updateFx) arcs it back down.
+function spawnVictoryBurst(at: THREE.Vector3, winner: number, count = 900): void {
+  // Warm reds/golds for the red side, cool blues/golds for the blue side, festive
+  // rainbow for a draw — always laced with gold and white sparkle.
+  const palettes: number[][][] = [
+    [[1, 0.42, 0.38], [1, 0.7, 0.3], [1, 0.9, 0.5], [1, 1, 1]],
+    [[0.42, 0.66, 1], [0.4, 0.85, 1], [1, 0.9, 0.5], [1, 1, 1]],
+    [[1, 0.5, 0.4], [0.5, 0.85, 1], [0.6, 1, 0.6], [1, 0.9, 0.5]],
+  ]
+  const palette = palettes[winner === 0 ? 0 : winner === 1 ? 1 : 2]
+  const n = count
+  const pos = new Float32Array(n * 3)
+  const col = new Float32Array(n * 3)
+  const vel = new Float32Array(n * 3)
+  for (let i = 0; i < n; i++) {
+    const th = Math.random() * Math.PI * 2
+    const ph = Math.acos(2 * Math.random() - 1)
+    const sp = (0.25 + Math.random()) * 26
+    vel[i * 3] = Math.sin(ph) * Math.cos(th) * sp
+    vel[i * 3 + 1] = Math.abs(Math.cos(ph)) * sp * 1.1 + 10 // bias up — a fountain
+    vel[i * 3 + 2] = Math.sin(ph) * Math.sin(th) * sp
+    pos[i * 3] = at.x
+    pos[i * 3 + 1] = at.y
+    pos[i * 3 + 2] = at.z
+    const c = palette[(Math.random() * palette.length) | 0]
+    col[i * 3] = c[0]
+    col[i * 3 + 1] = c[1]
+    col[i * 3 + 2] = c[2]
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3))
+  const mat = new THREE.PointsMaterial({ size: 1.5, vertexColors: true, transparent: true, opacity: 1, depthWrite: false })
+  const pts = new THREE.Points(g, mat)
+  pts.frustumCulled = false
+  scene.add(pts)
+  fxs.push({ pts, vel, age: 0, life: 2.8, mat })
 }
 
 function updateFx(dt: number): void {
@@ -2076,14 +2120,12 @@ function finishResolve(force = false): void {
       losers.length === 2
         ? new THREE.Vector3(GX / 2, 14, GZ / 2)
         : new THREE.Vector3(loserTower.cx, loserTower.baseY + 6, loserTower.cz)
-    endInfo =
-      losers.length === 2
-        ? { title: 'MUTUAL DESTRUCTION', sub: 'Both forts have fallen.', center }
-        : twoPlayer
-          ? { title: `PLAYER ${youDead ? 2 : 1} WINS THE ROUND`, sub: `Player ${youDead ? 1 : 2}'s fort has crumbled to rubble.`, center }
-          : youDead
-            ? { title: 'ROUND LOST', sub: 'Your fort has crumbled to rubble.', center }
-            : { title: 'ROUND WON', sub: 'The enemy fort is demolished.', center }
+    // Winner side for the celebration (colour + text); -1 on mutual destruction.
+    const winner = losers.length === 2 ? -1 : youDead ? 1 : 0
+    const line1 = `ROUND ${round} OVER`
+    const line2 =
+      winner < 0 ? 'MUTUAL DESTRUCTION!' : twoPlayer ? `PLAYER ${winner + 1} WON!` : winner === 0 ? 'YOU WON!' : 'YOU LOST!'
+    endInfo = { line1, line2, winner, center }
     phase = 'end'
     endT = 0
     endShown = false
@@ -2340,6 +2382,7 @@ function buyFort(index: number): void {
 // its economy (guards against an unrecoverable snowball). Tuned further in balance.
 const ROUND_STIPEND = 1200
 function nextRound(): void {
+  hud.hideRoundOver()
   round++
   money[0] += ROUND_STIPEND
   money[1] += ROUND_STIPEND
@@ -2562,16 +2605,35 @@ function tick(now: number): void {
     // fallback delay), set off the explosion: the pile bursts skyward in fire.
     if (!blastFired && (world.debris.length === 0 || endT > 2.4)) {
       blastFired = true
+      victoryT = 0
+      victoryBursts = 0
+      const winner = endInfo ? endInfo.winner : -1
       for (const b of pendingBlasts) {
         const base = new THREE.Vector3(b.cx, world.surfaceY(b.cx, b.cz), b.cz)
         world.burstRubble(b.cx, b.cz, 8, Math.random)
         spawnExplosion(base.clone().add(new THREE.Vector3(0, 3, 0)), 10, true)
         spawnFlash(base.clone().add(new THREE.Vector3(0, 5, 0)), 44, 0xffe0a0)
         spawnFlash(base.clone().add(new THREE.Vector3(0, 1, 0)), 28, 0xffd070)
+        spawnVictoryBurst(base.clone().add(new THREE.Vector3(0, 4, 0)), winner)
         addShake(11, base)
       }
       if (pendingBlasts.length) sfx.boom(10)
+      // The big two-line round-over banner appears over the wreckage as it bursts.
+      if (endInfo) hud.roundOver(endInfo.line1, endInfo.line2, endInfo.winner)
       pendingBlasts = []
+    }
+    // Celebratory fireworks keep popping above the wreckage for a couple of seconds.
+    if (blastFired && endInfo && victoryBursts < 6) {
+      victoryT += dt
+      if (victoryT > 0.32) {
+        victoryT = 0
+        victoryBursts++
+        const c = endInfo.center
+        const at = new THREE.Vector3(c.x + (Math.random() - 0.5) * 34, c.y + 16 + Math.random() * 18, c.z + (Math.random() - 0.5) * 34)
+        spawnVictoryBurst(at, endInfo.winner, 260)
+        spawnFlash(at, 22, endInfo.winner === 1 ? 0x8ab4ff : 0xffb060)
+        sfx.boom(3)
+      }
     }
     // Hold on the wreckage a beat after the blast before the result / next round.
     if (!endShown && endT > 4.2 && endInfo) {
@@ -2667,6 +2729,7 @@ window.__sv = {
     projs: projs.length,
     tasks: tasks.length,
     debris: world.debris.length,
+    fxCount: fxs.length,
     integrity: [world.integrity(0), world.integrity(1)],
     wind,
     power: chargePower,

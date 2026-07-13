@@ -38,6 +38,11 @@ const CSS = `
 #sc-side .tag { position: absolute; top: -1px; left: -1px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; background: rgba(255,255,255,0.85); border: 1px solid #d8dde3; border-radius: 9px 0 8px 0; padding: 2px 8px; }
 #sc-banner { position: absolute; top: 22%; left: 0; right: 0; text-align: center; font-size: 40px; font-weight: 800; letter-spacing: 0.06em; color: #2c3138; text-shadow: 0 2px 12px rgba(255,255,255,0.9); opacity: 0; transition: opacity 0.35s ease; }
 #sc-banner small { display: block; font-size: 15px; font-weight: 500; letter-spacing: 0.1em; color: #7a838d; margin-top: 6px; }
+/* Round-over celebration banner, shown over the wreckage when a castle bursts. */
+#sc-roundover { position: absolute; top: 15%; left: 0; right: 0; text-align: center; opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
+#sc-roundover .l1 { font-size: 32px; font-weight: 800; letter-spacing: 0.18em; color: #2c3138; text-shadow: 0 2px 14px rgba(255,255,255,0.95); }
+#sc-roundover .l2 { font-size: 62px; font-weight: 900; letter-spacing: 0.03em; margin-top: 8px; text-shadow: 0 3px 20px rgba(255,255,255,0.9); animation: sc-pop 0.5s cubic-bezier(0.2,1.4,0.5,1) both; }
+@keyframes sc-pop { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 #sc-msg { position: absolute; bottom: 92px; left: 50%; transform: translateX(-50%); font-size: 14px; font-weight: 600; color: #2c3138; background: rgba(255,255,255,0.85); border: 1px solid #d8dde3; border-radius: 8px; padding: 6px 14px; opacity: 0; transition: opacity 0.25s ease; }
 #sc-help { position: absolute; bottom: 3px; left: 0; right: 0; text-align: center; font-size: 11px; color: #98a1aa; letter-spacing: 0.04em; }
 #sc-end { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(244,246,248,0.82); backdrop-filter: blur(8px); pointer-events: auto; }
@@ -169,6 +174,7 @@ export function createHud(
     <div id="sc-side"><span class="tag">side view</span></div>
     <button id="sc-worldBtn">World View</button>
     <div id="sc-banner"></div>
+    <div id="sc-roundover"></div>
     <div id="sc-msg"></div>
     <div id="sc-skipped"><span>You've been SKIPPED!</span></div>
     <div id="sc-cardModal"><div class="stage">
@@ -249,6 +255,8 @@ export function createHud(
   const cardPlay = q<HTMLButtonElement>('#sc-cardPlay')
   const cardClose = q<HTMLButtonElement>('#sc-cardClose')
   const banner = q<HTMLElement>('#sc-banner')
+  const roundoverEl = q<HTMLElement>('#sc-roundover')
+  let roundoverTimer = 0
   const msgEl = q<HTMLElement>('#sc-msg')
   const skipped = q<HTMLElement>('#sc-skipped')
   const skippedText = q<HTMLElement>('#sc-skipped span')
@@ -387,6 +395,20 @@ export function createHud(
       clearTimeout(msgTimer)
       msgTimer = window.setTimeout(() => (msgEl.style.opacity = '0'), ms)
     },
+    // Big two-line round-over banner. `winner`: 0 (red) / 1 (blue) / -1 (neutral draw).
+    roundOver(line1: string, line2: string, winner: number, ms = 4200) {
+      const color = winner === 0 ? '#d5473a' : winner === 1 ? '#3f7bd6' : '#2c3138'
+      roundoverEl.innerHTML = `<div class="l1">${line1}</div><div class="l2" style="color:${color}">${line2}</div>`
+      roundoverEl.style.opacity = '1'
+      statusEl.style.opacity = '0' // clear the status pill out from behind the banner
+      clearTimeout(roundoverTimer)
+      roundoverTimer = window.setTimeout(() => (roundoverEl.style.opacity = '0'), ms)
+    },
+    hideRoundOver() {
+      roundoverEl.style.opacity = '0'
+      statusEl.style.opacity = '1'
+      clearTimeout(roundoverTimer)
+    },
     // Frame for the picture-in-picture cannon close-up; the GL inset renders
     // into the on-canvas rectangle this element covers. The World View button
     // shares its lifecycle.
@@ -406,6 +428,7 @@ export function createHud(
       const inc = income > 0 ? ` &nbsp;·&nbsp; <span>resources</span> +$${income.toLocaleString()}/turn` : ''
       const who = player > 0 ? `<b style="color:#d5473a">P${player}</b> &nbsp;·&nbsp; ` : ''
       statusEl.innerHTML = `${who}<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}${inc}`
+      statusEl.style.opacity = '1' // re-shown after a round-over banner hid it
     },
     setFortLabels(you: string, foe: string) {
       fortYouLabel.textContent = you
