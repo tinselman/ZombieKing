@@ -1,19 +1,16 @@
 // Scorched Earth 3D — weapon definitions and shared ballistic constants.
 // The roster follows the original Scorched Earth armory: missile and nuke
-// lines, Leap Frog, Funky Bomb, MIRVs, napalms, tracers, the roller /
-// sandhog / riot / dirt families.
+// lines, Leap Frog, Funky Bomb, MIRVs, napalms, tracers, and the roller family.
 
 export type WeaponKind =
   | 'blast'
   | 'mirv'
   | 'dirt'
-  | 'digger'
   | 'napalm'
   | 'roller'
   | 'leap'
   | 'funky'
   | 'tracer'
-  | 'riot'
   | 'frisbee' // player steers the arc mid-flight
   | 'saucer' // player pilots a drone top-down, space detonates
 
@@ -23,7 +20,7 @@ export type WeaponDef = {
   ammo: number // starting ammo; Infinity for the basic missile
   blast: number // crater radius (per warhead for MIRVs)
   kind: WeaponKind
-  split?: number // warheads (mirv/funky), fire blobs (napalm), dig steps (digger)
+  split?: number // warheads (mirv/funky), fire blobs (napalm)
   price?: number // armory price per pack (undefined = not for sale)
   pack?: number // rounds per pack
 }
@@ -44,12 +41,6 @@ export const WEAPONS: WeaponDef[] = [
   { id: 'babyroller', name: 'Baby Roller', ammo: 0, blast: 3.5, kind: 'roller', price: 500, pack: 2 },
   { id: 'roller', name: 'Roller', ammo: 0, blast: 5.5, kind: 'roller', price: 900, pack: 2 },
   { id: 'heavyroller', name: 'Heavy Roller', ammo: 0, blast: 8.0, kind: 'roller', price: 1800, pack: 1 },
-  { id: 'riotcharge', name: 'Riot Charge', ammo: 0, blast: 4.0, kind: 'riot', price: 400, pack: 2 },
-  { id: 'riotblast', name: 'Riot Blast', ammo: 0, blast: 6.0, kind: 'riot', price: 700, pack: 2 },
-  { id: 'riotbomb', name: 'Riot Bomb', ammo: 0, blast: 9.0, kind: 'riot', price: 1200, pack: 1 },
-  { id: 'babysandhog', name: 'Baby Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 8, price: 700, pack: 2 },
-  { id: 'sandhog', name: 'Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 16, price: 1200, pack: 2 },
-  { id: 'heavysandhog', name: 'Heavy Sandhog', ammo: 0, blast: 2.1, kind: 'digger', split: 26, price: 2200, pack: 1 },
 ]
 
 // Bomblets spawned by the Funky Bomb (not purchasable, not in the roster).

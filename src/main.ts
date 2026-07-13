@@ -630,7 +630,6 @@ function doSplit(p: Proj): void {
 // ---------------------------------------------------------------- special-weapon tasks
 
 type Task =
-  | { kind: 'dig'; pos: THREE.Vector3; dir: THREE.Vector3; steps: number; maxSteps: number; t: number }
   | { kind: 'roller'; x: number; z: number; dx: number; dz: number; flat: number; steps: number; t: number; mesh: THREE.Mesh }
   | { kind: 'napalm'; blobs: { x: number; z: number; life: number }[]; t: number }
   | { kind: 'toaster'; mesh: THREE.Mesh; pos: THREE.Vector3; target: THREE.Vector3; t: number }
@@ -707,14 +706,6 @@ function impact(p: Proj, at: THREE.Vector3): void {
       sfx.boom(2.5)
       lastImpact.copy(at)
       break
-    case 'digger': {
-      const dir = p.vel.clone().normalize()
-      tasks.push({ kind: 'dig', pos: at.clone(), dir, steps: 0, maxSteps: w.split ?? 16, t: 0 })
-      spawnExplosion(at, 2, false)
-      sfx.boom(1.6)
-      lastImpact.copy(at)
-      break
-    }
     case 'napalm': {
       const blobs = []
       const n = w.split ?? 10
@@ -756,14 +747,6 @@ function impact(p: Proj, at: THREE.Vector3): void {
       sfx.tick()
       lastImpact.copy(at)
       break
-    case 'riot':
-      // Clears dirt without touching fort structure — the un-burying tool.
-      world.carve(at.x, at.y, at.z, w.blast, true)
-      world.updateSupport(Math.random)
-      spawnExplosion(at, w.blast * 0.8, false)
-      sfx.boom(w.blast * 0.5)
-      lastImpact.copy(at)
-      break
     case 'roller': {
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.7, 12, 10), projMat)
       mesh.castShadow = true
@@ -785,23 +768,7 @@ function updateTasks(dt: number): void {
   for (let i = tasks.length - 1; i >= 0; i--) {
     const t = tasks[i]
     t.t += dt
-    if (t.kind === 'dig') {
-      let done = false
-      while (t.t > 0.055 && !done) {
-        t.t -= 0.055
-        t.pos.addScaledVector(t.dir, 1.15)
-        t.steps++
-        const p = t.pos
-        const outOfWorld = p.x < 1 || p.x > GX - 2 || p.z < 1 || p.z > GZ - 2 || p.y < 0
-        const exited = !world.isSolid(p.x, p.y, p.z) && t.steps > 4
-        world.carve(p.x, p.y, p.z, 2.1)
-        if (outOfWorld || exited || t.steps >= t.maxSteps) {
-          crater(p, 3.2, true)
-          done = true
-        }
-      }
-      if (done) tasks.splice(i, 1)
-    } else if (t.kind === 'roller') {
+    if (t.kind === 'roller') {
       let done = false
       while (t.t > 0.07 && !done) {
         t.t -= 0.07
@@ -2235,7 +2202,7 @@ function aiShop(): void {
     babynuke: 4, mirv: 3, bigmissile: 20, nuke: 2, roller: 3, funky: 2,
     leapfrog: 2, heavyroller: 2, sandhog: 2, deathshead: 1,
   }
-  const order = ['babynuke', 'mirv', 'bigmissile', 'nuke', 'roller', 'funky', 'leapfrog', 'heavyroller', 'sandhog', 'deathshead']
+  const order = ['babynuke', 'mirv', 'bigmissile', 'nuke', 'roller', 'funky', 'leapfrog', 'heavyroller', 'deathshead']
   // Keep a war chest back so the enemy can still plant producers on its turns (aiPlant).
   const PLANT_RESERVE = 2400
   let bought = true
