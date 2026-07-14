@@ -4,6 +4,7 @@ import { World, GX, GZ, GRAVITY, WIND_ACCEL, CROP, MINE, DERRICK, CEMETERY, PROD
 import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './weapons'
 import { planShot } from './ai'
 import { createHud } from './hud'
+import { flagOf, randomCountry, type Country } from './countries'
 import * as sfx from './audio'
 
 const COLLAPSE_AT = 0.2 // fort integrity below this = destroyed (≈8/10 of the tower gone)
@@ -155,6 +156,14 @@ let roundSeed = 0
 // Hotseat: when true, side 1 is a second human sharing the keyboard instead of the AI.
 // Every "current player" flow keys off `turn`; the AI paths are gated behind isHuman.
 let twoPlayer = false
+// Cosmetic per-side nation (flag + name shown on the fort bars); null until chosen.
+const playerCountry: (Country | null)[] = [null, null]
+// The fort-bar label for a side: its flag + country name if picked, else a plain label.
+function fortLabel(s: number): string {
+  const c = playerCountry[s]
+  if (c) return `${flagOf(c.code)} ${c.name}`
+  return twoPlayer ? `Player ${s + 1} fort` : s === 0 ? 'Your fort' : 'Enemy fort'
+}
 function isHuman(s: number): boolean {
   return s === 0 || twoPlayer
 }
@@ -2672,7 +2681,7 @@ function fullReset(): void {
     lastIncome[s] = 0
     shotThisRound[s] = false
   }
-  hud.setFortLabels(twoPlayer ? 'Player 1 fort' : 'Your fort', twoPlayer ? 'Player 2 fort' : 'Enemy fort')
+  hud.setFortLabels(fortLabel(0), fortLabel(1))
   nextRound()
 }
 
@@ -2933,13 +2942,43 @@ function showModePicker(): void {
   phase = 'shop' // inert while the picker is up — no aiming/firing behind the overlay
   hud.showModePicker(two => {
     twoPlayer = two
-    fullReset()
-    hud.banner(
-      'RETURN OF THE ZOMBIE KING',
-      two ? 'two players, one keyboard — demolish the other castle' : 'demolish the enemy fort before yours falls',
-      2600
-    )
+    pickCountriesThenStart(two)
   })
+}
+
+// After the mode is chosen, each human seat picks a nation (AI gets a random one),
+// then the match starts. Human seats: side 0 (both modes) + side 1 in 2-player.
+function pickCountriesThenStart(two: boolean): void {
+  playerCountry[0] = null
+  playerCountry[1] = null
+  const humanSeats = two ? [0, 1] : [0]
+  const taken: string[] = []
+  let i = 0
+  const next = () => {
+    if (i >= humanSeats.length) {
+      // The computer opponent flies a random flag of its own.
+      if (!two) playerCountry[1] = randomCountry(taken)
+      startMatch(two)
+      return
+    }
+    const seat = humanSeats[i++]
+    hud.showCountryPicker(two ? `PLAYER ${seat + 1}` : 'YOU', taken, c => {
+      playerCountry[seat] = c
+      taken.push(c.code)
+      next()
+    })
+  }
+  next()
+}
+
+function startMatch(two: boolean): void {
+  fullReset()
+  const c0 = playerCountry[0]
+  hud.banner(
+    'RETURN OF THE ZOMBIE KING',
+    c0 ? `${flagOf(c0.code)} ${c0.name} marches to war!` : two ? 'two players, one keyboard' : 'demolish the enemy fort before yours falls',
+    2600
+  )
 }
 showModePicker()
 renderer.setAnimationLoop(tick)

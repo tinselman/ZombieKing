@@ -1,5 +1,7 @@
 // Scorched Earth 3D — DOM heads-up display: integrity bars, wind, weapons, power, banners.
 
+import { COUNTRIES, flagOf, type Country } from './countries'
+
 export type WeaponRow = { idx: number; name: string; ammo: number; selected: boolean }
 
 const CSS = `
@@ -80,6 +82,20 @@ const CSS = `
 #sc-mode .modes button:hover { border-color: #16181b; transform: translateY(-2px); box-shadow: 0 6px 18px rgba(40,50,60,0.12); }
 #sc-mode .modes .mt { display: block; font-size: 20px; font-weight: 800; letter-spacing: 0.04em; margin-bottom: 6px; color: #16181b; }
 #sc-mode .modes .ms { display: block; font-size: 12.5px; color: #7a838d; line-height: 1.45; }
+/* Country picker — pick a nation + flag before the match (cosmetic identity). */
+#sc-country { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #fff; pointer-events: auto; z-index: 9; }
+#sc-country h1 { font-size: 30px; font-weight: 800; letter-spacing: 0.04em; color: #16181b; margin: 0 0 4px; text-align: center; }
+#sc-country h1 .flag { font-size: 34px; vertical-align: -3px; }
+#sc-country p { font-size: 13px; color: #7a838d; margin: 0 0 16px; letter-spacing: 0.04em; }
+#sc-country input { width: 420px; max-width: 80vw; padding: 11px 16px; font-size: 15px; border: 1px solid #c4cad1; border-radius: 10px; outline: none; margin-bottom: 14px; }
+#sc-country input:focus { border-color: #16181b; }
+#sc-countryGrid { width: 640px; max-width: 92vw; height: 52vh; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); grid-auto-rows: min-content; align-content: start; gap: 6px; padding: 4px; }
+#sc-countryGrid button { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid #e2e6ea; border-radius: 9px; background: #fff; color: #2c3138; cursor: pointer; font-size: 13px; text-align: left; }
+#sc-countryGrid button:hover { border-color: #16181b; background: #f6f8fa; }
+#sc-countryGrid button .flag { font-size: 22px; line-height: 1; }
+#sc-countryGrid button .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sc-country .rand { margin-top: 14px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; padding: 9px 22px; border-radius: 9px; border: 1px solid #c4cad1; background: #fff; color: #2c3138; cursor: pointer; }
+#sc-country .rand:hover { border-color: #16181b; }
 #sc-shop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(244,246,248,0.82); backdrop-filter: blur(8px); pointer-events: auto; }
 #sc-shop .box { background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 14px; padding: 24px 28px; width: 780px; max-height: 88vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(40,50,60,0.12); color: #2c3138; }
 #sc-shopList { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
@@ -194,6 +210,10 @@ export function createHud(
       <button id="sc-mode1"><span class="mt">1 PLAYER</span><span class="ms">Battle the computer — it builds, schemes, and shoots back.</span></button>
       <button id="sc-mode2"><span class="mt">2 PLAYERS</span><span class="ms">Hotseat duel — share the keyboard, take turns, last castle standing wins.</span></button>
     </div></div>
+    <div id="sc-country"><h1></h1><p>Choose your nation — for honour, for glory, for the flag.</p>
+      <input id="sc-countrySearch" type="text" placeholder="Search countries…" autocomplete="off" />
+      <div id="sc-countryGrid"></div>
+      <button class="rand">🎲 SURPRISE ME</button></div>
     <div id="sc-shop"><div class="box">
       <h2>ZOMBIE KING MARKET<span id="sc-shopPlayer"></span></h2>
       <div id="sc-shopResult"></div>
@@ -270,6 +290,11 @@ export function createHud(
   const modeEl = q<HTMLElement>('#sc-mode')
   const mode1 = q<HTMLButtonElement>('#sc-mode1')
   const mode2 = q<HTMLButtonElement>('#sc-mode2')
+  const countryEl = q<HTMLElement>('#sc-country')
+  const countryTitle = q<HTMLElement>('#sc-country h1')
+  const countrySearch = q<HTMLInputElement>('#sc-countrySearch')
+  const countryGrid = q<HTMLElement>('#sc-countryGrid')
+  const countryRand = q<HTMLButtonElement>('#sc-country .rand')
   const shopPlayer = q<HTMLElement>('#sc-shopPlayer')
   const fortYouLabel = q<HTMLElement>('#sc-fortYou .label')
   const fortFoeLabel = q<HTMLElement>('#sc-fortFoe .label')
@@ -590,6 +615,37 @@ export function createHud(
       }
       mode1.onclick = () => pick(false)
       mode2.onclick = () => pick(true)
+    },
+    // Country picker: `who` labels the seat (e.g. "PLAYER 1"); resolves with the chosen
+    // country. `taken` codes are hidden so two humans can't pick the same nation.
+    showCountryPicker(who: string, taken: string[], onPick: (c: Country) => void) {
+      countryTitle.innerHTML = `${who} — pick your country`
+      countrySearch.value = ''
+      const choose = (c: Country) => {
+        countryEl.style.display = 'none'
+        onPick(c)
+      }
+      const render = (filter: string) => {
+        const f = filter.trim().toLowerCase()
+        const list = COUNTRIES.filter(c => !taken.includes(c.code) && (!f || c.name.toLowerCase().includes(f)))
+        countryGrid.innerHTML = list
+          .map(c => `<button data-code="${c.code}"><span class="flag">${flagOf(c.code)}</span><span class="nm">${c.name}</span></button>`)
+          .join('')
+        countryGrid.querySelectorAll('button').forEach(b => {
+          b.addEventListener('click', () => {
+            const code = (b as HTMLElement).dataset.code!
+            choose(COUNTRIES.find(c => c.code === code)!)
+          })
+        })
+      }
+      render('')
+      countrySearch.oninput = () => render(countrySearch.value)
+      countryRand.onclick = () => {
+        const pool = COUNTRIES.filter(c => !taken.includes(c.code))
+        choose(pool[Math.floor(Math.random() * pool.length)])
+      }
+      countryEl.style.display = 'flex'
+      countrySearch.focus()
     },
   }
 }
