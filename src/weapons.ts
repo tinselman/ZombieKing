@@ -29,7 +29,7 @@ export type WeaponDef = {
 export const WEAPONS: WeaponDef[] = [
   { id: 'missile', name: 'Baby Missile', ammo: Infinity, blast: 2.8, kind: 'blast' },
   { id: 'bigmissile', name: 'Missile', ammo: 0, blast: 3.8, kind: 'blast', price: 500, pack: 10 },
-  { id: 'babynuke', name: 'Baby Nuke', ammo: 1, blast: 6.0, kind: 'blast', price: 1200, pack: 2 },
+  { id: 'babynuke', name: 'Baby Nuke', ammo: 0, blast: 6.0, kind: 'blast', price: 1200, pack: 2 },
   { id: 'nuke', name: 'Nuke', ammo: 0, blast: 9.5, kind: 'blast', price: 2800, pack: 1 },
   { id: 'frisbee', name: 'Frisbee Bomb', ammo: 0, blast: 9.5, kind: 'frisbee', price: 3000, pack: 1 },
   { id: 'saucer', name: 'Flying Saucer', ammo: 0, blast: 9.5, kind: 'saucer', price: 6000, pack: 1 },
