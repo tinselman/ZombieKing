@@ -635,9 +635,10 @@ function cardGhost(side: number): void {
   const cx = Math.round(Math.round(GX / 2) + 8 + Math.random() * (GX / 2 - 18))
   const cz = Math.round(8 + Math.random() * (GZ - 16))
   world.castleOverride[1] = { cx, cz }
-  world.moveFort(1, cx, cz, forti[1])
+  world.moveFort(1, cx, cz, forti[1]) // carries the tower's damage to the new spot
   world.hiddenFort = 1
   world.rebuild()
+  hud.setIntegrity(world.integrity(0), world.integrity(1))
   snapCannonToSeat(1)
   sides[1].cannon.group.visible = false
   ghostSide = 1
@@ -1520,8 +1521,9 @@ function placeCastle(): void {
   if (castleGhost) castleGhost.visible = false
   hud.setSetupHint('')
   world.castleOverride[turn] = { cx, cz } // honoured by the next full regen (new round)
-  world.moveFort(turn, cx, cz, forti[turn]) // move the fort NOW, damage preserved
+  world.moveFort(turn, cx, cz, forti[turn]) // move the fort NOW, carrying its damage
   world.rebuild()
+  hud.setIntegrity(world.integrity(0), world.integrity(1)) // reflect the carried-over damage
   snapCannonToSeat(turn)
   sfx.tick()
   if (ghostReposition) {

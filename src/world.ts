@@ -398,6 +398,23 @@ export class World {
   // battlefield damage, craters, and producers stay exactly as they are.
   moveFort(side: number, cx: number, cz: number, forti: Fortifications): void {
     const cell = side === 0 ? FORT_A : FORT_B
+    // Capture the current tower damage (blueprint cells that are missing) per tower so
+    // a relocation — e.g. the Ghost Tower card — carries the damage instead of healing
+    // the tower to full. Recorded as offsets from each tower's origin, re-applied to the
+    // matching tower after the rebuild. A full-health tower records nothing (no-op).
+    const old = this.forts[side]
+    const damage: { dx: number; dy: number; dz: number }[][] = []
+    if (old) {
+      for (let ti = 0; ti < old.towers.length; ti++) {
+        const t = old.towers[ti]
+        const extraH = ti === 0 ? forti.height : 0
+        const miss: { dx: number; dy: number; dz: number }[] = []
+        for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, cell, extraH)) {
+          if (this.cellAt(p.x, p.y, p.z) === EMPTY) miss.push({ dx: p.x - t.cx, dy: p.y - t.baseY, dz: p.z - t.cz })
+        }
+        damage.push(miss)
+      }
+    }
     for (let i = 0; i < this.grid.length; i++) if (this.grid[i] === cell) this.grid[i] = EMPTY
     const dir = side === 0 ? 1 : -1
     const sites = [{ cx, cz }]
@@ -407,6 +424,18 @@ export class World {
     for (let ti = 0; ti < sites.length; ti++) {
       const extraH = ti === 0 ? forti.height : 0
       fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
+    }
+    // Re-punch the captured damage into the matching relocated towers (move as-is).
+    for (let ti = 0; ti < fort.towers.length; ti++) {
+      const miss = damage[ti]
+      if (!miss) continue
+      const t = fort.towers[ti]
+      for (const m of miss) {
+        const x = t.cx + m.dx
+        const y = t.baseY + m.dy
+        const z = t.cz + m.dz
+        if (this.inBounds(x, y, z) && this.cellAt(x, y, z) === cell) this.grid[this.idx(x, y, z)] = EMPTY
+      }
     }
     this.forts[side] = fort
     this.dirty = true
