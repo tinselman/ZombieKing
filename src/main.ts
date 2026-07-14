@@ -109,11 +109,20 @@ type SideState = {
   fallV: number
 }
 
-// Player is red (light-red castle); the computer is blue (light-blue castle).
-const sides: SideState[] = [
-  { cannon: makeCannon(0xc0392b), az: 0, el: 55 * DEG, arsenal: newArsenal(), wsel: 0, targetX: 0, targetY: 0, targetZ: 0, fallV: 0 },
-  { cannon: makeCannon(0x2f6fd6), az: Math.PI, el: 55 * DEG, arsenal: newArsenal(), wsel: 0, targetX: 0, targetY: 0, targetZ: 0, fallV: 0 },
-]
+// Up to four seats, one cannon each, tinted to match the fort colours (red / blue /
+// green / gold). Only the first `numPlayers` are in play; the rest sit idle (hidden).
+const SEAT_CANNON_COLORS = [0xc0392b, 0x2f6fd6, 0x3a9d4a, 0xd6a72f]
+const sides: SideState[] = SEAT_CANNON_COLORS.map((c, i) => ({
+  cannon: makeCannon(c),
+  az: i === 0 ? 0 : Math.PI,
+  el: 55 * DEG,
+  arsenal: newArsenal(),
+  wsel: 0,
+  targetX: 0,
+  targetY: 0,
+  targetZ: 0,
+  fallV: 0,
+}))
 
 function dirOf(side: number): THREE.Vector3 {
   const s = sides[side]
@@ -147,25 +156,36 @@ const START_CASH = 2500 // turn-1 bankroll — enough for producers/cards, not a
 let phase: Phase = 'aim'
 let turn = 0
 let round = 0
-let scoreYou = 0
-let scoreFoe = 0
-const money = [START_CASH, START_CASH]
+// Seat model (2–4 players). `numPlayers` seats are in play; `seatHuman[s]` = human vs AI;
+// `alive[s]` = still standing THIS round (an eliminated seat sits out until the next round);
+// `score[s]` = round wins in the match. 1P = [human, AI]; 2P = [human, human].
+let numPlayers = 2
+const seatHuman = [true, false, false, false]
+const alive = [true, true, false, false]
+const score = [0, 0, 0, 0]
+const money = [START_CASH, START_CASH, START_CASH, START_CASH]
 let lastRoundResult = ''
-const lastIncome = [0, 0] // resource income collected at the start of each side's turn
+const lastIncome = [0, 0, 0, 0] // resource income collected at the start of each seat's turn
 let roundSeed = 0
-// Hotseat: when true, side 1 is a second human sharing the keyboard instead of the AI.
-// Every "current player" flow keys off `turn`; the AI paths are gated behind isHuman.
+// True when more than one human shares the keyboard (hotseat) — gates the handoff screen
+// and the "Player N" labelling. Derived from seatHuman when a match starts.
 let twoPlayer = false
-// Cosmetic per-side nation (flag + name shown on the fort bars); null until chosen.
-const playerCountry: (Country | null)[] = [null, null]
-// The fort-bar label for a side: its flag + country name if picked, else a plain label.
+// Cosmetic per-seat nation (flag + name shown on the fort bars); null until chosen.
+const playerCountry: (Country | null)[] = [null, null, null, null]
+// The fort-bar label for a seat: its flag + country name if picked, else a plain label.
 function fortLabel(s: number): string {
   const c = playerCountry[s]
   if (c) return `${flagOf(c.code)} ${c.name}`
-  return twoPlayer ? `Player ${s + 1} fort` : s === 0 ? 'Your fort' : 'Enemy fort'
+  return twoPlayer || numPlayers > 2 ? `Player ${s + 1}` : s === 0 ? 'Your fort' : 'Enemy fort'
 }
 function isHuman(s: number): boolean {
-  return s === 0 || twoPlayer
+  return seatHuman[s]
+}
+// Seats still standing this round (used for turn rotation + win detection).
+function livingSeats(): number[] {
+  const out: number[] = []
+  for (let s = 0; s < numPlayers; s++) if (alive[s]) out.push(s)
+  return out
 }
 function nameOf(s: number): string {
   return twoPlayer ? `Player ${s + 1}` : s === 0 ? 'you' : 'the enemy'
@@ -174,23 +194,20 @@ function capName(s: number): string {
   const n = nameOf(s)
   return n[0].toUpperCase() + n.slice(1)
 }
-// Match-persistent structure upgrades (taller main tower, extra towers).
-const forti: Fortifications[] = [
-  { height: 0, towers: 0, barricade: 0 },
-  { height: 0, towers: 0, barricade: 0 },
-]
+// Match-persistent structure upgrades (taller main tower, extra towers), one per seat.
+const forti: Fortifications[] = Array.from({ length: 4 }, () => ({ height: 0, towers: 0, barricade: 0 }))
 // Producers the player and AI have planted, positioned on their own half. These persist
 // across rounds for BOTH sides (rebuilt into each fresh world) — a lost round only costs
 // half your cash and one card, never the economy. type is the cell kind
 // (CROP/MINE/DERRICK/CEMETERY); baseYield is full per-turn income; age counts owner-turns
 // survived (drives crop maturation).
 type Planted = { cx: number; cz: number; type: number; baseYield: number; age: number }
-const planted: Planted[][] = [[], []]
+const planted: Planted[][] = [[], [], [], []]
 // Resources each side bought in the market, awaiting placement (buy-then-place).
 // Carries over if unplaced. marketFull = the round-start market (fortifications too).
-const pendingResources: number[][] = [[], []]
+const pendingResources: number[][] = [[], [], [], []]
 let marketFull = false
-const roundStartPending = [false, false] // each side's first turn of a round gets the full market
+const roundStartPending = [false, false, false, false] // each seat's first turn of a round = full market
 
 // Crops ramp in fast (55% → 100% by the second payout); mines/derricks pay full at once.
 function maturity(type: number, age: number): number {
@@ -211,8 +228,13 @@ function sideIncome(side: number): number {
 // Refresh the top status bar for the acting player: their cash and resource income
 // rate (the turn-start income message is hidden by the market, so keep this visible).
 function syncStatus(): void {
-  const s = isHuman(turn) ? turn : 0 // during AI turns keep showing the human's numbers
-  hud.setStatus(round, ROUNDS, scoreYou, scoreFoe, money[s], sideIncome(s), twoPlayer ? s + 1 : 0)
+  const s = isHuman(turn) ? turn : firstHuman() // during AI turns keep showing a human's numbers
+  hud.setStatus(round, ROUNDS, score[0], score[1], money[s], sideIncome(s), twoPlayer || numPlayers > 2 ? turn + 1 : 0)
+}
+// The lowest-indexed human seat (whose numbers the status bar shows during AI turns).
+function firstHuman(): number {
+  for (let s = 0; s < numPlayers; s++) if (seatHuman[s]) return s
+  return 0
 }
 
 // ---------------------------------------------------------------- stratagem cards
@@ -237,7 +259,7 @@ const DECK: CardDef[] = [
   { id: 'money5', name: 'Money: $6,000', weight: 2, impl: true, emoji: '🤑', blurb: "A king's ransom. Play to pocket $6,000." },
 ]
 const CARD_COST = 1500
-const hand: CardId[][] = [[], []] // cards each side is holding
+const hand: CardId[][] = [[], [], [], []] // cards each seat is holding
 // Ghost Tower state: which side's tower is currently ghosted (-1 none), and the decoy
 // (old) position the enemy AI keeps aiming at while your real tower is hidden/moved.
 let ghostSide = -1
@@ -256,8 +278,8 @@ let flashSweep = 0 // beam heading (rad), swept with the arrow keys during defen
 // Force Field: side with an active (as-yet-unhit) shield, or -1. Bumper Crop: a ×2
 // multiplier on a side's NEXT income payout. Skip Player: this side's next turn is skipped.
 let forceFieldSide = -1
-const incomeBoost = [1, 1]
-const skipNext = [false, false]
+const incomeBoost = [1, 1, 1, 1]
+const skipNext = [false, false, false, false]
 // Ghost Tower: set while the player is hand-repositioning their (still-visible) tower.
 let ghostReposition = false
 function cardDef(id: CardId): CardDef {
@@ -590,15 +612,13 @@ function applyGhostDamage(caster: number, defender: number, frac: number): void 
     const c = removed[k]
     spawnExplosion(new THREE.Vector3(c.x, c.y, c.z), 2.4, false)
   }
-  const iYou = world.integrity(0)
-  const iFoe = world.integrity(1)
-  hud.setIntegrity(iYou, iFoe)
+  hud.setIntegrity(world.integrity(0), world.integrity(1))
   const t = world.forts[defender]?.towers[0]
   if (t) addShake(9, new THREE.Vector3(t.cx, t.baseY + 6, t.cz))
   sfx.boom(6)
   hud.msg(`${capName(caster)}'s ghosts tore into ${nameOf(defender)}'s tower!`)
-  const dead = (defender === 0 ? iYou : iFoe) < COLLAPSE_AT
-  if (dead) concludeRound(defender === 0, defender === 1)
+  // If the ghosts collapsed the defender's tower, run it through the elimination flow.
+  if (alive[defender] && world.integrity(defender) < COLLAPSE_AT) concludeRound([defender])
 }
 
 // Ghosts are home and the strike is over (no collapse) — day returns, the caster
@@ -668,8 +688,8 @@ function revealGhost(): void {
 let wind: Wind = { x: 0, z: 0 }
 let chargeT = 0
 let chargePower = 0
-const lastPlayerPower = [60, 60] // per human side: last shot power (aim marker)
-const shotThisRound = [false, false] // power marker only shows after a side's first shot
+const lastPlayerPower = [60, 60, 60, 60] // per seat: last shot power (aim marker)
+const shotThisRound = [false, false, false, false] // power marker only shows after a seat's first shot
 let resolveT = 0
 let resolveTotal = 0 // wall-clock in 'resolve' (not reset by the settling guard) — safety net
 let flyTotal = 0 // wall-clock in 'fly' — forces a stuck shot (lingering proj/task) to resolve
@@ -1496,11 +1516,16 @@ function ensureCastleGhost(): THREE.Mesh {
   return castleGhost
 }
 
-// The enemy AI positions its own castle somewhere on its half each round.
-function aiPlaceCastle(): void {
+// A computer seat positions its castle for the round. In a 3–4 player game it simply
+// keeps its corner (null override); in a 2-player duel it roams its right half for variety.
+function aiPlaceCastle(s: number): void {
+  if (numPlayers > 2) {
+    world.castleOverride[s] = null
+    return
+  }
   const cx = Math.round(GX - 13 - Math.random() * 26)
   const cz = Math.round(6 + CASTLE_HALF + Math.random() * (GZ - 12 - CASTLE_HALF * 2))
-  world.castleOverride[1] = { cx, cz }
+  world.castleOverride[s] = { cx, cz }
 }
 
 // After a fort moves, its cannon must sit on the new tower right away (no slow slide).
@@ -1915,15 +1940,23 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
 // Hand off to the other side — unless Skip Player flagged them, in which case their
 // turn is skipped entirely and the current side goes again.
 function advanceTurn(): void {
-  const next = 1 - turn
-  if (skipNext[next]) {
-    skipNext[next] = false
-    if (isHuman(next)) hud.showSkipped(twoPlayer ? `Player ${next + 1}, you've been SKIPPED!` : "You've been SKIPPED!")
-    else hud.msg('the enemy is skipped — go again!')
-    startTurn(turn) // Skip's caster takes another turn
-  } else {
+  // Rotate to the next LIVING seat, bypassing any eliminated or Skip-flagged seat. In a
+  // 2-player game bypassing the (only) foe lands back on the caster — the classic Skip
+  // "go again". In 3–4 players it simply denies the skipped seat its turn.
+  let next = turn
+  for (let k = 0; k < numPlayers; k++) {
+    next = (next + 1) % numPlayers
+    if (!alive[next]) continue
+    if (skipNext[next]) {
+      skipNext[next] = false
+      if (isHuman(next)) hud.showSkipped(twoPlayer || numPlayers > 2 ? `Player ${next + 1}, you've been SKIPPED!` : "You've been SKIPPED!")
+      else hud.msg(`${capName(next)} is skipped!`)
+      continue
+    }
     startTurn(next)
+    return
   }
+  startTurn(turn) // fallback (shouldn't happen while >1 seat is alive)
 }
 
 function startTurn(s: number): void {
@@ -1973,7 +2006,7 @@ function reallyStartTurn(s: number): void {
   if (received > 0) money[s] += received
   // Modest AI catch-up: the computer doesn't optimise its spending like a human, so a
   // small per-turn subsidy keeps it able to field weapons, producers AND stratagems.
-  if (s === 1 && !twoPlayer) money[1] += 400
+  if (!isHuman(s)) money[s] += 400 // modest per-turn subsidy so each AI seat can keep up
   if (isHuman(s)) {
     const st = sides[s]
     if ((st.arsenal.get(WEAPONS[st.wsel].id) ?? 0) <= 0) {
@@ -2289,64 +2322,82 @@ function detonateSaucer(p: Proj): void {
 
 // ---------------------------------------------------------------- resolve & match end
 
-// A tower has collapsed — settle the round: plunder half the loser's cash + a random
-// card, crumble the loser's fort(s), and cue the 'end' celebration. Shared by shots,
-// played-card strikes (finishResolve) and the Full Moon ghost strike.
-function concludeRound(youDead: boolean, foeDead: boolean): void {
+// Newly-collapsed seats are out for the round (their producers linger as neutral rubble).
+// If ≤1 seat is still standing the round is OVER — the survivor scores + the 'end'
+// celebration fires — and this returns true; otherwise the round continues (the dead
+// fort just crumbles) and it returns false so the caller keeps the rotation going.
+function concludeRound(dead: number[]): boolean {
+  for (const l of dead) {
+    if (!alive[l]) continue
+    alive[l] = false
+    world.collapseFort(l, Math.random)
+  }
+  sfx.rumble()
+  const survivors = livingSeats()
+  if (survivors.length > 1) {
+    // Round goes on: pop the crumbled fort(s) now (no deferred 'end' blast) and continue.
+    for (const l of dead) {
+      const lt = world.forts[l].towers[0]
+      const base = new THREE.Vector3(lt.cx, world.surfaceY(lt.cx, lt.cz) + 3, lt.cz)
+      world.burstRubble(lt.cx, lt.cz, 8, Math.random)
+      spawnExplosion(base, 10, true)
+      addShake(11, base)
+    }
+    world.rebuild()
+    hud.setIntegrity(world.integrity(0), world.integrity(1))
+    hud.banner(`${capName(dead[0])} IS OUT!`, `${livingSeats().length} castles still standing`, 2600)
+    return false
+  }
+  // Round over — the lone survivor wins (or nobody, on a mutual kill).
+  const winner = survivors.length === 1 ? survivors[0] : -1
+  if (winner >= 0) score[winner]++
+  // Plunder (2-player only): the winner takes half the loser's cash + one random card.
   let plunder = 0
   let stole = ''
-  if (foeDead && !youDead) {
-    scoreYou++
-    plunder = Math.floor(money[1] / 2)
-    money[0] += plunder
-    money[1] -= plunder
-    stole = stealRandomCard(0, 1)
-  } else if (youDead && !foeDead) {
-    scoreFoe++
-    plunder = Math.floor(money[0] / 2)
-    money[1] += plunder
-    money[0] -= plunder
-    stole = stealRandomCard(1, 0)
+  if (numPlayers === 2 && winner >= 0) {
+    const loser = 1 - winner
+    plunder = Math.floor(money[loser] / 2)
+    money[winner] += plunder
+    money[loser] -= plunder
+    stole = stealRandomCard(winner, loser)
   }
   const cardNote = stole ? ` and their ${stole} card` : ''
   lastRoundResult =
-    youDead && foeDead
+    winner < 0
       ? `Round ${round} drawn — mutual destruction.`
-      : twoPlayer
-        ? `Round ${round}: ${foeDead ? 'Player 1' : 'Player 2'} wins! Plundered half of ${foeDead ? "Player 2's" : "Player 1's"} treasury ($${plunder.toLocaleString()})${cardNote}.`
-        : foeDead
-          ? `Round ${round} won! Plundered half their treasury ($${plunder.toLocaleString()})${cardNote}.`
-          : `Round ${round} lost — the enemy took half your treasury ($${plunder.toLocaleString()})${cardNote}.`
-  const losers: number[] = []
-  if (youDead) losers.push(0)
-  if (foeDead) losers.push(1)
-  // The tower loses its last footing and crumbles straight down into rubble; the
-  // explosion is deferred until it has finished falling (see the 'end' phase).
+      : numPlayers > 2
+        ? `Round ${round}: ${capName(winner)} is the last castle standing!`
+        : twoPlayer
+          ? `Round ${round}: Player ${winner + 1} wins! Plundered half of Player ${(1 - winner) + 1}'s treasury ($${plunder.toLocaleString()})${cardNote}.`
+          : winner === 0
+            ? `Round ${round} won! Plundered half their treasury ($${plunder.toLocaleString()})${cardNote}.`
+            : `Round ${round} lost — the enemy took half your treasury ($${plunder.toLocaleString()})${cardNote}.`
+  // Deferred celebratory blast: the crumbled fort(s) burst once they've settled ('end').
   pendingBlasts = []
-  for (const l of losers) {
-    world.collapseFort(l, Math.random)
+  for (const l of dead) {
     const lt = world.forts[l].towers[0]
     pendingBlasts.push({ cx: lt.cx, cz: lt.cz, y: lt.baseY })
   }
   blastFired = false
-  sfx.rumble()
-  const loserTower = world.forts[losers[0]].towers[0]
-  const center =
-    losers.length === 2
-      ? new THREE.Vector3(GX / 2, 14, GZ / 2)
-      : new THREE.Vector3(loserTower.cx, loserTower.baseY + 6, loserTower.cz)
-  // Winner side for the celebration (colour + text); -1 on mutual destruction.
-  const winner = losers.length === 2 ? -1 : youDead ? 1 : 0
+  const focus = dead.length ? world.forts[dead[0]].towers[0] : world.forts[winner].towers[0]
+  const center = dead.length > 1 ? new THREE.Vector3(GX / 2, 14, GZ / 2) : new THREE.Vector3(focus.cx, focus.baseY + 6, focus.cz)
   const line1 = `ROUND ${round} OVER`
   const line2 =
-    winner < 0 ? 'MUTUAL DESTRUCTION!' : twoPlayer ? `PLAYER ${winner + 1} WON!` : winner === 0 ? 'YOU WON!' : 'YOU LOST!'
+    winner < 0
+      ? 'MUTUAL DESTRUCTION!'
+      : twoPlayer || numPlayers > 2
+        ? `PLAYER ${winner + 1} WINS!`
+        : winner === 0
+          ? 'YOU WON!'
+          : 'YOU LOST!'
   endInfo = { line1, line2, winner, center }
   setNight(false)
   phase = 'end'
   endT = 0
   endShown = false
-  hud.setIntegrity(youDead ? 0 : world.integrity(0), foeDead ? 0 : world.integrity(1))
+  hud.setIntegrity(world.integrity(0), world.integrity(1))
   syncStatus()
+  return true
 }
 
 function finishResolve(force = false): void {
@@ -2359,19 +2410,19 @@ function finishResolve(force = false): void {
   // Was this resolve a played card (bonus strike) rather than the turn's shot?
   const wasCard = flyIsCard
   flyIsCard = false
-  for (let s = 0; s < 2; s++) {
+  for (let s = 0; s < numPlayers; s++) {
     const seat = world.cannonSeat(s)
     sides[s].targetX = seat.x
     sides[s].targetY = seat.y
     sides[s].targetZ = seat.z
   }
-  const iYou = world.integrity(0)
-  const iFoe = world.integrity(1)
-  hud.setIntegrity(iYou, iFoe)
-  const youDead = iYou < COLLAPSE_AT
-  const foeDead = iFoe < COLLAPSE_AT
-  if (youDead || foeDead) {
-    concludeRound(youDead, foeDead)
+  hud.setIntegrity(world.integrity(0), world.integrity(1))
+  // Any living seat whose tower just collapsed is newly eliminated this resolve.
+  const dead: number[] = []
+  for (let s = 0; s < numPlayers; s++) if (alive[s] && world.integrity(s) < COLLAPSE_AT) dead.push(s)
+  if (dead.length) {
+    const roundEnded = concludeRound(dead)
+    if (!roundEnded) advanceTurn() // a seat is out but the round goes on
   } else if (wasCard) {
     // A played-card strike that didn't collapse anything — the shooter still shoots.
     phase = isHuman(turn) ? 'aim' : 'aiThink'
@@ -2396,12 +2447,12 @@ function rebuildRoundWorld(): void {
   world.generate(roundSeed, forti)
   // Re-raise every planted producer into the fresh terrain (skip any spot a new
   // fort/berm now occupies). Terrain is fixed per match, so positions stay valid.
-  for (let s = 0; s < 2; s++) {
+  for (let s = 0; s < numPlayers; s++) {
     for (const p of planted[s]) {
       if (world.canPlaceProducer(p.cx, p.cz, p.type)) world.buildProducer(p.cx, p.cz, s, p.type, p.baseYield, p.age)
     }
   }
-  for (let s = 0; s < 2; s++) {
+  for (let s = 0; s < numPlayers; s++) {
     const st = sides[s]
     const seat = world.cannonSeat(s)
     st.cannon.group.position.set(seat.x, seat.y, seat.z)
@@ -2437,26 +2488,27 @@ function setupRoundWorld(): void {
   }
   setNight(false)
   world.clearRaided()
-  incomeBoost[0] = 1
-  incomeBoost[1] = 1
-  skipNext[0] = false
-  skipNext[1] = false
-  sides[0].cannon.group.visible = true
-  sides[1].cannon.group.visible = true
   world.hiddenFort = -1
+  for (let s = 0; s < 4; s++) {
+    incomeBoost[s] = 1
+    skipNext[s] = false
+    shotThisRound[s] = false
+    alive[s] = s < numPlayers // everyone back in for the new round
+    sides[s].cannon.group.visible = s < numPlayers
+  }
   // Terrain is fixed for the whole match (seed set at match start) so producers you
   // plant stay on valid ground round to round; each round just rebuilds the same land.
   rebuildRoundWorld()
-  for (let s = 0; s < 2; s++) {
-    sides[s].az = s === 0 ? 0 : Math.PI
+  for (let s = 0; s < numPlayers; s++) {
+    // Aim starts pointed toward the map centre (free aim lets each player sweep anywhere).
+    const t = world.forts[s]?.towers[0]
+    sides[s].az = t ? Math.atan2(GZ / 2 - t.cz, GX / 2 - t.cx) : s === 0 ? 0 : Math.PI
     sides[s].el = 55 * DEG
     applyCannonPose(s)
   }
   aiErr = 16
   endInfo = null
   flyHold = null
-  shotThisRound[0] = false
-  shotThisRound[1] = false
   clearLastTrails()
   hud.setIntegrity(1, 1)
   updateWeaponHud()
@@ -2466,43 +2518,43 @@ function setupRoundWorld(): void {
 
 // The computer spends its winnings too: fortifications when flush, then
 // cheap weapon volume first, big-ticket when rich.
-function aiShop(): void {
+function aiShop(s: number): void {
   // Farms are now planted per-turn (see aiPlant), not bought here. The shop spends
-  // the enemy's winnings on defenses and weapons.
-  // A berm is cheap insurance — the enemy grabs one fairly often.
-  if (money[1] >= 2500 && forti[1].barricade < 2 && Math.random() < 0.55) {
-    money[1] -= 2500
-    forti[1].barricade++
+  // this computer seat's winnings on defenses and weapons.
+  // A berm is cheap insurance — the AI grabs one fairly often.
+  if (money[s] >= 2500 && forti[s].barricade < 2 && Math.random() < 0.55) {
+    money[s] -= 2500
+    forti[s].barricade++
   }
-  if (money[1] >= 8000 && forti[1].towers < 2 && Math.random() < 0.5) {
-    money[1] -= 8000
-    forti[1].towers++
+  if (money[s] >= 8000 && forti[s].towers < 2 && Math.random() < 0.5) {
+    money[s] -= 8000
+    forti[s].towers++
   }
-  if (money[1] >= 5000 && forti[1].height < 12 && Math.random() < 0.5) {
-    money[1] -= 5000
-    forti[1].height += 6
+  if (money[s] >= 5000 && forti[s].height < 12 && Math.random() < 0.5) {
+    money[s] -= 5000
+    forti[s].height += 6
   }
   // A flashlight is cheap insurance against a Full Moon ghost strike.
-  if (money[1] >= 3000 && (sides[1].arsenal.get('flashlight') ?? 0) < 1 && Math.random() < 0.4) {
-    money[1] -= 1500
-    sides[1].arsenal.set('flashlight', 1)
+  if (money[s] >= 3000 && (sides[s].arsenal.get('flashlight') ?? 0) < 1 && Math.random() < 0.4) {
+    money[s] -= 1500
+    sides[s].arsenal.set('flashlight', 1)
   }
   const caps: Record<string, number> = {
     babynuke: 4, mirv: 3, bigmissile: 20, nuke: 2, roller: 3, funky: 2,
     leapfrog: 2, heavyroller: 2, deathshead: 1,
   }
   const order = ['babynuke', 'mirv', 'bigmissile', 'nuke', 'roller', 'funky', 'leapfrog', 'heavyroller', 'deathshead']
-  // Keep a war chest back so the enemy can still plant producers on its turns (aiPlant).
+  // Keep a war chest back so the AI can still plant producers on its turns (aiPlant).
   const PLANT_RESERVE = 2400
   let bought = true
   while (bought) {
     bought = false
     for (const id of order) {
       const w = WEAPONS.find(x => x.id === id)!
-      const owned = sides[1].arsenal.get(id) ?? 0
-      if (w.price !== undefined && money[1] - PLANT_RESERVE >= w.price && owned < (caps[id] ?? 2)) {
-        money[1] -= w.price
-        sides[1].arsenal.set(id, owned + (w.pack ?? 1))
+      const owned = sides[s].arsenal.get(id) ?? 0
+      if (w.price !== undefined && money[s] - PLANT_RESERVE >= w.price && owned < (caps[id] ?? 2)) {
+        money[s] -= w.price
+        sides[s].arsenal.set(id, owned + (w.pack ?? 1))
         bought = true
       }
     }
@@ -2548,8 +2600,8 @@ function refreshShop(): void {
     {
       round,
       rounds: ROUNDS,
-      scoreYou,
-      scoreFoe,
+      scoreYou: score[0],
+      scoreFoe: score[1],
       money: money[s],
       result: marketFull
         ? lastRoundResult
@@ -2642,33 +2694,26 @@ function nextRound(): void {
   round++
   // The stipend seeds rounds 2+ only — round 1 is just START_CASH (no double-dip, so the
   // opening bankroll can't afford a decisive weapon and building economy comes first).
-  if (round > 1) {
-    money[0] += ROUND_STIPEND
-    money[1] += ROUND_STIPEND
+  for (let s = 0; s < numPlayers; s++) {
+    if (round > 1) money[s] += ROUND_STIPEND
+    roundStartPending[s] = true // each seat's first turn of the round = FULL market + castle
   }
-  if (!twoPlayer) {
-    aiPlaceCastle() // the computer positions its own castle for the new round
-    aiShop() // ...and restocks weapons/fortifications (round start only)
-  }
+  // Each computer seat positions its castle + restocks (round start only).
+  for (let s = 0; s < numPlayers; s++) if (!isHuman(s)) { aiPlaceCastle(s); aiShop(s) }
   setupRoundWorld()
-  // Each side's first turn of the round gets the FULL market + castle placement.
-  roundStartPending[0] = true
-  roundStartPending[1] = true
   startTurn(0)
 }
 
 function fullReset(): void {
   round = 0
-  scoreYou = 0
-  scoreFoe = 0
-  money[0] = START_CASH
-  money[1] = START_CASH
   lastRoundResult = ''
   // Fresh battlefield for the new match, fixed across this match's rounds. Producers
   // can be placed anywhere (even water), so any seed is playable.
   roundSeed = Math.floor(Math.random() * 1e9)
-  world.castleOverride = [null, null] // castles revert to the seed's spots until placed
-  for (let s = 0; s < 2; s++) {
+  world.castleOverride = Array.from({ length: numPlayers }, () => null) // revert to seed spots
+  for (let s = 0; s < numPlayers; s++) {
+    score[s] = 0
+    money[s] = START_CASH
     sides[s].arsenal = newArsenal()
     sides[s].wsel = 0
     forti[s].height = 0
@@ -2679,6 +2724,7 @@ function fullReset(): void {
     hand[s] = []
     lastIncome[s] = 0
     shotThisRound[s] = false
+    alive[s] = true
   }
   hud.setFortLabels(fortLabel(0), fortLabel(1))
   nextRound()
@@ -2900,13 +2946,19 @@ function tick(now: number): void {
     // Hold on the wreckage a beat after the blast before the result / next round.
     if (!endShown && endT > 4.2 && endInfo) {
       endShown = true
-      const decided = round >= ROUNDS || scoreYou > ROUNDS / 2 || scoreFoe > ROUNDS / 2
+      // The match ends when a seat reaches the win threshold (2 in best-of-3) or rounds run out.
+      const winThreshold = Math.floor(ROUNDS / 2) + 1
+      const best = score.slice(0, numPlayers).reduce((a, b) => Math.max(a, b), 0)
+      const leaders = []
+      for (let s = 0; s < numPlayers; s++) if (score[s] === best) leaders.push(s)
+      const decided = best >= winThreshold || round >= ROUNDS
       if (decided) {
-        const title = twoPlayer
-          ? scoreYou === scoreFoe ? 'DRAW' : `PLAYER ${scoreYou > scoreFoe ? 1 : 2} WINS`
-          : scoreYou > scoreFoe ? 'VICTORY' : scoreYou < scoreFoe ? 'DEFEAT' : 'DRAW'
-        // Rematch returns to the mode picker so you can switch 1P/2P between matches.
-        hud.showEnd(title, `Final score ${scoreYou} — ${scoreFoe} over ${round} rounds.`, showModePicker)
+        const champ = leaders.length === 1 ? leaders[0] : -1
+        const title =
+          champ < 0 ? 'DRAW' : twoPlayer || numPlayers > 2 ? `PLAYER ${champ + 1} WINS` : champ === 0 ? 'VICTORY' : 'DEFEAT'
+        const scoreLine = score.slice(0, numPlayers).join(' — ')
+        // Rematch returns to the mode picker so you can switch modes between matches.
+        hud.showEnd(title, `Final score ${scoreLine} over ${round} rounds.`, showModePicker)
       } else {
         nextRound()
       }
@@ -2940,28 +2992,38 @@ let skipRender = false
 function showModePicker(): void {
   phase = 'shop' // inert while the picker is up — no aiming/firing behind the overlay
   hud.showModePicker(two => {
-    twoPlayer = two
-    pickCountriesThenStart(two)
+    startWithSeats(2, two ? [true, true] : [true, false])
   })
 }
 
-// After the mode is chosen, each human seat picks a nation (AI gets a random one),
-// then the match starts. Human seats: side 0 (both modes) + side 1 in 2-player.
-function pickCountriesThenStart(two: boolean): void {
-  playerCountry[0] = null
-  playerCountry[1] = null
-  const humanSeats = two ? [0, 1] : [0]
+// Configure the seat model (count + which seats are human), run the country picker for
+// each human seat (AI seats fly a random flag), then start the match. The 3–4 player
+// lobby (2.4) calls this the same way with more seats / mixed human-AI flags.
+function startWithSeats(count: number, humanFlags: boolean[]): void {
+  numPlayers = count
+  for (let s = 0; s < 4; s++) {
+    seatHuman[s] = s < count ? !!humanFlags[s] : false
+    playerCountry[s] = null
+  }
+  twoPlayer = seatHuman.slice(0, count).filter(Boolean).length > 1 // >1 human = hotseat
+  const humans: number[] = []
+  for (let s = 0; s < count; s++) if (seatHuman[s]) humans.push(s)
   const taken: string[] = []
   let i = 0
   const next = () => {
-    if (i >= humanSeats.length) {
-      // The computer opponent flies a random flag of its own.
-      if (!two) playerCountry[1] = randomCountry(taken)
-      startMatch(two)
+    if (i >= humans.length) {
+      for (let s = 0; s < count; s++) {
+        if (!seatHuman[s]) {
+          const c = randomCountry(taken)
+          playerCountry[s] = c
+          taken.push(c.code)
+        }
+      }
+      startMatch()
       return
     }
-    const seat = humanSeats[i++]
-    hud.showCountryPicker(two ? `PLAYER ${seat + 1}` : 'YOU', taken, c => {
+    const seat = humans[i++]
+    hud.showCountryPicker(twoPlayer || count > 2 ? `PLAYER ${seat + 1}` : 'YOU', taken, c => {
       playerCountry[seat] = c
       taken.push(c.code)
       next()
@@ -2970,12 +3032,12 @@ function pickCountriesThenStart(two: boolean): void {
   next()
 }
 
-function startMatch(two: boolean): void {
+function startMatch(): void {
   fullReset()
   const c0 = playerCountry[0]
   hud.banner(
     'RETURN OF THE ZOMBIE KING',
-    c0 ? `${flagOf(c0.code)} ${c0.name} marches to war!` : two ? 'two players, one keyboard' : 'demolish the enemy fort before yours falls',
+    c0 ? `${flagOf(c0.code)} ${c0.name} marches to war!` : 'to war!',
     2600
   )
 }
@@ -3001,6 +3063,7 @@ declare global {
       sampleDraws: (n: number) => Record<string, number>
       setMode: (two: boolean) => void
       setBerms: (side: number, n: number) => void
+      setPlayers: (count: number, humanFlags: boolean[]) => void
     }
   }
 }
@@ -3024,17 +3087,20 @@ window.__sv = {
     debris: world.debris.length,
     fxCount: fxs.length,
     night: isNight,
-    cemeteries: [cemeteriesOf(0), cemeteriesOf(1)],
+    numPlayers,
+    alive: alive.slice(0, numPlayers),
+    score: score.slice(0, numPlayers),
+    cemeteries: Array.from({ length: numPlayers }, (_, s) => cemeteriesOf(s)),
     ghostActive: tasks.some(t => t.kind === 'ghosts'),
-    integrity: [world.integrity(0), world.integrity(1)],
+    integrity: Array.from({ length: numPlayers }, (_, s) => +world.integrity(s).toFixed(3)),
     wind,
     power: chargePower,
     lastImpact: { x: lastImpact.x, y: lastImpact.y, z: lastImpact.z },
     proj0: projs[0]
       ? { x: projs[0].pos.x, y: projs[0].pos.y, z: projs[0].pos.z, vx: projs[0].vel.x, vy: projs[0].vel.y, vz: projs[0].vel.z }
       : null,
-    money: [money[0], money[1]],
-    planted: [planted[0].length, planted[1].length],
+    money: money.slice(0, numPlayers),
+    planted: Array.from({ length: numPlayers }, (_, s) => planted[s].length),
     plantCursor: { cx: Math.round(plantCX), cz: Math.round(plantCZ) },
     hand: [...hand[0]],
     enemyHand: hand[1].length,
@@ -3082,7 +3148,24 @@ window.__sv = {
   },
   // Mode test hook: pick 1P/2P headlessly (the UI picker does the same).
   setMode(two: boolean) {
+    numPlayers = 2
+    seatHuman[0] = true
+    seatHuman[1] = two
+    seatHuman[2] = false
+    seatHuman[3] = false
     twoPlayer = two
+    for (let s = 0; s < 4; s++) playerCountry[s] = randomCountry([])
+    fullReset()
+  },
+  // Test hook: start a headless N-player match (humanFlags[s] = human vs AI) — the lobby
+  // (2.4) does the same with real UI.
+  setPlayers(count: number, humanFlags: boolean[]) {
+    numPlayers = count
+    for (let s = 0; s < 4; s++) {
+      seatHuman[s] = s < count ? !!humanFlags[s] : false
+      playerCountry[s] = s < count ? randomCountry([]) : null
+    }
+    twoPlayer = seatHuman.slice(0, count).filter(Boolean).length > 1
     fullReset()
   },
   // Test hook: set a side's berm (barricade) count and rebuild so armor takes effect.
