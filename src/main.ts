@@ -23,7 +23,7 @@ app.appendChild(renderer.domElement)
 
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0xeef1f4)
-scene.fog = new THREE.Fog(0xeef1f4, 180, 460)
+scene.fog = new THREE.Fog(0xeef1f4, 240, 620)
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1200)
 
@@ -1679,7 +1679,9 @@ function aiPlaceCastle(s: number): void {
     world.castleOverride[s] = null
     return
   }
-  const cx = Math.round(GX - 13 - Math.random() * 26)
+  // Keep the AI on its OWN half (seat 0 = left, seat 1 = right) rather than a hardcoded
+  // right edge — matters now that the map is square and both seats can be AI.
+  const cx = s === 0 ? Math.round(13 + Math.random() * 26) : Math.round(GX - 13 - Math.random() * 26)
   const cz = Math.round(6 + CASTLE_HALF + Math.random() * (GZ - 12 - CASTLE_HALF * 2))
   world.castleOverride[s] = { cx, cz }
 }
@@ -2686,7 +2688,7 @@ function finishResolve(force = false): void {
 // (Re)build the current round's battlefield — same seed, so buying a tower in
 // the armory adds it to the already-visible terrain.
 function rebuildRoundWorld(): void {
-  world.generate(roundSeed, forti)
+  world.generate(roundSeed, forti, numPlayers)
   // Re-raise every planted producer into the fresh terrain (skip any spot a new
   // fort/berm now occupies). Terrain is fixed per match, so positions stay valid.
   for (let s = 0; s < numPlayers; s++) {

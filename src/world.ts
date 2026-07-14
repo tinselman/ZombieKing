@@ -4,7 +4,7 @@ import * as THREE from 'three'
 
 export const GX = 160
 export const GY = 96
-export const GZ = 72
+export const GZ = 160 // square footprint so 3–4 player forts sit equidistant (was 72, oblong)
 export const GRAVITY = 28
 export const WIND_ACCEL = 0.45 // projectile acceleration per unit of wind speed
 
@@ -49,10 +49,17 @@ function spawnAnchors(n: number, rand: () => number): { cx: number; cz: number; 
     cz: Math.max(10, Math.min(GZ - 10, Math.round(cz + (rand() - 0.5) * 10))),
     facing: cx < GX / 2 ? 1 : -1,
   })
-  const loX = GX * 0.16, hiX = GX * 0.84, loZ = GZ * 0.24, hiZ = GZ * 0.76
-  if (n <= 2) return [mk(18, GZ / 2), mk(GX - 18, GZ / 2)]
-  if (n === 3) return [mk(GX / 2, loZ), mk(loX, hiZ), mk(hiX, hiZ)]
-  return [mk(loX, loZ), mk(hiX, loZ), mk(loX, hiZ), mk(hiX, hiZ)]
+  const midX = GX / 2, midZ = GZ / 2
+  // 2 players: opposed on the mid-line. 3: a centred equilateral triangle (all pairs
+  // equidistant). 4: a centred square of corners (all adjacent pairs equidistant). On the
+  // now-square footprint these are genuinely symmetric — an oblong map used to squash them.
+  if (n <= 2) return [mk(18, midZ), mk(GX - 18, midZ)]
+  if (n === 3) {
+    const R = Math.min(GX, GZ) * 0.36 // circumradius; side = R·√3 ≈ 0.62·S
+    return [mk(midX, midZ - R), mk(midX + R * 0.866, midZ + R * 0.5), mk(midX - R * 0.866, midZ + R * 0.5)]
+  }
+  const lo = 0.18, hi = 0.82
+  return [mk(GX * lo, GZ * lo), mk(GX * hi, GZ * lo), mk(GX * lo, GZ * hi), mk(GX * hi, GZ * hi)]
 }
 
 // Per-type producer geometry & economy. half = footprint radius (half=4 → 9×9),
@@ -279,7 +286,7 @@ export class World {
 
   // ---------------------------------------------------------------- generation
 
-  generate(seed: number, forti: Fortifications[] = [{ height: 0, towers: 0, barricade: 0 }, { height: 0, towers: 0, barricade: 0 }]): void {
+  generate(seed: number, forti: Fortifications[] = [{ height: 0, towers: 0, barricade: 0 }, { height: 0, towers: 0, barricade: 0 }], playerCount?: number): void {
     this.grid.fill(EMPTY)
     this.debris.length = 0
     this.debrisMesh.count = 0
@@ -294,7 +301,9 @@ export class World {
     // facing toward the map centre. The SEED sites shape the terrain (pads rise there and
     // never move); a castle-placement override only moves the BUILT tower, which rides the
     // existing surface — repositioning a castle must never deform the landscape.
-    const N = forti.length
+    // Build exactly one fort per living seat. `forti` is a fixed length-4 pool, so the caller
+    // passes the real player count — otherwise a 2-player duel would spawn 4 towers.
+    const N = Math.max(2, Math.min(forti.length, playerCount ?? forti.length))
     const seeds = spawnAnchors(N, rand)
     // Built positions honour any per-seat castle override.
     const built = seeds.map((a, i) => {
