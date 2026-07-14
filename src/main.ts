@@ -282,6 +282,17 @@ const ghostDecoyOf: ({ cx: number; cz: number } | null)[] = [null, null, null, n
 const zombieTarget = [-1, -1, -1, -1]
 // Army raid, per VICTIM: who raided them ({caster,done}) — their next payout goes to caster.
 const armyRaidOf: ({ caster: number; done: boolean } | null)[] = [null, null, null, null]
+// Diplomacy (3+ players). trust[a][b] = how much seat a trusts b: a reciprocated trade lifts
+// both over ALLY (allied — AIs don't shoot each other + keep trading); a betrayal or an attack
+// drops it hard (into the negatives), and it only climbs back with repeated gifts. giftOwed[g][r]
+// = g gave r an as-yet-unreciprocated gift (the betrayal trigger once r has had a turn since).
+const ALLY_TRUST = 2
+const trust: number[][] = [0, 1, 2, 3].map(() => [0, 0, 0, 0])
+const giftOwed: boolean[][] = [0, 1, 2, 3].map(() => [false, false, false, false])
+const owedActedSince: boolean[][] = [0, 1, 2, 3].map(() => [false, false, false, false])
+function alliedWith(a: number, b: number): boolean {
+  return a !== b && trust[a][b] >= ALLY_TRUST && trust[b][a] >= ALLY_TRUST
+}
 // Full Moon ghost strike in progress: how the caster's turn resumes once the ghosts
 // have flown home, plus the defender's live flashlight-defence window.
 let ghostResume: 'casterAim' | 'aiThink' | null = null
@@ -352,6 +363,100 @@ function playCard(side: number, idx: number): void {
     return
   }
   finish() // 1–2 player, self-card, or AI: auto-target the sole/weakest opponent
+}
+
+// ---- Trade & diplomacy (3+ players) -----------------------------------------------
+type TradeKind = 'card' | 'resource' | 'weapon'
+
+// What seat `s` currently owns that could be traded (used to build the trade overlay + AI gifts).
+function tradableItems(s: number): { kind: TradeKind; key: string; label: string; emoji: string }[] {
+  const out: { kind: TradeKind; key: string; label: string; emoji: string }[] = []
+  for (const id of hand[s]) out.push({ kind: 'card', key: id, label: cardDef(id).name, emoji: cardDef(id).emoji })
+  for (const t of pendingResources[s]) out.push({ kind: 'resource', key: String(t), label: PRODUCER_SPECS[t].name, emoji: '📦' })
+  for (const w of WEAPONS) {
+    if (w.ammo === Infinity || w.price === undefined) continue // Baby Missile is infinite — not tradable
+    const n = sides[s].arsenal.get(w.id) ?? 0
+    for (let k = 0; k < n; k++) out.push({ kind: 'weapon', key: w.id, label: w.name, emoji: '💥' })
+  }
+  return out
+}
+
+// Move one item from seat `from` to seat `to`, animate it flying across, and update trust.
+function transferItem(from: number, to: number, kind: TradeKind, key: string): boolean {
+  if (kind === 'card') {
+    const i = hand[from].indexOf(key as CardId)
+    if (i < 0) return false
+    hand[from].splice(i, 1)
+    hand[to].push(key as CardId)
+  } else if (kind === 'resource') {
+    const type = Number(key)
+    const i = pendingResources[from].indexOf(type)
+    if (i < 0) return false
+    pendingResources[from].splice(i, 1)
+    pendingResources[to].push(type)
+  } else {
+    const n = sides[from].arsenal.get(key) ?? 0
+    if (n <= 0) return false
+    sides[from].arsenal.set(key, n - 1)
+    sides[to].arsenal.set(key, (sides[to].arsenal.get(key) ?? 0) + 1)
+  }
+  // Trust: a gift raises the receiver's trust. A gift that answers an outstanding one is a
+  // completed trade — it seals an alliance by pushing BOTH directions across ALLY (the giver
+  // gains a second bump for this direction, and the original giver climbs too). Otherwise the
+  // giver is now owed a trade-back.
+  trust[to][from] += 1
+  if (giftOwed[to][from]) {
+    trust[to][from] += 1 // completed round-trip: this side crosses ALLY…
+    trust[from][to] += 1 // …and the seat being repaid climbs too, so the pact is mutual
+    giftOwed[to][from] = false
+    owedActedSince[to][from] = false
+  } else {
+    giftOwed[from][to] = true
+    owedActedSince[from][to] = false
+  }
+  // A couple of voxels arc from the giver's cannon to the recipient's, in the giver's colour.
+  const a = sides[from].cannon.group.position
+  const b = sides[to].cannon.group.position
+  const pts = [
+    new THREE.Vector3(a.x, a.y + 3, a.z),
+    new THREE.Vector3(a.x + 1, a.y + 4, a.z + 1),
+    new THREE.Vector3(a.x - 1, a.y + 4, a.z - 1),
+  ]
+  spawnVoxelFlight(pts, [
+    new THREE.Vector3(b.x, b.y + 3, b.z),
+    new THREE.Vector3(b.x + 1, b.y + 4, b.z + 1),
+    new THREE.Vector3(b.x - 1, b.y + 4, b.z - 1),
+  ], SEAT_CANNON_COLORS[from])
+  sfx.pop()
+  refreshHand()
+  refreshResources()
+  updateWeaponHud()
+  return true
+}
+
+// Human trade flow: pick a living opponent, then a two-panel overlay shows their holdings
+// (across the table) and yours — click any of your items to send it flying to them.
+function offerTrade(side: number): void {
+  if (phase !== 'aim') return
+  const foes = livingSeats().filter(s => s !== side)
+  if (!foes.length) return void hud.msg('no one left to trade with')
+  const open = (to: number) => {
+    hud.showTrade(
+      `🤝 TRADE WITH ${fortLabel(to)}`,
+      () => ({
+        them: tradableItems(to).map(i => ({ label: i.label, emoji: i.emoji })),
+        mine: tradableItems(side),
+      }),
+      (kind, key) => transferItem(side, to, kind as TradeKind, key),
+      () => {}
+    )
+  }
+  if (foes.length === 1) return void open(foes[0])
+  hud.showTargetPicker(
+    '🤝 Trade with whom?',
+    foes.map(s => ({ seat: s, label: fortLabel(s) })),
+    open
+  )
 }
 
 // On a round win the victor lifts one random card from the loser's hand. Returns the
@@ -731,6 +836,9 @@ const shotThisRound = [false, false, false, false] // power marker only shows af
 let resolveT = 0
 let resolveTotal = 0 // wall-clock in 'resolve' (not reset by the settling guard) — safety net
 let flyTotal = 0 // wall-clock in 'fly' — forces a stuck shot (lingering proj/task) to resolve
+// Per-seat integrity captured when the current shot took flight — finishResolve compares
+// against it to see whom the acting seat just damaged (drops trust: allies you shell defect).
+const preShotIntegrity = [1, 1, 1, 1]
 let aiT = 0
 let aiErr = 16 // enemy aim scatter — modest and human; ranges in slowly, never pinpoint
 let aiPlanned: { az: number; el: number; power: number } | null = null
@@ -1472,6 +1580,14 @@ function enterAim(): void {
   refreshHand()
   refreshResources()
   syncStatus()
+  // Trading is a free action offered only on a human's turn in a 3–4 player game.
+  const canTrade = isHuman(turn) && numPlayers > 2
+  hud.setTrade(canTrade, () => offerTrade(turn))
+  // Nudge a human who was gifted last round: trading back forms an alliance.
+  if (canTrade) {
+    const gifter = livingSeats().find(g => g !== turn && giftOwed[g][turn])
+    if (gifter !== undefined) hud.msg(`${fortLabel(gifter)} sent you a gift — 🤝 trade back to become allies`)
+  }
 }
 
 function placeProducer(): void {
@@ -2013,6 +2129,18 @@ function reallyStartTurn(s: number): void {
   refreshForts() // update which fort bar is highlighted for the acting seat
   rerollWind()
   flyHold = null
+  // Diplomacy bookkeeping. Betrayal (giver's view): a gift `s` gave that the receiver has
+  // since had a full turn to answer and didn't is a snub — `s` trusts them much less.
+  for (let b = 0; b < numPlayers; b++) {
+    if (giftOwed[s][b] && owedActedSince[s][b]) {
+      trust[s][b] -= 3
+      giftOwed[s][b] = false
+      owedActedSince[s][b] = false
+    }
+  }
+  // Receiver's view: `s` is taking a turn while still owing someone a trade-back — mark it,
+  // so if `s` doesn't reciprocate this turn the giver counts it as a betrayal next time.
+  for (let g = 0; g < numPlayers; g++) if (giftOwed[g][s]) owedActedSince[g][s] = true
   // Ghost Tower in hotseat: each ghosted tower is visible only on its owner's turn —
   // everyone shares one screen, so hide it while any other seat acts.
   if (twoPlayer) {
@@ -2070,6 +2198,7 @@ function reallyStartTurn(s: number): void {
     openMarket(roundStartPending[s])
     roundStartPending[s] = false
   } else {
+    if (numPlayers > 2) aiDiplomacy(s) // repay gifts / keep allies / open overtures, before cards
     aiCards(s) // buy/play a stratagem first (so producers don't eat the card budget)
     aiPlant(s) // then grow the economy with what's left
     // A played Flying Toaster (fly) or Full Moon (ghosts) takes over the pipeline and
@@ -2088,19 +2217,62 @@ function reallyStartTurn(s: number): void {
 // The living opponent an AI seat focuses on: the weakest tower (closest to elimination),
 // ties broken by nearest to this seat's cannon. Used for both its shot and hostile cards.
 function aiTarget(s: number): number {
+  const living = livingSeats()
+  const foes = living.filter(o => o !== s)
+  if (!foes.length) return -1
+  // Allies are spared — unless every remaining foe is an ally, or only two seats are left
+  // (last castle standing forces the final betrayal). Attacking then breaks the pact.
+  const nonAllies = foes.filter(o => !alliedWith(s, o))
+  const pool = nonAllies.length && living.length > 2 ? nonAllies : foes
   const me = sides[s].cannon.group.position
   let best = -1
   let bestScore = Infinity
-  for (const o of livingSeats()) {
-    if (o === s) continue
+  for (const o of pool) {
     const t = world.forts[o].towers[0]
-    const score = world.integrity(o) * 1000 + Math.hypot(t.cx - me.x, t.cz - me.z)
+    // Weakest + nearest, biased toward the least-trusted (betrayers get shelled first).
+    const score = world.integrity(o) * 1000 + Math.hypot(t.cx - me.x, t.cz - me.z) + trust[s][o] * 200
     if (score < bestScore) {
       bestScore = score
       best = o
     }
   }
   return best
+}
+
+// Diplomacy at an AI seat's turn start: repay outstanding gifts (which seals alliances),
+// keep trading with existing allies, and sometimes open a fresh overture. A hard grudge
+// (trust ≤ -2) is never repaid or courted.
+function aiDiplomacy(s: number): void {
+  const spare = (): { kind: TradeKind; key: string } | null => {
+    const items = tradableItems(s)
+    return items.length ? { kind: items[0].kind, key: items[0].key } : null
+  }
+  // 1) Repay outstanding gifts → reciprocation seals an alliance.
+  for (const g of livingSeats()) {
+    if (g === s) continue
+    if (giftOwed[g][s] && trust[s][g] > -2) {
+      const item = spare()
+      if (item) transferItem(s, g, item.kind, item.key)
+    }
+  }
+  // 2) Allies occasionally send another gift to keep the friendship warm.
+  for (const o of livingSeats()) {
+    if (o === s || !alliedWith(s, o)) continue
+    if (Math.random() < 0.3) {
+      const item = spare()
+      if (item) transferItem(s, o, item.kind, item.key)
+    }
+  }
+  // 3) Sometimes make an opening overture — but only with a genuine surplus card (2+ in
+  // hand), to a promising, un-betrayed non-ally it doesn't already owe. The recipient can
+  // answer to forge an alliance; ignoring the gift is the betrayal path.
+  if (Math.random() < 0.2 && hand[s].length >= 2) {
+    const cand = livingSeats().filter(o => o !== s && !alliedWith(s, o) && trust[s][o] > -2 && !giftOwed[s][o])
+    if (cand.length) {
+      const to = cand[Math.floor(Math.random() * cand.length)]
+      transferItem(s, to, 'card', hand[s][hand[s].length - 1])
+    }
+  }
 }
 
 function aiCards(s: number): void {
@@ -2479,6 +2651,14 @@ function finishResolve(force = false): void {
     sides[s].targetZ = seat.z
   }
   refreshIntegrity()
+  // Attacking a seat costs their trust in you — an ally you shell defects (and a betrayer
+  // you already dislike sinks further). Only the acting seat `turn` is blamed for this shot.
+  if (numPlayers > 2) {
+    for (let v = 0; v < numPlayers; v++) {
+      if (v === turn || !alive[v]) continue
+      if (world.integrity(v) < preShotIntegrity[v] - 0.02) trust[v][turn] -= 3
+    }
+  }
   // Any living seat whose tower just collapsed is newly eliminated this resolve.
   const dead: number[] = []
   for (let s = 0; s < numPlayers; s++) if (alive[s] && world.integrity(s) < COLLAPSE_AT) dead.push(s)
@@ -2543,6 +2723,12 @@ function setupRoundWorld(): void {
     zombieTarget[s] = -1
     armyRaidOf[s] = null
     world.hiddenForts[s] = false
+    // Stale trade obligations don't carry between rounds, but TRUST/alliances do (they build
+    // over a match); trust is reset only at a fresh match (fullReset).
+    for (let o = 0; o < 4; o++) {
+      giftOwed[s][o] = false
+      owedActedSince[s][o] = false
+    }
   }
   if (flashBeam) {
     scene.remove(flashBeam)
@@ -2770,6 +2956,8 @@ function nextRound(): void {
 function fullReset(): void {
   round = 0
   lastRoundResult = ''
+  // Fresh diplomacy for the new match — no one trusts anyone yet.
+  for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) { trust[a][b] = 0; giftOwed[a][b] = false; owedActedSince[a][b] = false }
   // Fresh battlefield for the new match, fixed across this match's rounds. Producers
   // can be placed anywhere (even water), so any seed is playable.
   roundSeed = Math.floor(Math.random() * 1e9)
@@ -2810,6 +2998,7 @@ window.addEventListener('keydown', e => {
       placeProducer()
     } else if (phase === 'aim' && !e.repeat) {
       phase = 'charge'
+      hud.setTrade(false) // no trading once you commit to the shot
       chargeT = 0
       chargePower = 0
     } else if (phase === 'fly' && !e.repeat) {
@@ -2950,6 +3139,8 @@ function tick(now: number): void {
   updateFx(dt)
   updateCannons(dt)
 
+  // On the first frame of flight, snapshot integrity so finishResolve can attribute damage.
+  if (phase === 'fly' && flyTotal === 0) for (let s = 0; s < numPlayers; s++) preShotIntegrity[s] = world.integrity(s)
   // Safety net: if a shot lingers too long (a stuck projectile/task that never clears),
   // force it to resolve so the round can't hang mid-flight.
   flyTotal = phase === 'fly' ? flyTotal + dt : 0
@@ -3129,6 +3320,12 @@ declare global {
       setMode: (two: boolean) => void
       setBerms: (side: number, n: number) => void
       setPlayers: (count: number, humanFlags: boolean[]) => void
+      trust: () => number[][]
+      giftOwed: () => boolean[][]
+      tradable: (s: number) => { kind: string; key: string; label: string; emoji: string }[]
+      giveItem: (from: number, to: number, kind: string, key: string) => boolean
+      aiTarget: (s: number) => number
+      allied: (a: number, b: number) => boolean
     }
   }
 }
@@ -3238,4 +3435,14 @@ window.__sv = {
     forti[side].barricade = n
     rebuildRoundWorld()
   },
+  // Diplomacy test hooks (Phase 3): read the trust matrix + owed flags, and gift an item
+  // directly (bypassing the UI) to exercise the alliance/betrayal rules headlessly.
+  trust: () => trust.slice(0, numPlayers).map(row => row.slice(0, numPlayers)),
+  giftOwed: () => giftOwed.slice(0, numPlayers).map(row => row.slice(0, numPlayers)),
+  tradable: (s: number) => tradableItems(s),
+  giveItem(from: number, to: number, kind: string, key: string) {
+    return transferItem(from, to, kind as TradeKind, key)
+  },
+  aiTarget: (s: number) => aiTarget(s),
+  allied: (a: number, b: number) => alliedWith(a, b),
 }

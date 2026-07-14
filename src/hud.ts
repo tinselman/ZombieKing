@@ -108,6 +108,22 @@ const CSS = `
 #sc-targetRows { display: flex; flex-direction: column; gap: 10px; }
 #sc-targetRows button { width: 340px; padding: 14px 18px; border-radius: 11px; border: 1px solid #c4cad1; background: #fff; cursor: pointer; font-size: 16px; text-align: left; display: flex; justify-content: space-between; align-items: center; }
 #sc-targetRows button:hover { border-color: #16181b; background: #f6f8fa; }
+/* Trade: a button above the bottom-left stack + a table-style give/receive overlay. */
+#sc-tradeBtn { display: none; pointer-events: auto; align-self: flex-start; font-size: 13px; font-weight: 800; letter-spacing: 0.06em; padding: 9px 16px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
+#sc-tradeBtn.on { display: block; }
+#sc-tradeBtn:hover { background: #454c55; }
+#sc-trade { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 14px; background: rgba(244,246,248,0.92); backdrop-filter: blur(8px); pointer-events: auto; z-index: 11; }
+#sc-trade h1 { font-size: 22px; font-weight: 800; letter-spacing: 0.03em; color: #16181b; margin: 0 0 4px; text-align: center; }
+#sc-trade .them, #sc-trade .you { width: 640px; max-width: 92vw; background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 12px; padding: 14px 18px; }
+#sc-trade .tlabel { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin-bottom: 9px; }
+#sc-trade .items { display: flex; flex-wrap: wrap; gap: 8px; min-height: 30px; }
+#sc-trade .items .chip { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; border-radius: 9px; border: 1px solid #e2e6ea; background: #fff; font-size: 13px; color: #2c3138; }
+#sc-trade .you .chip { cursor: pointer; border-color: #c4cad1; }
+#sc-trade .you .chip:hover { border-color: #16181b; background: #f6f8fa; transform: translateY(-1px); }
+#sc-trade .them .chip { background: #f2f4f7; color: #7a838d; }
+#sc-trade .empty { font-size: 13px; color: #9aa1a9; font-style: italic; }
+#sc-tradeDone { font-size: 14px; font-weight: 800; letter-spacing: 0.08em; padding: 11px 34px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
+#sc-tradeDone:hover { background: #454c55; }
 /* Country picker — pick a nation + flag before the match (cosmetic identity). */
 #sc-country { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #fff; pointer-events: auto; z-index: 9; }
 #sc-country h1 { font-size: 30px; font-weight: 800; letter-spacing: 0.04em; color: #16181b; margin: 0 0 4px; text-align: center; }
@@ -208,6 +224,7 @@ export function createHud(
     <div class="panel" id="sc-wind"><div class="label">Wind</div><span id="sc-windArrow">➤</span><div id="sc-windSpeed"></div></div>
     <div class="panel" id="sc-status"></div>
     <div id="sc-blstack">
+      <button id="sc-tradeBtn">🤝 OFFER TRADE</button>
       <div class="panel" id="sc-hand"><div class="label">Stratagems &nbsp;· click to view</div><div id="sc-handList"></div></div>
       <div class="panel" id="sc-resources"><div class="label">Resources &nbsp;· click to place</div><div id="sc-resList"></div></div>
       <div class="panel" id="sc-weapons"><div class="label">Weapon &nbsp;⇥ / click</div><div id="sc-weaponList"></div></div>
@@ -248,6 +265,10 @@ export function createHud(
       <div id="sc-countryGrid"></div>
       <button class="rand">🎲 SURPRISE ME</button></div>
     <div id="sc-target"><h1></h1><div id="sc-targetRows"></div></div>
+    <div id="sc-trade"><h1></h1>
+      <div class="them"><div class="tlabel">THEY HOLD</div><div id="sc-tradeThem" class="items"></div></div>
+      <div class="you"><div class="tlabel">YOUR ITEMS — click to send across</div><div id="sc-tradeMine" class="items"></div></div>
+      <button id="sc-tradeDone">DONE</button></div>
     <div id="sc-shop"><div class="box">
       <h2>ZOMBIE KING MARKET<span id="sc-shopPlayer"></span></h2>
       <div id="sc-shopResult"></div>
@@ -329,6 +350,12 @@ export function createHud(
   const targetEl = q<HTMLElement>('#sc-target')
   const targetTitle = q<HTMLElement>('#sc-target h1')
   const targetRows = q<HTMLElement>('#sc-targetRows')
+  const tradeBtn = q<HTMLButtonElement>('#sc-tradeBtn')
+  const tradeEl = q<HTMLElement>('#sc-trade')
+  const tradeTitle = q<HTMLElement>('#sc-trade h1')
+  const tradeThem = q<HTMLElement>('#sc-tradeThem')
+  const tradeMine = q<HTMLElement>('#sc-tradeMine')
+  const tradeDone = q<HTMLButtonElement>('#sc-tradeDone')
   const countryEl = q<HTMLElement>('#sc-country')
   const countryTitle = q<HTMLElement>('#sc-country h1')
   const countrySearch = q<HTMLInputElement>('#sc-countrySearch')
@@ -700,6 +727,43 @@ export function createHud(
         })
       })
       targetEl.style.display = 'flex'
+    },
+    // The 🤝 OFFER TRADE button above the bottom-left stack (3–4 players, human's turn).
+    setTrade(show: boolean, onClick?: () => void) {
+      tradeBtn.classList.toggle('on', show)
+      tradeBtn.onclick = onClick ?? null
+    },
+    // Trade overlay: shows the recipient's holdings across the table + your clickable items.
+    // `refresh()` returns the current {them,mine} lists so the panel updates as you give.
+    showTrade(
+      title: string,
+      refresh: () => { them: { label: string; emoji: string }[]; mine: { kind: string; key: string; label: string; emoji: string }[] },
+      onGive: (kind: string, key: string) => void,
+      onDone: () => void
+    ) {
+      const draw = () => {
+        const { them, mine } = refresh()
+        tradeTitle.textContent = title
+        tradeThem.innerHTML = them.length
+          ? them.map(i => `<span class="chip">${i.emoji} ${i.label}</span>`).join('')
+          : '<span class="empty">nothing to show</span>'
+        tradeMine.innerHTML = mine.length
+          ? mine.map((i, n) => `<span class="chip" data-n="${n}">${i.emoji} ${i.label}</span>`).join('')
+          : '<span class="empty">you have nothing to give</span>'
+        tradeMine.querySelectorAll('.chip').forEach(c => {
+          c.addEventListener('click', () => {
+            const item = mine[+(c as HTMLElement).dataset.n!]
+            onGive(item.kind, item.key)
+            draw() // re-render after the item flies away
+          })
+        })
+      }
+      draw()
+      tradeDone.onclick = () => {
+        tradeEl.style.display = 'none'
+        onDone()
+      }
+      tradeEl.style.display = 'flex'
     },
     // Country picker: `who` labels the seat (e.g. "PLAYER 1"); resolves with the chosen
     // country. `taken` codes are hidden so two humans can't pick the same nation.
