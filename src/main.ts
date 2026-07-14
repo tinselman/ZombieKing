@@ -260,24 +260,22 @@ const DECK: CardDef[] = [
 ]
 const CARD_COST = 1500
 const hand: CardId[][] = [[], [], [], []] // cards each seat is holding
-// Ghost Tower state: which side's tower is currently ghosted (-1 none), and the decoy
-// (old) position the enemy AI keeps aiming at while your real tower is hidden/moved.
-let ghostSide = -1
-let ghostDecoy: { cx: number; cz: number } | null = null
-// Zombie King: awakened on play (the defender is warned), stomps at the start of the
-// caster's NEXT turn — one full turn's window for the victim to raise a Force Field.
-let zombiePending: { caster: number } | null = null
-// Army raid: the victim's next resource payout is delivered whole to the raider; the
-// victim's producers glow pink until their turn is over.
-let armyRaid: { caster: number; victim: number; done: boolean } | null = null
+// Ghost Tower state, per seat: the decoy (old) position an opponent keeps aiming at while
+// that seat's real tower is hidden/moved (null = not ghosted). In hotseat a ghosted tower
+// is hidden only during OTHER seats' turns (see reallyStartTurn).
+const ghostDecoyOf: ({ cx: number; cz: number } | null)[] = [null, null, null, null]
+// Zombie King, per CASTER: the seat they'll stomp at the start of their next turn (-1 none).
+const zombieTarget = [-1, -1, -1, -1]
+// Army raid, per VICTIM: who raided them ({caster,done}) — their next payout goes to caster.
+const armyRaidOf: ({ caster: number; done: boolean } | null)[] = [null, null, null, null]
 // Full Moon ghost strike in progress: how the caster's turn resumes once the ghosts
 // have flown home, plus the defender's live flashlight-defence window.
 let ghostResume: 'casterAim' | 'aiThink' | null = null
 let flashActive = false // the defender's flashlight beam is currently sweeping
 let flashSweep = 0 // beam heading (rad), swept with the arrow keys during defence
-// Force Field: side with an active (as-yet-unhit) shield, or -1. Bumper Crop: a ×2
-// multiplier on a side's NEXT income payout. Skip Player: this side's next turn is skipped.
-let forceFieldSide = -1
+// Force Field: per-seat active (as-yet-unhit) shield. Bumper Crop: ×2 on the seat's NEXT
+// income payout. Skip Player: the seat's next turn is skipped.
+const forceField = [false, false, false, false]
 const incomeBoost = [1, 1, 1, 1]
 const skipNext = [false, false, false, false]
 // Ghost Tower: set while the player is hand-repositioning their (still-visible) tower.
@@ -336,8 +334,17 @@ function stealRandomCard(winner: number, loser: number): string {
   return cardDef(id).name
 }
 
-function applyCard(side: number, id: CardId): void {
-  const foe = 1 - side
+// The default victim for a hostile card: the weakest living opponent (the sole opponent
+// in a 2-player game). Callers may override with an explicit target (human picker / AI).
+function defaultFoe(side: number): number {
+  const foes = livingSeats().filter(s => s !== side)
+  if (!foes.length) return (side + 1) % Math.max(2, numPlayers)
+  foes.sort((a, b) => world.integrity(a) - world.integrity(b))
+  return foes[0]
+}
+
+function applyCard(side: number, id: CardId, target = defaultFoe(side)): void {
+  const foe = target
   if (id === 'steal') cardSteal(side, foe)
   else if (id === 'army') cardArmy(side, foe)
   else if (id === 'toaster') cardToaster(side, foe)
@@ -356,8 +363,8 @@ function applyCard(side: number, id: CardId): void {
 // Force Field: if the victim has an active shield, it eats this hostile act — flare
 // at their castle, shield spent — and the act is fully blocked.
 function shieldBlocks(victim: number): boolean {
-  if (forceFieldSide !== victim) return false
-  forceFieldSide = -1
+  if (!forceField[victim]) return false
+  forceField[victim] = false
   const t = world.forts[victim]?.towers[0]
   if (t) spawnShieldBlock(t.cx, t.cz)
   return true
@@ -384,7 +391,7 @@ function cardSkip(side: number, foe: number): void {
 
 // Force Field: raise an invisible one-hit shield over your castle (see crater()).
 function cardForcefield(side: number): void {
-  forceFieldSide = side
+  forceField[side] = true
   hud.msg(`${capName(side)} raised a force field`)
 }
 
@@ -449,7 +456,7 @@ function cardSteal(side: number, foe: number): void {
 function cardArmy(side: number, foe: number): void {
   if (shieldBlocks(foe)) return void hud.msg('the force field turns the army away!')
   spawnArmy(side)
-  armyRaid = { caster: side, victim: foe, done: false }
+  armyRaidOf[foe] = { caster: side, done: false }
   world.setRaided(foe)
   hud.msg(`${capName(side)}'s army overruns ${nameOf(foe)}'s resources — their next payout is forfeit!`)
 }
@@ -479,8 +486,8 @@ function cardToaster(side: number, foe: number): void {
 // Zombie King, part 1: playing the card only AWAKENS him — the defender is warned
 // loudly and has one full turn to raise a Force Field before the stomp.
 function cardZombie(side: number, foe: number): void {
-  if (zombiePending) return void (isHuman(side) && hud.msg('the Zombie King is already awake'))
-  zombiePending = { caster: side }
+  if (zombieTarget[side] >= 0) return void (isHuman(side) && hud.msg('your Zombie King is already awake'))
+  zombieTarget[side] = foe
   sfx.rumble()
   hud.banner('THE ZOMBIE KING HAS AWAKENED', `he stomps ${nameOf(foe)}'s lands next turn — only a Force Field can stop him`, 3400)
 }
@@ -489,8 +496,9 @@ function cardZombie(side: number, foe: number): void {
 // seizing HALF the victim's producers (richest first) into the caster's Resources
 // list to re-place anywhere — unless a Force Field eats the stomp.
 function resolveZombieStomp(caster: number): void {
-  const foe = 1 - caster
-  zombiePending = null
+  const foe = zombieTarget[caster]
+  zombieTarget[caster] = -1
+  if (foe < 0 || !alive[foe]) return // target already eliminated
   if (shieldBlocks(foe)) return void hud.msg('the force field stops the Zombie King cold!')
   const foeProd = planted[foe]
   // Seize only income producers (cemeteries have no yield to steal).
@@ -555,8 +563,8 @@ function cardFullMoon(side: number, foe: number): void {
   flashSweep = foe === 0 ? 0 : Math.PI
   sfx.rumble()
   // Immediate counters: Force Field always eats it; the AI defender flashes on reflex.
-  if (forceFieldSide === foe) {
-    forceFieldSide = -1
+  if (forceField[foe]) {
+    forceField[foe] = false
     g.repelled = true
     if (ft) spawnShieldBlock(ft.cx, ft.cz)
     hud.banner('🌕 FULL MOON', `${capName(side)}'s ghosts rise — ${nameOf(foe)}'s force field turns them back!`, 3200)
@@ -654,35 +662,35 @@ function endGhostSequence(): void {
 // until a shell lands within 10 of the real tower. The 1P AI auto-jumps instead.
 function cardGhost(side: number): void {
   const oldT = world.forts[side]?.towers[0]
-  ghostDecoy = oldT ? { cx: oldT.cx, cz: oldT.cz } : null
+  ghostDecoyOf[side] = oldT ? { cx: oldT.cx, cz: oldT.cz } : null
   if (isHuman(side)) {
-    // Hand-reposition; ghostSide is set when placement is confirmed (placeCastle).
+    // Hand-reposition; the ghost is confirmed on placement (placeCastle sets the decoy).
     ghostReposition = true
     beginCastlePlacement()
     return
   }
-  // 1P AI: jump to a random spot on its half and hide the tower from the human.
-  const cx = Math.round(Math.round(GX / 2) + 8 + Math.random() * (GX / 2 - 18))
-  const cz = Math.round(8 + Math.random() * (GZ - 16))
-  world.castleOverride[1] = { cx, cz }
-  world.moveFort(1, cx, cz, forti[1]) // carries the tower's damage to the new spot
-  world.hiddenFort = 1
+  // AI seat: jump to a random spot near its own corner and vanish from its opponents.
+  const home = world.forts[side].towers[0]
+  const cx = Math.max(12, Math.min(GX - 12, Math.round(home.cx + (Math.random() - 0.5) * 40)))
+  const cz = Math.max(8, Math.min(GZ - 8, Math.round(home.cz + (Math.random() - 0.5) * 30)))
+  world.castleOverride[side] = { cx, cz }
+  world.moveFort(side, cx, cz, forti[side]) // carries the tower's damage to the new spot
+  world.hiddenForts[side] = true
   world.rebuild()
   hud.setIntegrity(world.integrity(0), world.integrity(1))
-  snapCannonToSeat(1)
-  sides[1].cannon.group.visible = false
-  ghostSide = 1
-  hud.msg('the enemy tower vanishes!')
+  snapCannonToSeat(side)
+  sides[side].cannon.group.visible = false
+  hud.msg(`${capName(side)}'s tower vanishes!`)
 }
 
-function revealGhost(): void {
-  if (ghostSide < 0) return
-  world.hiddenFort = -1
-  sides[ghostSide].cannon.group.visible = true
+// A shell landed near seat `g`'s ghosted tower — it snaps back into view for everyone.
+function revealGhost(g: number): void {
+  if (!ghostDecoyOf[g]) return
+  world.hiddenForts[g] = false
+  sides[g].cannon.group.visible = true
   world.rebuild()
-  hud.msg(ghostSide === turn ? 'the ghost tower has been spotted!' : `${capName(1 - ghostSide)} found the ghost tower!`)
-  ghostSide = -1
-  ghostDecoy = null
+  hud.msg(g === turn ? `${capName(g)}'s ghost tower has been spotted!` : `${capName(g)}'s ghost tower is found!`)
+  ghostDecoyOf[g] = null
 }
 
 let wind: Wind = { x: 0, z: 0 }
@@ -825,13 +833,14 @@ const tasks: Task[] = []
 let flyIsCard = false
 
 function crater(at: THREE.Vector3, r: number, fire: boolean): void {
-  // Force field: if this blast would reach the shielded castle, the shield eats it
+  // Force field: if this blast would reach any shielded castle, that shield eats it
   // entirely (any weapon, no penetration) and is spent. A miss leaves it up.
-  if (forceFieldSide >= 0) {
-    const ft = world.forts[forceFieldSide]?.towers[0]
+  for (let fsel = 0; fsel < numPlayers; fsel++) {
+    if (!forceField[fsel]) continue
+    const ft = world.forts[fsel]?.towers[0]
     if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
       spawnShieldBlock(ft.cx, ft.cz)
-      forceFieldSide = -1
+      forceField[fsel] = false
       lastImpact.copy(at)
       return // nothing gets through
     }
@@ -846,10 +855,11 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
   sfx.boom(r)
   addShake(r, at)
   lastImpact.copy(at)
-  // A shell landing within 10 voxels of a ghosted tower snaps it back into view.
-  if (ghostSide >= 0) {
-    const t = world.forts[ghostSide]?.towers[0]
-    if (t && Math.hypot(at.x - t.cx, at.z - t.cz) < 10) revealGhost()
+  // A shell landing within 10 voxels of any ghosted tower snaps it back into view.
+  for (let g = 0; g < numPlayers; g++) {
+    if (!ghostDecoyOf[g]) continue
+    const t = world.forts[g]?.towers[0]
+    if (t && Math.hypot(at.x - t.cx, at.z - t.cz) < 10) revealGhost(g)
   }
 }
 
@@ -1565,12 +1575,11 @@ function placeCastle(): void {
   snapCannonToSeat(turn)
   sfx.tick()
   if (ghostReposition) {
-    // Ghost Tower: the tower stays visible to its owner but the opponent can't see it
-    // (AI aims at the decoy; in hotseat it hides on the other player's turn) until a
-    // shell lands within 10 of the real one.
+    // Ghost Tower: the tower stays visible to its owner but opponents can't see it
+    // (AI aims at the decoy; in hotseat it hides on other players' turns) until a
+    // shell lands within 10 of the real one. The decoy was recorded in cardGhost.
     ghostReposition = false
-    ghostSide = turn
-    hud.msg('ghost tower set — the opponent is blind to it')
+    hud.msg('ghost tower set — opponents are blind to it')
   }
   // Income already ran (startTurn opened the market) — go to your turn (aim). Place
   // resources from the left-hand list whenever you like before firing.
@@ -1676,7 +1685,7 @@ function updateCamera(dt: number): void {
       aimCamera(turn, desiredPos, desiredLook)
     }
   } else if (phase === 'aiThink' || phase === 'aiAim') {
-    aimCamera(1, desiredPos, desiredLook)
+    aimCamera(turn, desiredPos, desiredLook) // frame the acting AI seat's cannon
   } else if (phase === 'fly') {
     const lead = projs[0]
     const toast = tasks.find(t => t.kind === 'toaster') as { pos: THREE.Vector3; target: THREE.Vector3 } | undefined
@@ -1973,20 +1982,26 @@ function reallyStartTurn(s: number): void {
   turn = s
   rerollWind()
   flyHold = null
-  // Ghost Tower in hotseat: the ghosted tower is visible only on its owner's turn —
-  // the opponent looks at the same screen, so hide it while they act.
-  if (twoPlayer && ghostSide >= 0) {
-    world.hiddenFort = s === ghostSide ? -1 : ghostSide
-    sides[ghostSide].cannon.group.visible = s === ghostSide
-    world.rebuild()
+  // Ghost Tower in hotseat: each ghosted tower is visible only on its owner's turn —
+  // everyone shares one screen, so hide it while any other seat acts.
+  if (twoPlayer) {
+    let changed = false
+    for (let g = 0; g < numPlayers; g++) {
+      if (!ghostDecoyOf[g]) continue
+      world.hiddenForts[g] = s !== g
+      sides[g].cannon.group.visible = s === g
+      changed = true
+    }
+    if (changed) world.rebuild()
   }
-  // The pink lifts once the raided player's turn is over.
-  if (armyRaid && armyRaid.done && s !== armyRaid.victim) {
-    world.clearRaided()
-    armyRaid = null
+  // The pink lifts once each raided player's own turn is over.
+  for (let v = 0; v < numPlayers; v++) {
+    const r = armyRaidOf[v]
+    if (r && r.done && s !== v) armyRaidOf[v] = null
   }
+  if (!livingSeats().some(v => armyRaidOf[v])) world.clearRaided()
   // An awakened Zombie King stomps at the start of his caster's turn.
-  if (zombiePending && zombiePending.caster === s) resolveZombieStomp(s)
+  if (zombieTarget[s] >= 0) resolveZombieStomp(s)
   // Age this side's producers a turn (crops mature), then produce — scaled by how
   // intact each is (integrity) and how mature (crops ramp in over a couple turns).
   for (const p of planted[s]) p.age++
@@ -1995,12 +2010,13 @@ function reallyStartTurn(s: number): void {
   incomeBoost[s] = 1
   // Army raid: the victim's whole payout is carried off to the raider instead.
   let received = produced
-  if (armyRaid && armyRaid.victim === s && !armyRaid.done) {
-    armyRaid.done = true
+  const raid = armyRaidOf[s]
+  if (raid && !raid.done) {
+    raid.done = true
     received = 0
     if (produced > 0) {
-      money[armyRaid.caster] += produced
-      hud.msg(`${capName(armyRaid.caster)}'s army carries off ${nameOf(s)}'s whole harvest — $${produced.toLocaleString()}`)
+      money[raid.caster] += produced
+      hud.msg(`${capName(raid.caster)}'s army carries off ${nameOf(s)}'s whole harvest — $${produced.toLocaleString()}`)
     }
   }
   if (received > 0) money[s] += received
@@ -2023,30 +2039,48 @@ function reallyStartTurn(s: number): void {
     openMarket(roundStartPending[s])
     roundStartPending[s] = false
   } else {
-    aiCards() // buy/play a stratagem first (so producers don't eat the card budget)
-    aiPlant() // then grow the economy with what's left
+    aiCards(s) // buy/play a stratagem first (so producers don't eat the card budget)
+    aiPlant(s) // then grow the economy with what's left
     // A played Flying Toaster (fly) or Full Moon (ghosts) takes over the pipeline and
     // resumes the AI's shot itself; don't stomp it with aiThink here.
     if (phase !== 'fly' && phase !== 'ghosts') {
       phase = 'aiThink'
       aiT = 0
       aiPlanned = null
-      hud.banner('ENEMY TURN')
+      hud.banner(twoPlayer || numPlayers > 2 ? `PLAYER ${s + 1} (COMPUTER)` : 'ENEMY TURN')
     }
   }
 }
 
 // The enemy buys a card now and then, and plays its best applicable one by simple
 // heuristics — toaster to attack, ghost when hurt, seize/steal/army vs your economy.
-function aiCards(): void {
-  const s = 1
+// The living opponent an AI seat focuses on: the weakest tower (closest to elimination),
+// ties broken by nearest to this seat's cannon. Used for both its shot and hostile cards.
+function aiTarget(s: number): number {
+  const me = sides[s].cannon.group.position
+  let best = -1
+  let bestScore = Infinity
+  for (const o of livingSeats()) {
+    if (o === s) continue
+    const t = world.forts[o].towers[0]
+    const score = world.integrity(o) * 1000 + Math.hypot(t.cx - me.x, t.cz - me.z)
+    if (score < bestScore) {
+      bestScore = score
+      best = o
+    }
+  }
+  return best
+}
+
+function aiCards(s: number): void {
   // Buy a card or two when it can spare the cash (keeping a $300 reserve).
   while (money[s] >= CARD_COST + 300 && Math.random() < 0.5) {
     money[s] -= CARD_COST
     hand[s].push(drawCard())
   }
-  // Defend first: an awakened Zombie King is answered with a Force Field immediately.
-  if (zombiePending && zombiePending.caster === 1 - s && hand[s].includes('forcefield') && forceFieldSide !== s) {
+  // Defend first: if an opponent's Zombie King is aimed at me, raise a Force Field now.
+  const zombieOnMe = zombieTarget.slice(0, numPlayers).some((tg, c) => c !== s && tg === s)
+  if (zombieOnMe && hand[s].includes('forcefield') && !forceField[s]) {
     hand[s].splice(hand[s].indexOf('forcefield'), 1)
     applyCard(s, 'forcefield')
   }
@@ -2054,23 +2088,24 @@ function aiCards(): void {
   const id = pickAiCard(s)
   if (!id) return
   hand[s].splice(hand[s].indexOf(id), 1)
-  applyCard(s, id)
+  applyCard(s, id, aiTarget(s)) // hostile cards hit the AI's focus target
 }
 
 function pickAiCard(s: number): CardId | null {
   const h = hand[s]
-  const foeHasProd = planted[1 - s].length > 0
+  const foes = livingSeats().filter(o => o !== s)
+  const foeHasProd = foes.some(o => planted[o].length > 0)
   const myHurt = world.integrity(s) < 0.7
   if (h.includes('money5')) return 'money5' // free cash — always cash it in
   if (h.includes('money2')) return 'money2'
   if (h.includes('money1')) return 'money1'
   if (h.includes('toaster')) return 'toaster'
   if (h.includes('fullmoon') && cemeteriesOf(s) > 0) return 'fullmoon' // unleash the dead
-  if (foeHasProd && h.includes('zombie') && !zombiePending) return 'zombie'
+  if (foeHasProd && h.includes('zombie') && zombieTarget[s] < 0) return 'zombie'
   if (foeHasProd && h.includes('steal')) return 'steal'
-  if (foeHasProd && h.includes('army') && !armyRaid) return 'army'
+  if (foeHasProd && h.includes('army')) return 'army'
   if (myHurt && h.includes('ghost')) return 'ghost'
-  if (myHurt && h.includes('forcefield') && forceFieldSide !== s) return 'forcefield'
+  if (myHurt && h.includes('forcefield') && !forceField[s]) return 'forcefield'
   return null
 }
 
@@ -2098,39 +2133,39 @@ function refreshResources(): void {
 // The enemy grows its economy at a measured pace: one producer per turn, a soft cap so
 // it doesn't snowball out of the player's reach, and a reserve so it can still afford
 // a stratagem. It auto-positions nearest its fort (players place by hand).
-function aiPlant(): void {
-  const fort = world.forts[1]?.towers[0]
+function aiPlant(s: number): void {
+  const fort = world.forts[s]?.towers[0]
   if (!fort) return
   // Holding a Full Moon? Invest in cemeteries so the strike actually bites.
-  if (hand[1].includes('fullmoon') && cemeteriesOf(1) < 3 && money[1] >= PRODUCER_SPECS[CEMETERY].cost + 1600) {
-    const spot = world.findProducerSpot(1, fort.cx, fort.cz, CEMETERY)
+  if (hand[s].includes('fullmoon') && cemeteriesOf(s) < 3 && money[s] >= PRODUCER_SPECS[CEMETERY].cost + 1600) {
+    const spot = world.findProducerSpot(s, fort.cx, fort.cz, CEMETERY)
     if (spot) {
-      money[1] -= PRODUCER_SPECS[CEMETERY].cost
-      planted[1].push({ cx: spot.cx, cz: spot.cz, type: CEMETERY, baseYield: 0, age: 0 })
-      world.buildProducer(spot.cx, spot.cz, 1, CEMETERY, 0, 0)
+      money[s] -= PRODUCER_SPECS[CEMETERY].cost
+      planted[s].push({ cx: spot.cx, cz: spot.cz, type: CEMETERY, baseYield: 0, age: 0 })
+      world.buildProducer(spot.cx, spot.cz, s, CEMETERY, 0, 0)
       return
     }
   }
-  if (planted[1].length >= 8) return // soft cap — keeps the AI economy in the player's range
+  if (planted[s].length >= 8) return // soft cap — keeps the AI economy in range
   // Buy the best producer that still leaves ~a card's worth in reserve.
-  const type = money[1] >= DERRICK_SPEC.cost + 1600 ? DERRICK
-    : money[1] >= MINE_SPEC.cost + 1600 ? MINE
-    : money[1] >= CROP_SPEC.cost + 900 ? CROP
+  const type = money[s] >= DERRICK_SPEC.cost + 1600 ? DERRICK
+    : money[s] >= MINE_SPEC.cost + 1600 ? MINE
+    : money[s] >= CROP_SPEC.cost + 900 ? CROP
     : -1
   if (type < 0) return
   const spec = PRODUCER_SPECS[type]
-  const spot = world.findProducerSpot(1, fort.cx, fort.cz, type)
+  const spot = world.findProducerSpot(s, fort.cx, fort.cz, type)
   if (!spot) return
-  money[1] -= spec.cost
-  planted[1].push({ cx: spot.cx, cz: spot.cz, type, baseYield: spec.baseYield, age: 0 })
-  world.buildProducer(spot.cx, spot.cz, 1, type, spec.baseYield, 0)
+  money[s] -= spec.cost
+  planted[s].push({ cx: spot.cx, cz: spot.cz, type, baseYield: spec.baseYield, age: 0 })
+  world.buildProducer(spot.cx, spot.cz, s, type, spec.baseYield, 0)
 }
 const CROP_SPEC = PRODUCER_SPECS[CROP]
 const MINE_SPEC = PRODUCER_SPECS[MINE]
 const DERRICK_SPEC = PRODUCER_SPECS[DERRICK]
 
-function aiPickWeapon(): WeaponDef {
-  const s = sides[1]
+function aiPickWeapon(seat: number): WeaponDef {
+  const s = sides[seat]
   const has = (id: string) => (s.arsenal.get(id) ?? 0) > 0
   if (aiErr < 5 && Math.random() < 0.7) {
     for (const id of ['deathshead', 'nuke', 'funky', 'mirv', 'babynuke', 'bigmissile']) {
@@ -2161,35 +2196,31 @@ function losBlocked(a: { x: number; y: number; z: number }, b: { x: number; y: n
 }
 
 function updateAi(dt: number): void {
+  const me = turn // the acting AI seat
   if (phase === 'aiThink') {
     aiT += dt
     if (aiT < 0.75) return
-    // Aim at wherever the player's cannon currently sits (it may have moved
-    // to a surviving tower). If the player's tower is ghosted, the AI can't see it and
-    // keeps firing at the decoy (old) spot — a near miss there reveals the real one.
-    const seat = world.cannonSeat(0)
-    const mainTower = world.forts[0].towers[0]
-    const aimX = ghostSide === 0 && ghostDecoy ? ghostDecoy.cx : seat.x
-    const aimZ = ghostSide === 0 && ghostDecoy ? ghostDecoy.cz : seat.z
-    const target = {
-      x: aimX,
-      y: Math.max(mainTower.rubbleY + 2, seat.y - 4),
-      z: aimZ,
-    }
+    // Focus on a living opponent (weakest/nearest). If that tower is ghosted, the AI
+    // can't see it and fires at the decoy (old) spot — a near miss there reveals it.
+    const tgt = aiTarget(me)
+    if (tgt < 0) {
+      advanceTurn()
+      return
+    } // no target left
+    const seat = world.cannonSeat(tgt)
+    const mainTower = world.forts[tgt].towers[0]
+    const decoy = ghostDecoyOf[tgt]
+    const aimX = decoy ? decoy.cx : seat.x
+    const aimZ = decoy ? decoy.cz : seat.z
+    const target = { x: aimX, y: Math.max(mainTower.rubbleY + 2, seat.y - 4), z: aimZ }
     // Approximate the muzzle for planning: turret centre nudged toward the target.
-    const p1 = sides[1].cannon.group.position
-    const toward = new THREE.Vector3(target.x - p1.x, 0, target.z - p1.z).normalize()
-    const origin = {
-      x: p1.x + toward.x * 2.3,
-      y: p1.y + 1.65 + 2.6,
-      z: p1.z + toward.z * 2.3,
-    }
-    // If terrain hides the player, the enemy is reduced to guessing where you are
-    // — a big extra scatter on top of its already-human aim.
+    const pm = sides[me].cannon.group.position
+    const toward = new THREE.Vector3(target.x - pm.x, 0, target.z - pm.z).normalize()
+    const origin = { x: pm.x + toward.x * 2.3, y: pm.y + 1.65 + 2.6, z: pm.z + toward.z * 2.3 }
+    // If terrain hides the target, the AI is reduced to guessing — extra scatter.
     const blind = losBlocked(origin, target)
     aiPlanned = planShot(world, origin, target, wind, aiErr + (blind ? 16 : 0), Math.random)
-    aiStart = { az: sides[1].az, el: sides[1].el }
-    // Normalize so the barrel swings the short way round.
+    aiStart = { az: sides[me].az, el: sides[me].el }
     let dAz = aiPlanned.az - aiStart.az
     while (dAz > Math.PI) dAz -= Math.PI * 2
     while (dAz < -Math.PI) dAz += Math.PI * 2
@@ -2200,17 +2231,17 @@ function updateAi(dt: number): void {
     aiAnimT += dt
     const t = Math.min(1, aiAnimT / 1.0)
     const e = t * t * (3 - 2 * t)
-    sides[1].az = aiStart.az + (aiPlanned.az - aiStart.az) * e
-    sides[1].el = aiStart.el + (aiPlanned.el - aiStart.el) * e
-    applyCannonPose(1)
+    sides[me].az = aiStart.az + (aiPlanned.az - aiStart.az) * e
+    sides[me].el = aiStart.el + (aiPlanned.el - aiStart.el) * e
+    applyCannonPose(me)
     if (t >= 1 && aiAnimT > 1.25) {
-      const weapon = aiPickWeapon()
+      const weapon = aiPickWeapon(me)
       const power = aiPlanned.power
-      sides[1].az = aiPlanned.az
-      sides[1].el = aiPlanned.el
+      sides[me].az = aiPlanned.az
+      sides[me].el = aiPlanned.el
       aiPlanned = null
       aiErr = Math.max(4, aiErr * 0.82) // ranges in slowly, never gets pinpoint
-      fireShot(1, weapon, power)
+      fireShot(me, weapon, power)
     }
   }
 }
@@ -2472,14 +2503,16 @@ function setupRoundWorld(): void {
   }
   tasks.length = 0
   // Card effects don't carry between rounds: clear ghost/field/king/raid, restore cannons.
-  ghostSide = -1
-  ghostDecoy = null
   ghostReposition = false
-  forceFieldSide = -1
-  zombiePending = null
-  armyRaid = null
   ghostResume = null
   flashActive = false
+  for (let s = 0; s < 4; s++) {
+    ghostDecoyOf[s] = null
+    forceField[s] = false
+    zombieTarget[s] = -1
+    armyRaidOf[s] = null
+    world.hiddenForts[s] = false
+  }
   if (flashBeam) {
     scene.remove(flashBeam)
     if (flashBeamTarget) scene.remove(flashBeamTarget)
@@ -2488,7 +2521,6 @@ function setupRoundWorld(): void {
   }
   setNight(false)
   world.clearRaided()
-  world.hiddenFort = -1
   for (let s = 0; s < 4; s++) {
     incomeBoost[s] = 1
     skipNext[s] = false
@@ -3102,12 +3134,12 @@ window.__sv = {
     money: money.slice(0, numPlayers),
     planted: Array.from({ length: numPlayers }, (_, s) => planted[s].length),
     plantCursor: { cx: Math.round(plantCX), cz: Math.round(plantCZ) },
-    hand: [...hand[0]],
+    hand: [...hand[isHuman(turn) ? turn : 0]],
     enemyHand: hand[1].length,
-    ghostSide,
-    zombieAwake: zombiePending ? zombiePending.caster : -1,
-    armyRaidOn: armyRaid ? armyRaid.victim : -1,
-    forceFieldSide,
+    ghosted: ghostDecoyOf.slice(0, numPlayers).map(d => !!d),
+    zombieTarget: zombieTarget.slice(0, numPlayers),
+    armyRaidOn: armyRaidOf.slice(0, numPlayers).map(r => (r ? r.caster : -1)),
+    forceField: forceField.slice(0, numPlayers),
   }),
   world,
   newMatch: fullReset,

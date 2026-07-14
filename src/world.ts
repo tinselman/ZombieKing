@@ -173,7 +173,7 @@ export class World {
   castleOverride: ({ cx: number; cz: number } | null)[] = [null, null]
   // Ghost Tower: which side's fort voxels to skip rendering (invisible), or -1. The
   // cells stay solid (integrity/collisions intact) — only their instances are hidden.
-  hiddenFort = -1
+  hiddenForts: boolean[] = [false, false, false, false] // Ghost Tower: skip rendering these seats' forts
   mesh: THREE.InstancedMesh
   debrisMesh: THREE.InstancedMesh
   debris: Debris[] = []
@@ -286,7 +286,7 @@ export class World {
     this.forts = []
     this.producers = []
     this.raidedCells = null
-    this.hiddenFort = -1
+    this.hiddenForts = [false, false, false, false]
     this.colorSeed = seed & 0xffff
     const rand = mulberry32(seed)
 
@@ -1333,7 +1333,7 @@ export class World {
           const c = this.grid[x + zOff]
           if (c === EMPTY) continue
           // Ghost Tower: skip rendering the hidden side's fort voxels (still solid).
-          if (this.hiddenFort >= 0 && c === cellOfSide(this.hiddenFort)) continue
+          if (this.hiddenForts[sideOfCell(c)]) continue
           const boundary = x === 0 || x === GX - 1 || z === 0 || z === GZ - 1
           const exposed = boundary ||
             y === GY - 1 ||
