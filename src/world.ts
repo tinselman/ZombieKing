@@ -10,14 +10,50 @@ export const WIND_ACCEL = 0.45 // projectile acceleration per unit of wind speed
 
 export const EMPTY = 0
 export const TERRAIN = 1
-export const FORT_A = 2 // player fort voxel
-export const FORT_B = 3 // enemy fort voxel
+export const FORT_A = 2 // player 1 fort voxel
+export const FORT_B = 3 // player 2 fort voxel
 export const WATER = 4 // lakes & rivers — solid light blue, stylized
 export const BARRICADE = 5 // bought defensive berm in front of a fort — soaks hits
 export const CROP = 6 // income-producer (crop bed) planted on a side's land
 export const MINE = 7 // income-producer (ore mine) — smaller, richer than a crop
 export const DERRICK = 8 // income-producer (oil derrick) — smallest, richest
 export const CEMETERY = 9 // no income — launches ghosts when its owner plays Full Moon
+export const FORT_C = 10 // player 3 fort voxel (3–4 player free-for-all)
+export const FORT_D = 11 // player 4 fort voxel
+
+// Fort cells are one-per-seat; these helpers keep the destruction/render code seat-count
+// agnostic (the cells aren't a contiguous range, so isFortCell is an explicit test).
+export function cellOfSide(side: number): number {
+  return side === 0 ? FORT_A : side === 1 ? FORT_B : side === 2 ? FORT_C : FORT_D
+}
+export function sideOfCell(cell: number): number {
+  return cell === FORT_A ? 0 : cell === FORT_B ? 1 : cell === FORT_C ? 2 : cell === FORT_D ? 3 : -1
+}
+export function isFortCell(cell: number): boolean {
+  return cell === FORT_A || cell === FORT_B || cell === FORT_C || cell === FORT_D
+}
+// Per-seat fort tint (light so blast damage reads); `h` is a per-voxel hash for variation.
+export function fortColorRGB(side: number, h: number, out: THREE.Color): void {
+  const v = 0.92 + h * 0.05
+  if (side === 1) out.setRGB(v * 0.82, v * 0.89, Math.min(1, v + 0.06)) // blue
+  else if (side === 2) out.setRGB(v * 0.72, Math.min(1, v + 0.05), v * 0.74) // green
+  else if (side === 3) out.setRGB(Math.min(1, v + 0.05), v * 0.9, v * 0.6) // gold
+  else out.setRGB(Math.min(1, v + 0.06), v * 0.86, v * 0.82) // red (side 0 / default)
+}
+
+// Per-seat spawn anchors: 2 players face off across the mid-edges (as before); 3 spread
+// into a triangle, 4 into the corners. Each anchor faces toward the map centre (x-sign).
+function spawnAnchors(n: number, rand: () => number): { cx: number; cz: number; facing: number }[] {
+  const mk = (cx: number, cz: number) => ({
+    cx: Math.max(14, Math.min(GX - 14, Math.round(cx + (rand() - 0.5) * 12))),
+    cz: Math.max(10, Math.min(GZ - 10, Math.round(cz + (rand() - 0.5) * 10))),
+    facing: cx < GX / 2 ? 1 : -1,
+  })
+  const loX = GX * 0.16, hiX = GX * 0.84, loZ = GZ * 0.24, hiZ = GZ * 0.76
+  if (n <= 2) return [mk(18, GZ / 2), mk(GX - 18, GZ / 2)]
+  if (n === 3) return [mk(GX / 2, loZ), mk(loX, hiZ), mk(hiX, hiZ)]
+  return [mk(loX, loZ), mk(hiX, loZ), mk(loX, hiZ), mk(hiX, hiZ)]
+}
 
 // Per-type producer geometry & economy. half = footprint radius (half=4 → 9×9),
 // tall = voxel height, baseYield = full per-turn income, cost = plant price.
@@ -114,6 +150,7 @@ export type FortInfo = {
   cell: number
   towers: Tower[] // towers[0] is the main tower
   origCount: number
+  facing: number // door/berm x-direction toward map center (+1 left seats, -1 right seats)
 }
 
 // Purchasable, match-persistent structure upgrades per side.
@@ -253,18 +290,17 @@ export class World {
     this.colorSeed = seed & 0xffff
     const rand = mulberry32(seed)
 
-    // Fort separation varies per battle: sometimes close-quarters, sometimes long-range.
-    // The SEED sites shape the terrain (pads rise there and never move); a castle-
-    // placement override only moves the BUILT tower, which rides the existing surface
-    // wherever it goes — repositioning a castle must never deform the landscape.
-    const seedCxA = Math.round(12 + rand() * 20)
-    const seedCxB = Math.round(GX - 13 - rand() * 20)
-    const seedCzA = Math.round(GZ / 2 + (rand() - 0.5) * 18)
-    const seedCzB = Math.round(GZ / 2 + (rand() - 0.5) * 18)
-    const cxA = this.castleOverride[0] ? this.castleOverride[0]!.cx : seedCxA
-    const czA = this.castleOverride[0] ? this.castleOverride[0]!.cz : seedCzA
-    const cxB = this.castleOverride[1] ? this.castleOverride[1]!.cx : seedCxB
-    const czB = this.castleOverride[1] ? this.castleOverride[1]!.cz : seedCzB
+    // One seed anchor per seat (2 players: opposite mid-edges; 3–4: corners), each with a
+    // facing toward the map centre. The SEED sites shape the terrain (pads rise there and
+    // never move); a castle-placement override only moves the BUILT tower, which rides the
+    // existing surface — repositioning a castle must never deform the landscape.
+    const N = forti.length
+    const seeds = spawnAnchors(N, rand)
+    // Built positions honour any per-seat castle override.
+    const built = seeds.map((a, i) => {
+      const o = this.castleOverride[i]
+      return { cx: o ? o.cx : a.cx, cz: o ? o.cz : a.cz, facing: a.facing }
+    })
 
     const nseed = Math.floor(rand() * 100000)
     // Per-match character: rolling plains, jagged peaks, ridged badlands, or
@@ -286,46 +322,33 @@ export class World {
     const lakeCX = GX / 2 + (rand() - 0.5) * 34
     const lakeCZ = GZ / 2 + (rand() - 0.5) * 34
     const lakeR = 14 + rand() * 16
-    // Fort elevations roll independently — and 40% of matches force real drama:
-    // one fort high on a mountain, the other down in a valley.
-    let padA: number
-    let padB: number
-    if (rand() < 0.4) {
+    // Each fort's pad elevation rolls independently; in a 2-player duel, 40% of matches
+    // force real drama (one castle high on a mountain, the other in a valley).
+    const padOf: number[] = []
+    if (N === 2 && rand() < 0.4) {
       const high = 24 + rand() * 16
       const low = 5 + rand() * 7
-      if (rand() < 0.5) {
-        padA = high
-        padB = low
-      } else {
-        padA = low
-        padB = high
-      }
+      if (rand() < 0.5) { padOf[0] = high; padOf[1] = low } else { padOf[0] = low; padOf[1] = high }
     } else {
-      padA = 6 + rand() * 30
-      padB = 6 + rand() * 30
+      for (let i = 0; i < N; i++) padOf[i] = 6 + rand() * 30
     }
-    // Castles always stand clear of the water.
-    padA = Math.max(padA, waterY + 3)
-    padB = Math.max(padB, waterY + 3)
+    for (let i = 0; i < N; i++) padOf[i] = Math.max(padOf[i], waterY + 3) // clear of the water
 
-    // Tower sites per side: the main tower plus any purchased extras, spread in z.
+    // Tower sites for a fort: the main tower plus any purchased extras, spread in z.
     const towerSites = (cx: number, cz: number, extra: number, dir: number): { cx: number; cz: number }[] => {
       const sites = [{ cx, cz }]
       if (extra >= 1) sites.push({ cx: cx + dir * 3, cz: Math.min(GZ - 8, cz + 13) })
       if (extra >= 2) sites.push({ cx: cx + dir * 3, cz: Math.max(7, cz - 13) })
       return sites
     }
-    const sitesA = towerSites(cxA, czA, forti[0].towers, 1)
-    const sitesB = towerSites(cxB, czB, forti[1].towers, -1)
-
-    // Terrain pads rise at the natural SEED sites only, so the land is identical no
-    // matter where the castles were placed — a moved tower stands on raw terrain.
-    const padSitesA = towerSites(seedCxA, seedCzA, forti[0].towers, 1)
-    const padSitesB = towerSites(seedCxB, seedCzB, forti[1].towers, -1)
-    const pads = [
-      ...padSitesA.map(s => ({ ...s, pad: padA })),
-      ...padSitesB.map(s => ({ ...s, pad: padB })),
-    ]
+    // Terrain pads rise at the natural SEED sites only, so the land is identical no matter
+    // where the castles were placed — a moved tower stands on raw terrain.
+    const pads: { cx: number; cz: number; pad: number }[] = []
+    for (let i = 0; i < N; i++) {
+      for (const s of towerSites(seeds[i].cx, seeds[i].cz, forti[i].towers, seeds[i].facing)) {
+        pads.push({ ...s, pad: padOf[i] })
+      }
+    }
     this.waterY = waterY
     for (let x = 0; x < GX; x++) {
       for (let z = 0; z < GZ; z++) {
@@ -374,20 +397,19 @@ export class World {
       }
     }
 
-    // Build each side's towers; only the main tower gets the height upgrade.
-    for (let side = 0; side < 2; side++) {
-      const cell = side === 0 ? FORT_A : FORT_B
-      const sites = side === 0 ? sitesA : sitesB
-      const fort: FortInfo = { cell, towers: [], origCount: 0 }
+    // Build each seat's towers (main tower + purchased extras); only the main gets height.
+    for (let side = 0; side < N; side++) {
+      const cell = cellOfSide(side)
+      const b = built[side]
+      const sites = towerSites(b.cx, b.cz, forti[side].towers, b.facing)
+      const fort: FortInfo = { cell, towers: [], origCount: 0, facing: b.facing }
       for (let ti = 0; ti < sites.length; ti++) {
         const extraH = ti === 0 ? forti[side].height : 0
         fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
       }
       this.forts.push(fort)
+      this.buildBarricade(b.cx, b.cz, b.facing, forti[side].barricade)
     }
-    // Bought defensive berms sit in front of each fort, facing the enemy.
-    this.buildBarricade(cxA, czA, 1, forti[0].barricade)
-    this.buildBarricade(cxB, czB, -1, forti[1].barricade)
     // Producers are player/AI-placed each turn; main.ts rebuilds them here from its
     // persistent placement lists (see rebuildRoundWorld). generate() leaves the land bare.
     this.rebuild()
@@ -397,7 +419,8 @@ export class World {
   // voxels vanish, the tower(s) rebuild on the current surface at the new spot, and all
   // battlefield damage, craters, and producers stay exactly as they are.
   moveFort(side: number, cx: number, cz: number, forti: Fortifications): void {
-    const cell = side === 0 ? FORT_A : FORT_B
+    const cell = cellOfSide(side)
+    const facing = this.forts[side]?.facing ?? (side === 0 ? 1 : -1)
     // Capture the current tower damage (blueprint cells that are missing) per tower so
     // a relocation — e.g. the Ghost Tower card — carries the damage instead of healing
     // the tower to full. Recorded as offsets from each tower's origin, re-applied to the
@@ -409,18 +432,17 @@ export class World {
         const t = old.towers[ti]
         const extraH = ti === 0 ? forti.height : 0
         const miss: { dx: number; dy: number; dz: number }[] = []
-        for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, cell, extraH)) {
+        for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, cell, extraH, facing)) {
           if (this.cellAt(p.x, p.y, p.z) === EMPTY) miss.push({ dx: p.x - t.cx, dy: p.y - t.baseY, dz: p.z - t.cz })
         }
         damage.push(miss)
       }
     }
     for (let i = 0; i < this.grid.length; i++) if (this.grid[i] === cell) this.grid[i] = EMPTY
-    const dir = side === 0 ? 1 : -1
     const sites = [{ cx, cz }]
-    if (forti.towers >= 1) sites.push({ cx: cx + dir * 3, cz: Math.min(GZ - 8, cz + 13) })
-    if (forti.towers >= 2) sites.push({ cx: cx + dir * 3, cz: Math.max(7, cz - 13) })
-    const fort: FortInfo = { cell, towers: [], origCount: 0 }
+    if (forti.towers >= 1) sites.push({ cx: cx + facing * 3, cz: Math.min(GZ - 8, cz + 13) })
+    if (forti.towers >= 2) sites.push({ cx: cx + facing * 3, cz: Math.max(7, cz - 13) })
+    const fort: FortInfo = { cell, towers: [], origCount: 0, facing }
     for (let ti = 0; ti < sites.length; ti++) {
       const extraH = ti === 0 ? forti.height : 0
       fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
@@ -456,7 +478,7 @@ export class World {
         const sy = this.surfaceY(x, z)
         if (sy < 0) return false
         const top = this.cellAt(x, sy, z)
-        if (top === FORT_A || top === FORT_B || top === BARRICADE || top === CROP || top === MINE || top === DERRICK || top === CEMETERY) return false
+        if (isFortCell(top) || top === BARRICADE || top === CROP || top === MINE || top === DERRICK || top === CEMETERY) return false
       }
     }
     return true
@@ -487,14 +509,18 @@ export class World {
     return p
   }
 
-  // Nearest valid producer spot to (cx,cz) on `side`'s own half, or null if the land
-  // is full. Used by the enemy AI to auto-place; the player positions by hand.
-  findProducerSpot(side: number, cx: number, cz: number, type = CROP): { cx: number; cz: number } | null {
-    const xMin = side === 0 ? 8 : Math.round(GX / 2) + 6
-    const xMax = side === 0 ? Math.round(GX / 2) - 6 : GX - 8
+  // Nearest valid producer spot within a box around (cx,cz) — the seat's own fort — or
+  // null if that ground is full. Used by the AI to auto-place near its castle; the human
+  // positions by hand. A box keeps each seat's economy on its own turf (its corner).
+  findProducerSpot(_side: number, cx: number, cz: number, type = CROP): { cx: number; cz: number } | null {
+    const R = 34
+    const xMin = Math.max(6, Math.round(cx - R))
+    const xMax = Math.min(GX - 6, Math.round(cx + R))
+    const zMin = Math.max(6, Math.round(cz - R))
+    const zMax = Math.min(GZ - 6, Math.round(cz + R))
     const spots: { px: number; pz: number; d: number }[] = []
     for (let px = xMin; px <= xMax; px += 6) {
-      for (let pz = 6; pz <= GZ - 6; pz += 6) {
+      for (let pz = zMin; pz <= zMax; pz += 6) {
         spots.push({ px, pz, d: Math.hypot(px - cx, pz - cz) })
       }
     }
@@ -515,9 +541,8 @@ export class World {
   // Every voxel position a tower at (cx,cz,baseY) is SUPPOSED to occupy — the same
   // geometry buildTower raises (walls, floors, roof, crenellations, doorway gap, and
   // foundations rooted to the current ground). Used by repairTransfer to find holes.
-  private towerBlueprint(cx: number, cz: number, baseY: number, cell: number, extraH: number): Vec3[] {
+  private towerBlueprint(cx: number, cz: number, baseY: number, _cell: number, extraH: number, facing: number): Vec3[] {
     const height = FORT_HEIGHT + extraH
-    const facing = cell === FORT_A ? 1 : -1
     const out: Vec3[] = []
     const add = (x: number, y: number, z: number) => {
       if (this.inBounds(x, y, z)) out.push({ x, y, z })
@@ -569,7 +594,7 @@ export class World {
     for (let ti = 0; ti < tf.towers.length; ti++) {
       const t = tf.towers[ti]
       const extraH = ti === 0 ? forti.height : 0
-      for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, tf.cell, extraH)) {
+      for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, tf.cell, extraH, tf.facing)) {
         const i = this.idx(p.x, p.y, p.z)
         if (seen.has(i)) continue
         seen.add(i)
@@ -702,7 +727,7 @@ export class World {
   private buildTower(fort: FortInfo, cx: number, cz: number, cell: number, extraH: number): number {
     const baseY = this.surfaceY(cx, cz) + 1
     const height = FORT_HEIGHT + extraH
-    const facing = cell === FORT_A ? 1 : -1 // door faces the enemy
+    const facing = fort.facing // door faces toward the map centre
     const put = (x: number, y: number, z: number) => {
       if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
     }
@@ -922,9 +947,9 @@ export class World {
   // denting it. Reach and knock-loose odds are generous so towers crumble fast —
   // a solid hit gouges a tall bite out of a tower. Falloff by horizontal distance
   // and height above the blast.
-  // armor0/armor1 (default 1) scale each side's shockwave resistance — a berm hardens the
-  // whole fort against blasts, including plunging fire the line-of-sight shield can't stop.
-  shockwave(cx: number, cy: number, cz: number, r: number, rand: () => number, armor0 = 1, armor1 = 1): number {
+  // `armor[side]` (default 1 each) scales that seat's shockwave resistance — a berm hardens
+  // the whole fort against blasts, including plunging fire the line-of-sight shield can't stop.
+  shockwave(cx: number, cy: number, cz: number, r: number, rand: () => number, armor: number[] = []): number {
     const hReach = r * 2.4 // wide horizontal bite — reaches across a tower
     const vReach = r * 3.5 // tall vertical bite — a hit gouges high up
     const vDown = r * 1.2 // and a little below, so mid hits detach the top
@@ -937,12 +962,12 @@ export class World {
         for (let x = Math.max(0, Math.round(cx) - hr); x <= Math.min(GX - 1, Math.round(cx) + hr); x++) {
           const i = this.idx(x, y, z)
           const c = this.grid[i]
-          if (c !== FORT_A && c !== FORT_B) continue
+          if (!isFortCell(c)) continue
           const h = Math.hypot(x - cx, z - cz)
           // Full strength near the blast (so the core punches clean through and
           // detaches whatever is above), falling off with distance and height.
-          const armor = c === FORT_A ? armor0 : armor1
-          const p = (1 - h / hReach) * (1 - (dy > 0 ? dy / vReach : -dy / (vDown + 1))) * armor
+          const armorS = armor[sideOfCell(c)] ?? 1
+          const p = (1 - h / hReach) * (1 - (dy > 0 ? dy / vReach : -dy / (vDown + 1))) * armorS
           if (p <= 0 || rand() > p * 2.4) continue
           // A standing berm between the blast and this wall shields it (until breached).
           if (this.barricadeShields(cx, cy, cz, x, y, z)) continue
@@ -982,13 +1007,13 @@ export class World {
         for (let x = 0; x < GX; x++) {
           const i = x + zOff
           const c = this.grid[i]
-          if (c !== FORT_A && c !== FORT_B) continue
+          if (!isFortCell(c)) continue
           fortCells.push(i)
           // Rooted on ANY solid ground — terrain, water, a berm, or a producer bed.
           // (Castles may be placed anywhere now, so water/crops must count as footing
           // or a fort standing there shreds on the first support pass.)
           const below = y === 0 ? TERRAIN : this.grid[i - GX * GZ]
-          if (y === 0 || (below !== EMPTY && below !== FORT_A && below !== FORT_B)) {
+          if (y === 0 || (below !== EMPTY && !isFortCell(below))) {
             supported.add(i)
             queue.push(i)
           }
@@ -1014,7 +1039,7 @@ export class World {
       for (const n of neighbors) {
         if (n < 0 || supported.has(n)) continue
         const c = this.grid[n]
-        if (c === FORT_A || c === FORT_B) {
+        if (isFortCell(c)) {
           supported.add(n)
           queue.push(n)
         }
@@ -1107,7 +1132,7 @@ export class World {
           if (dx * dx + dz * dz > r * r) continue
           const i = this.idx(x, y, z)
           const c = this.grid[i]
-          if (c !== FORT_A && c !== FORT_B && c !== TERRAIN) continue
+          if (!isFortCell(c) && c !== TERRAIN) continue
           if (this.debris.length >= MAX_DEBRIS) continue
           this.grid[i] = EMPTY
           const dist = Math.hypot(dx, dz) + 0.1
@@ -1195,7 +1220,7 @@ export class World {
               // Footing = any solid ground (terrain, water, berm, producer bed) —
               // matches updateSupport's rooting rule for castles placed anywhere.
               const below = y === 0 ? TERRAIN : this.grid[this.idx(x, y - 1, z)]
-              if (below !== EMPTY && below !== FORT_A && below !== FORT_B) {
+              if (below !== EMPTY && !isFortCell(below)) {
                 baseSumX += x
                 baseSumZ += z
                 baseCols.push({ x, z })
@@ -1284,8 +1309,7 @@ export class World {
       this.tmpP.set(d.x, d.y, d.z)
       m.compose(this.tmpP, this.tmpQ, this.tmpS)
       this.debrisMesh.setMatrixAt(n, m)
-      if (d.cell === FORT_A) col.setRGB(0.99, 0.84, 0.8)
-      else if (d.cell === FORT_B) col.setRGB(0.8, 0.87, 0.99)
+      if (isFortCell(d.cell)) fortColorRGB(sideOfCell(d.cell), 0.5, col)
       else col.setRGB(0.93, 0.93, 0.94)
       this.debrisMesh.setColorAt(n, col)
     }
@@ -1309,8 +1333,7 @@ export class World {
           const c = this.grid[x + zOff]
           if (c === EMPTY) continue
           // Ghost Tower: skip rendering the hidden side's fort voxels (still solid).
-          if (this.hiddenFort === 0 && c === FORT_A) continue
-          if (this.hiddenFort === 1 && c === FORT_B) continue
+          if (this.hiddenFort >= 0 && c === cellOfSide(this.hiddenFort)) continue
           const boundary = x === 0 || x === GX - 1 || z === 0 || z === GZ - 1
           const exposed = boundary ||
             y === GY - 1 ||
@@ -1330,10 +1353,9 @@ export class World {
           } else if (c === TERRAIN) {
             const v = 0.86 + 0.09 * (y / 28) + h * 0.04
             col.setRGB(Math.min(1, v), Math.min(1, v + 0.005), Math.min(1, v + 0.015))
-          } else if (c === FORT_A) {
-            // Player castle: light red.
-            const v = 0.92 + h * 0.05
-            col.setRGB(Math.min(1, v + 0.06), v * 0.86, v * 0.82)
+          } else if (isFortCell(c)) {
+            // Castle, tinted by which player owns it (red / blue / green / gold).
+            fortColorRGB(sideOfCell(c), h, col)
           } else if (c === BARRICADE) {
             // Sandbag berm: earthy tan.
             const v = 0.62 + h * 0.08
@@ -1359,9 +1381,9 @@ export class World {
             const v = 0.4 + h * 0.12
             col.setRGB(v * 0.86, v * 0.8, v * 0.98)
           } else {
-            // Enemy castle: light blue.
-            const v = 0.92 + h * 0.05
-            col.setRGB(v * 0.82, v * 0.89, Math.min(1, v + 0.06))
+            // Fallback (all known cells are handled above).
+            const v = 0.7 + h * 0.1
+            col.setRGB(v, v, v)
           }
           this.mesh.setColorAt(i, col)
           i++

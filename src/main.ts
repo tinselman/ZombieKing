@@ -819,9 +819,8 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
   world.carve(at.x, at.y, at.z, r)
   // Berms armor the whole fort against the shockwave: 0/1/2 berms → ×1 / ×0.72 / ×0.52
   // removal chance, so an economy-funded defense can survive an otherwise-lethal nuke.
-  const armor0 = Math.pow(0.72, forti[0].barricade)
-  const armor1 = Math.pow(0.72, forti[1].barricade)
-  if (fire) world.shockwave(at.x, at.y, at.z, r, Math.random, armor0, armor1)
+  const armor = forti.map(f => Math.pow(0.72, f.barricade))
+  if (fire) world.shockwave(at.x, at.y, at.z, r, Math.random, armor)
   world.updateSupport(Math.random)
   spawnExplosion(at, r, fire)
   sfx.boom(r)
