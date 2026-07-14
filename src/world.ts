@@ -922,7 +922,9 @@ export class World {
   // denting it. Reach and knock-loose odds are generous so towers crumble fast —
   // a solid hit gouges a tall bite out of a tower. Falloff by horizontal distance
   // and height above the blast.
-  shockwave(cx: number, cy: number, cz: number, r: number, rand: () => number): number {
+  // armor0/armor1 (default 1) scale each side's shockwave resistance — a berm hardens the
+  // whole fort against blasts, including plunging fire the line-of-sight shield can't stop.
+  shockwave(cx: number, cy: number, cz: number, r: number, rand: () => number, armor0 = 1, armor1 = 1): number {
     const hReach = r * 2.4 // wide horizontal bite — reaches across a tower
     const vReach = r * 3.5 // tall vertical bite — a hit gouges high up
     const vDown = r * 1.2 // and a little below, so mid hits detach the top
@@ -939,7 +941,8 @@ export class World {
           const h = Math.hypot(x - cx, z - cz)
           // Full strength near the blast (so the core punches clean through and
           // detaches whatever is above), falling off with distance and height.
-          const p = (1 - h / hReach) * (1 - (dy > 0 ? dy / vReach : -dy / (vDown + 1)))
+          const armor = c === FORT_A ? armor0 : armor1
+          const p = (1 - h / hReach) * (1 - (dy > 0 ? dy / vReach : -dy / (vDown + 1))) * armor
           if (p <= 0 || rand() > p * 2.4) continue
           // A standing berm between the blast and this wall shields it (until breached).
           if (this.barricadeShields(cx, cy, cz, x, y, z)) continue

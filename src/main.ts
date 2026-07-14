@@ -141,7 +141,7 @@ type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThin
 // Match economy: best-of-ROUNDS. Income comes from producers (see sideIncome);
 // winning a round plunders half the loser's cash + one card (not per-hit pay).
 const ROUNDS = 3 // best-of-3: first side to 2 round wins takes the match
-const START_CASH = 3000
+const START_CASH = 2500 // turn-1 bankroll — enough for producers/cards, not a decisive weapon
 
 let phase: Phase = 'aim'
 let turn = 0
@@ -170,10 +170,11 @@ const forti: Fortifications[] = [
   { height: 0, towers: 0, barricade: 0 },
   { height: 0, towers: 0, barricade: 0 },
 ]
-// Producers the player and AI have planted, positioned on their own half. These
-// persist across rounds (rebuilt into each fresh world) until a lost round razes
-// them. type is the cell kind (CROP/MINE/DERRICK); baseYield is full per-turn income;
-// age counts owner-turns survived (drives crop maturation).
+// Producers the player and AI have planted, positioned on their own half. These persist
+// across rounds for BOTH sides (rebuilt into each fresh world) — a lost round only costs
+// half your cash and one card, never the economy. type is the cell kind
+// (CROP/MINE/DERRICK/CEMETERY); baseYield is full per-turn income; age counts owner-turns
+// survived (drives crop maturation).
 type Planted = { cx: number; cz: number; type: number; baseYield: number; age: number }
 const planted: Planted[][] = [[], []]
 // Resources each side bought in the market, awaiting placement (buy-then-place).
@@ -182,10 +183,10 @@ const pendingResources: number[][] = [[], []]
 let marketFull = false
 const roundStartPending = [false, false] // each side's first turn of a round gets the full market
 
-// Crops ramp in over a couple turns (40% → 100%); mines/derricks pay full at once.
+// Crops ramp in fast (55% → 100% by the second payout); mines/derricks pay full at once.
 function maturity(type: number, age: number): number {
   if (!PRODUCER_SPECS[type].matures) return 1
-  return Math.min(1, 0.4 + 0.3 * Math.max(0, age - 1))
+  return Math.min(1, 0.55 + 0.45 * Math.max(0, age - 1))
 }
 
 // A side's per-turn income: full yield × physical integrity × maturity, summed over
@@ -212,7 +213,7 @@ function syncStatus(): void {
 type CardId = 'skip' | 'bumper' | 'army' | 'ghost' | 'forcefield' | 'steal' | 'rebuild' | 'toaster' | 'zombie' | 'fullmoon' | 'money1' | 'money2' | 'money5'
 type CardDef = { id: CardId; name: string; blurb: string; weight: number; impl: boolean; emoji: string }
 const DECK: CardDef[] = [
-  { id: 'skip', name: 'Skip Player', weight: 30, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
+  { id: 'skip', name: 'Skip Player', weight: 18, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
   { id: 'bumper', name: 'Bumper Crop', weight: 28, impl: true, emoji: '🌾', blurb: 'A bounty harvest! Your next income payout from resources is doubled.' },
   { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: "An army overruns the enemy's resources — their producers glow pink and their ENTIRE next payout is delivered to you instead. They collect nothing." },
   { id: 'ghost', name: 'Ghost Tower', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
@@ -222,9 +223,9 @@ const DECK: CardDef[] = [
   { id: 'toaster', name: 'Flying Toaster', weight: 6, impl: true, emoji: '🍞', blurb: 'A winged toaster homes onto the enemy castle and strikes with the power of a nuke — a free bonus attack on top of your shot.' },
   { id: 'zombie', name: 'Zombie King', weight: 4, impl: true, emoji: '🧟', blurb: 'The Zombie King AWAKENS — the enemy is warned. At the start of your NEXT turn he stomps the field and seizes HALF their producers as your own placeable resources. Only a Force Field stops him.' },
   { id: 'fullmoon', name: 'Full Moon', weight: 7, impl: true, emoji: '🌕', blurb: 'Night falls and every cemetery you own erupts with ghosts that fly at the enemy tower — 1 cemetery wrecks a quarter of it, 4 raze it entirely. A Force Field, or the enemy shining a Flashlight, sends them home.' },
-  { id: 'money1', name: 'Money: $1,000', weight: 6, impl: true, emoji: '💵', blurb: 'Found money. Play to pocket $1,000.' },
-  { id: 'money2', name: 'Money: $2,000', weight: 4, impl: true, emoji: '💰', blurb: 'A fat purse. Play to pocket $2,000.' },
-  { id: 'money5', name: 'Money: $5,000', weight: 2, impl: true, emoji: '🤑', blurb: "A king's ransom. Play to pocket $5,000." },
+  { id: 'money1', name: 'Money: $2,000', weight: 6, impl: true, emoji: '💵', blurb: 'Found money. Play to pocket $2,000.' },
+  { id: 'money2', name: 'Money: $3,500', weight: 4, impl: true, emoji: '💰', blurb: 'A fat purse. Play to pocket $3,500.' },
+  { id: 'money5', name: 'Money: $6,000', weight: 2, impl: true, emoji: '🤑', blurb: "A king's ransom. Play to pocket $6,000." },
 ]
 const CARD_COST = 1500
 const hand: CardId[][] = [[], []] // cards each side is holding
@@ -316,9 +317,9 @@ function applyCard(side: number, id: CardId): void {
   else if (id === 'skip') cardSkip(side, foe)
   else if (id === 'forcefield') cardForcefield(side)
   else if (id === 'rebuild') cardRebuild(side, foe)
-  else if (id === 'money1') cardMoney(side, 1000)
-  else if (id === 'money2') cardMoney(side, 2000)
-  else if (id === 'money5') cardMoney(side, 5000)
+  else if (id === 'money1') cardMoney(side, 2000)
+  else if (id === 'money2') cardMoney(side, 3500)
+  else if (id === 'money5') cardMoney(side, 6000)
 }
 
 // Force Field: if the victim has an active shield, it eats this hostile act — flare
@@ -807,7 +808,11 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
     }
   }
   world.carve(at.x, at.y, at.z, r)
-  if (fire) world.shockwave(at.x, at.y, at.z, r, Math.random)
+  // Berms armor the whole fort against the shockwave: 0/1/2 berms → ×1 / ×0.72 / ×0.52
+  // removal chance, so an economy-funded defense can survive an otherwise-lethal nuke.
+  const armor0 = Math.pow(0.72, forti[0].barricade)
+  const armor1 = Math.pow(0.72, forti[1].barricade)
+  if (fire) world.shockwave(at.x, at.y, at.z, r, Math.random, armor0, armor1)
   world.updateSupport(Math.random)
   spawnExplosion(at, r, fire)
   sfx.boom(r)
@@ -2627,8 +2632,12 @@ const ROUND_STIPEND = 1200
 function nextRound(): void {
   hud.hideRoundOver()
   round++
-  money[0] += ROUND_STIPEND
-  money[1] += ROUND_STIPEND
+  // The stipend seeds rounds 2+ only — round 1 is just START_CASH (no double-dip, so the
+  // opening bankroll can't afford a decisive weapon and building economy comes first).
+  if (round > 1) {
+    money[0] += ROUND_STIPEND
+    money[1] += ROUND_STIPEND
+  }
   if (!twoPlayer) {
     aiPlaceCastle() // the computer positions its own castle for the new round
     aiShop() // ...and restocks weapons/fortifications (round start only)
@@ -2953,6 +2962,7 @@ declare global {
       hand: () => string[]
       sampleDraws: (n: number) => Record<string, number>
       setMode: (two: boolean) => void
+      setBerms: (side: number, n: number) => void
     }
   }
 }
@@ -3036,5 +3046,10 @@ window.__sv = {
   setMode(two: boolean) {
     twoPlayer = two
     fullReset()
+  },
+  // Test hook: set a side's berm (barricade) count and rebuild so armor takes effect.
+  setBerms(side: number, n: number) {
+    forti[side].barricade = n
+    rebuildRoundWorld()
   },
 }
