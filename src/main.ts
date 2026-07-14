@@ -181,6 +181,12 @@ function fortLabel(s: number): string {
 function isHuman(s: number): boolean {
   return seatHuman[s]
 }
+// Screen mirror for the placement/overview cameras + their arrow keys: 2-player seat 2
+// views from the opposite end (−1); 3–4 players all share a fixed overhead (+1), with
+// per-seat aim handled separately by aimCamera(turn).
+function seatMirror(): number {
+  return numPlayers > 2 ? 1 : turn === 0 ? 1 : -1
+}
 // Seats still standing this round (used for turn rotation + win detection).
 function livingSeats(): number[] {
   const out: number[] = []
@@ -235,6 +241,14 @@ function syncStatus(): void {
 function firstHuman(): number {
   for (let s = 0; s < numPlayers; s++) if (seatHuman[s]) return s
   return 0
+}
+// Push all seats' current integrity to their fort bars.
+function refreshIntegrity(): void {
+  hud.setIntegrity(Array.from({ length: numPlayers }, (_, s) => world.integrity(s)))
+}
+// Show the right number of fort bars, label each with its nation, highlight whose turn it is.
+function refreshForts(): void {
+  hud.showForts(numPlayers, Array.from({ length: numPlayers }, (_, s) => fortLabel(s)), turn)
 }
 
 // ---------------------------------------------------------------- stratagem cards
@@ -309,19 +323,35 @@ function buyCard(side: number): void {
   }
 }
 
+// Cards that strike a chosen opponent (vs. self-buff/economy cards which don't).
+const HOSTILE_CARDS = new Set<CardId>(['skip', 'army', 'steal', 'rebuild', 'toaster', 'zombie', 'fullmoon'])
+
 function playCard(side: number, idx: number): void {
   const id = hand[side][idx]
   if (!id) return
   if (isHuman(side) && phase !== 'aim' && phase !== 'plant') return void hud.msg('play cards before firing')
   // Full Moon does nothing without a cemetery to raise — keep it in hand.
   if (id === 'fullmoon' && cemeteriesOf(side) === 0) return void (isHuman(side) && hud.msg('you have no cemeteries to awaken'))
-  hand[side].splice(idx, 1)
-  if (isHuman(side)) {
-    sfx.tick()
-    refreshHand()
+  const finish = (target?: number) => {
+    hand[side].splice(idx, 1)
+    if (isHuman(side)) {
+      sfx.tick()
+      refreshHand()
+    }
+    applyCard(side, id, target)
+    refreshResources() // steal/zombie move producers between sides
   }
-  applyCard(side, id)
-  refreshResources() // steal/zombie move producers between sides
+  // In a 3–4 player game a human chooses which opponent a hostile card hits.
+  const foes = livingSeats().filter(s => s !== side)
+  if (isHuman(side) && HOSTILE_CARDS.has(id) && foes.length > 1) {
+    hud.showTargetPicker(
+      `${cardDef(id).emoji} ${cardDef(id).name} — strike whom?`,
+      foes.map(s => ({ seat: s, label: fortLabel(s) })),
+      seat => finish(seat)
+    )
+    return
+  }
+  finish() // 1–2 player, self-card, or AI: auto-target the sole/weakest opponent
 }
 
 // On a round win the victor lifts one random card from the loser's hand. Returns the
@@ -403,7 +433,7 @@ function cardRebuild(side: number, foe: number): void {
   const { from, to } = world.repairTransfer(foe, side, forti[side])
   if (!to.length) return void (isHuman(side) && hud.msg('your castle has no missing voxels to repair'))
   world.rebuild()
-  hud.setIntegrity(world.integrity(0), world.integrity(1))
+  refreshIntegrity()
   spawnVoxelFlight(from, to, side === 0 ? 0xffb0a0 : 0xa0c0ff)
   sfx.rumble()
   hud.msg(`${capName(side)} repaired ${to.length} voxels with ${nameOf(foe)}'s bricks`)
@@ -620,7 +650,7 @@ function applyGhostDamage(caster: number, defender: number, frac: number): void 
     const c = removed[k]
     spawnExplosion(new THREE.Vector3(c.x, c.y, c.z), 2.4, false)
   }
-  hud.setIntegrity(world.integrity(0), world.integrity(1))
+  refreshIntegrity()
   const t = world.forts[defender]?.towers[0]
   if (t) addShake(9, new THREE.Vector3(t.cx, t.baseY + 6, t.cz))
   sfx.boom(6)
@@ -677,7 +707,7 @@ function cardGhost(side: number): void {
   world.moveFort(side, cx, cz, forti[side]) // carries the tower's damage to the new spot
   world.hiddenForts[side] = true
   world.rebuild()
-  hud.setIntegrity(world.integrity(0), world.integrity(1))
+  refreshIntegrity()
   snapCannonToSeat(side)
   sides[side].cannon.group.visible = false
   hud.msg(`${capName(side)}'s tower vanishes!`)
@@ -1470,7 +1500,7 @@ function updatePlant(dt: number): void {
   const half = PRODUCER_SPECS[plantType].half
   // Coarse positioning — a fixed speed (Shift = slow) is plenty for a small plot.
   // Screen-relative arrows: mirrored for Player 2 (camera sits on their side).
-  const m = turn === 0 ? 1 : -1
+  const m = seatMirror()
   const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 10 : 30) * dt
   if (keys.has('ArrowUp')) plantCX += m * speed
   if (keys.has('ArrowDown')) plantCX -= m * speed
@@ -1571,7 +1601,7 @@ function placeCastle(): void {
   world.castleOverride[turn] = { cx, cz } // honoured by the next full regen (new round)
   world.moveFort(turn, cx, cz, forti[turn]) // move the fort NOW, carrying its damage
   world.rebuild()
-  hud.setIntegrity(world.integrity(0), world.integrity(1)) // reflect the carried-over damage
+  refreshIntegrity()
   snapCannonToSeat(turn)
   sfx.tick()
   if (ghostReposition) {
@@ -1590,7 +1620,7 @@ function updateCastle(dt: number): void {
   if (phase !== 'castle') return
   // Screen-relative arrows: the placement camera sits on the acting player's side,
   // so Player 2's axes mirror — Up always pushes toward the enemy / top of screen.
-  const m = turn === 0 ? 1 : -1
+  const m = seatMirror()
   const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 12 : 30) * dt
   if (keys.has('ArrowUp')) castleCX += m * speed
   if (keys.has('ArrowDown')) castleCX -= m * speed
@@ -1670,14 +1700,14 @@ function updateCamera(dt: number): void {
     // side — Player 2 places from the opposite end, own territory nearest the camera,
     // enemy at the top of the screen. Screen-up is "toward the enemy" for both, and
     // the arrow keys in updateCastle/updatePlant mirror to stay screen-relative.
-    const m = turn === 0 ? 1 : -1
+    const m = seatMirror()
     desiredPos.set(GX / 2 - m * 96, 150, GZ / 2)
     desiredLook.set(GX / 2, 2, GZ / 2)
     k = 3
   } else if (phase === 'aim' || phase === 'charge') {
     if (worldView) {
       // Pulled-back vantage from the acting player's own side of the field.
-      const m = turn === 0 ? 1 : -1
+      const m = seatMirror()
       desiredPos.set(GX / 2 - m * 115, 85, GZ / 2 + m * 70)
       desiredLook.set(GX / 2 + m * 8, 6, GZ / 2)
       k = 2.5
@@ -1980,6 +2010,7 @@ function startTurn(s: number): void {
 
 function reallyStartTurn(s: number): void {
   turn = s
+  refreshForts() // update which fort bar is highlighted for the acting seat
   rerollWind()
   flyHold = null
   // Ghost Tower in hotseat: each ghosted tower is visible only on its owner's turn —
@@ -2375,7 +2406,7 @@ function concludeRound(dead: number[]): boolean {
       addShake(11, base)
     }
     world.rebuild()
-    hud.setIntegrity(world.integrity(0), world.integrity(1))
+    refreshIntegrity()
     hud.banner(`${capName(dead[0])} IS OUT!`, `${livingSeats().length} castles still standing`, 2600)
     return false
   }
@@ -2426,7 +2457,7 @@ function concludeRound(dead: number[]): boolean {
   phase = 'end'
   endT = 0
   endShown = false
-  hud.setIntegrity(world.integrity(0), world.integrity(1))
+  refreshIntegrity()
   syncStatus()
   return true
 }
@@ -2447,7 +2478,7 @@ function finishResolve(force = false): void {
     sides[s].targetY = seat.y
     sides[s].targetZ = seat.z
   }
-  hud.setIntegrity(world.integrity(0), world.integrity(1))
+  refreshIntegrity()
   // Any living seat whose tower just collapsed is newly eliminated this resolve.
   const dead: number[] = []
   for (let s = 0; s < numPlayers; s++) if (alive[s] && world.integrity(s) < COLLAPSE_AT) dead.push(s)
@@ -2542,7 +2573,7 @@ function setupRoundWorld(): void {
   endInfo = null
   flyHold = null
   clearLastTrails()
-  hud.setIntegrity(1, 1)
+  refreshIntegrity()
   updateWeaponHud()
   hud.setPower(null, null)
   hud.setAngles(0, 55)
@@ -2758,7 +2789,7 @@ function fullReset(): void {
     shotThisRound[s] = false
     alive[s] = true
   }
-  hud.setFortLabels(fortLabel(0), fortLabel(1))
+  refreshForts()
   nextRound()
 }
 
@@ -3023,8 +3054,10 @@ let skipRender = false
 // starts. The Rematch button routes back here so the mode can change between matches.
 function showModePicker(): void {
   phase = 'shop' // inert while the picker is up — no aiming/firing behind the overlay
-  hud.showModePicker(two => {
-    startWithSeats(2, two ? [true, true] : [true, false])
+  hud.showModePicker(count => {
+    if (count === 1) startWithSeats(2, [true, false]) // you vs the computer
+    else if (count === 2) startWithSeats(2, [true, true]) // hotseat duel
+    else hud.showSeatSetup(count, flags => startWithSeats(count, flags)) // 3–4 player lobby
   })
 }
 

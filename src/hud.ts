@@ -8,12 +8,20 @@ const CSS = `
 #sc-hud { position: fixed; inset: 0; pointer-events: none; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; color: #2c3138; user-select: none; }
 #sc-hud .panel { position: absolute; background: rgba(255,255,255,0.78); backdrop-filter: blur(6px); border: 1px solid #d8dde3; border-radius: 10px; padding: 10px 14px; box-shadow: 0 2px 10px rgba(40,50,60,0.08); }
 #sc-hud .label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin-bottom: 5px; }
-#sc-fortYou { top: 16px; left: 16px; width: 190px; }
-#sc-fortFoe { top: 16px; right: 16px; width: 190px; }
+/* Up to four fort bars, one per seat, tucked into the screen corners (top-left/right,
+   then a second row below for seats 3–4) and tinted to match each player's castle. */
+#sc-fort0 { top: 16px; left: 16px; width: 190px; }
+#sc-fort1 { top: 16px; right: 16px; width: 190px; }
+#sc-fort2 { top: 84px; left: 16px; width: 190px; }
+#sc-fort3 { top: 84px; right: 16px; width: 190px; }
 #sc-hud .bar { height: 10px; background: #e8ebef; border-radius: 5px; overflow: hidden; }
 #sc-hud .bar > div { height: 100%; border-radius: 5px; transition: width 0.5s ease; }
-#sc-fortYou .bar > div { background: #d5473a; }
-#sc-fortFoe .bar > div { background: #3a7bd5; }
+#sc-fort0 .bar > div { background: #d5473a; }
+#sc-fort1 .bar > div { background: #3a7bd5; }
+#sc-fort2 .bar > div { background: #3a9d4a; }
+#sc-fort3 .bar > div { background: #d6a72f; }
+#sc-fort0.dead, #sc-fort1.dead, #sc-fort2.dead, #sc-fort3.dead { opacity: 0.4; }
+#sc-hud .fort.turn { outline: 2px solid #16181b; }
 #sc-hud .pct { font-size: 13px; font-weight: 600; margin-top: 4px; }
 #sc-wind { top: 16px; left: 50%; transform: translateX(-50%); text-align: center; min-width: 110px; }
 #sc-status { top: 130px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; letter-spacing: 0.05em; padding: 6px 14px; white-space: nowrap; }
@@ -77,11 +85,29 @@ const CSS = `
 #sc-mode h1 .zk { display: block; font-size: 92px; letter-spacing: 0.01em; }
 #sc-mode p { font-size: 13px; color: #6c757e; margin: 0 0 34px; letter-spacing: 0.05em; text-align: center; max-width: 560px; line-height: 1.5; }
 #sc-mode p b { color: #16181b; letter-spacing: 0.1em; }
-#sc-mode .modes { display: flex; gap: 18px; }
-#sc-mode .modes button { width: 250px; padding: 22px 18px; border-radius: 14px; border: 1px solid #c4cad1; background: #fff; color: #2c3138; cursor: pointer; text-align: center; }
+#sc-mode .modes { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; max-width: 540px; }
+#sc-mode .modes button { width: 250px; padding: 18px 16px; border-radius: 14px; border: 1px solid #c4cad1; background: #fff; color: #2c3138; cursor: pointer; text-align: center; }
 #sc-mode .modes button:hover { border-color: #16181b; transform: translateY(-2px); box-shadow: 0 6px 18px rgba(40,50,60,0.12); }
-#sc-mode .modes .mt { display: block; font-size: 20px; font-weight: 800; letter-spacing: 0.04em; margin-bottom: 6px; color: #16181b; }
-#sc-mode .modes .ms { display: block; font-size: 12.5px; color: #7a838d; line-height: 1.45; }
+#sc-mode .modes .mt { display: block; font-size: 19px; font-weight: 800; letter-spacing: 0.04em; margin-bottom: 5px; color: #16181b; }
+#sc-mode .modes .ms { display: block; font-size: 12px; color: #7a838d; line-height: 1.4; }
+/* Seat setup (3–4 players): a Human/Computer toggle per seat. */
+#sc-seats { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #fff; pointer-events: auto; z-index: 9; }
+#sc-seats h1 { font-size: 30px; font-weight: 800; letter-spacing: 0.04em; color: #16181b; margin: 0 0 4px; }
+#sc-seats p { font-size: 13px; color: #7a838d; margin: 0 0 22px; }
+#sc-seatRows { display: flex; flex-direction: column; gap: 10px; }
+#sc-seatRows button { width: 320px; padding: 14px 18px; border-radius: 11px; border: 1px solid #c4cad1; background: #fff; cursor: pointer; font-size: 16px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+#sc-seatRows button:hover { border-color: #16181b; }
+#sc-seatRows .who { font-weight: 800; letter-spacing: 0.06em; }
+#sc-seatRows .who.human { color: #d5473a; }
+#sc-seatRows .who.cpu { color: #3a7bd5; }
+#sc-seatsStart { margin-top: 22px; font-size: 15px; font-weight: 800; letter-spacing: 0.08em; padding: 12px 40px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
+#sc-seatsStart:hover { background: #454c55; }
+/* Target picker: choose which opponent a hostile card hits (3–4 players). */
+#sc-target { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(244,246,248,0.9); backdrop-filter: blur(8px); pointer-events: auto; z-index: 10; }
+#sc-target h1 { font-size: 24px; font-weight: 800; letter-spacing: 0.03em; color: #16181b; margin: 0 0 18px; text-align: center; }
+#sc-targetRows { display: flex; flex-direction: column; gap: 10px; }
+#sc-targetRows button { width: 340px; padding: 14px 18px; border-radius: 11px; border: 1px solid #c4cad1; background: #fff; cursor: pointer; font-size: 16px; text-align: left; display: flex; justify-content: space-between; align-items: center; }
+#sc-targetRows button:hover { border-color: #16181b; background: #f6f8fa; }
 /* Country picker — pick a nation + flag before the match (cosmetic identity). */
 #sc-country { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #fff; pointer-events: auto; z-index: 9; }
 #sc-country h1 { font-size: 30px; font-weight: 800; letter-spacing: 0.04em; color: #16181b; margin: 0 0 4px; text-align: center; }
@@ -175,8 +201,10 @@ export function createHud(
   const root = document.createElement('div')
   root.id = 'sc-hud'
   root.innerHTML = `
-    <div class="panel" id="sc-fortYou"><div class="label">Your Fort</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
-    <div class="panel" id="sc-fortFoe"><div class="label">Enemy Fort</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
+    <div class="panel fort" id="sc-fort0"><div class="label">Your Fort</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
+    <div class="panel fort" id="sc-fort1"><div class="label">Enemy Fort</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
+    <div class="panel fort" id="sc-fort2" style="display:none"><div class="label">Player 3</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
+    <div class="panel fort" id="sc-fort3" style="display:none"><div class="label">Player 4</div><div class="bar"><div></div></div><div class="pct">100%</div></div>
     <div class="panel" id="sc-wind"><div class="label">Wind</div><span id="sc-windArrow">➤</span><div id="sc-windSpeed"></div></div>
     <div class="panel" id="sc-status"></div>
     <div id="sc-blstack">
@@ -208,12 +236,18 @@ export function createHud(
     <p><b>WARNING:</b> This game includes massive violence, death, destruction, and war. Play at your own risk.</p>
     <div class="modes">
       <button id="sc-mode1"><span class="mt">1 PLAYER</span><span class="ms">Battle the computer — it builds, schemes, and shoots back.</span></button>
-      <button id="sc-mode2"><span class="mt">2 PLAYERS</span><span class="ms">Hotseat duel — share the keyboard, take turns, last castle standing wins.</span></button>
+      <button id="sc-mode2"><span class="mt">2 PLAYERS</span><span class="ms">Hotseat duel — share the keyboard, last castle standing wins.</span></button>
+      <button id="sc-mode3"><span class="mt">3 PLAYERS</span><span class="ms">Three-corner free-for-all — humans and computers, informal alliances.</span></button>
+      <button id="sc-mode4"><span class="mt">4 PLAYERS</span><span class="ms">Four-corner war — mix humans and computers, everyone for themselves.</span></button>
     </div></div>
+    <div id="sc-seats"><h1>Set up the seats</h1><p>Tap each seat to switch between Human and Computer.</p>
+      <div id="sc-seatRows"></div>
+      <button id="sc-seatsStart">START WAR</button></div>
     <div id="sc-country"><h1></h1><p>Choose your nation — for honour, for glory, for the flag.</p>
       <input id="sc-countrySearch" type="text" placeholder="Search countries…" autocomplete="off" />
       <div id="sc-countryGrid"></div>
       <button class="rand">🎲 SURPRISE ME</button></div>
+    <div id="sc-target"><h1></h1><div id="sc-targetRows"></div></div>
     <div id="sc-shop"><div class="box">
       <h2>ZOMBIE KING MARKET<span id="sc-shopPlayer"></span></h2>
       <div id="sc-shopResult"></div>
@@ -235,10 +269,10 @@ export function createHud(
   parent.appendChild(root)
 
   const q = <T extends HTMLElement>(sel: string) => root.querySelector(sel) as T
-  const youBar = q<HTMLElement>('#sc-fortYou .bar > div')
-  const youPct = q<HTMLElement>('#sc-fortYou .pct')
-  const foeBar = q<HTMLElement>('#sc-fortFoe .bar > div')
-  const foePct = q<HTMLElement>('#sc-fortFoe .pct')
+  const fortPanels = [0, 1, 2, 3].map(i => q<HTMLElement>(`#sc-fort${i}`))
+  const fortBars = fortPanels.map(p => p.querySelector('.bar > div') as HTMLElement)
+  const fortPcts = fortPanels.map(p => p.querySelector('.pct') as HTMLElement)
+  const fortLabels = fortPanels.map(p => p.querySelector('.label') as HTMLElement)
   const windArrow = q<HTMLElement>('#sc-windArrow')
   const windSpeed = q<HTMLElement>('#sc-windSpeed')
   const statusEl = q<HTMLElement>('#sc-status')
@@ -288,16 +322,19 @@ export function createHud(
   const handoffTitle = q<HTMLElement>('#sc-handoff h1')
   const handoffBtn = q<HTMLButtonElement>('#sc-handoff button')
   const modeEl = q<HTMLElement>('#sc-mode')
-  const mode1 = q<HTMLButtonElement>('#sc-mode1')
-  const mode2 = q<HTMLButtonElement>('#sc-mode2')
+  const modeBtns = [1, 2, 3, 4].map(i => q<HTMLButtonElement>(`#sc-mode${i}`))
+  const seatsEl = q<HTMLElement>('#sc-seats')
+  const seatRows = q<HTMLElement>('#sc-seatRows')
+  const seatsStart = q<HTMLButtonElement>('#sc-seatsStart')
+  const targetEl = q<HTMLElement>('#sc-target')
+  const targetTitle = q<HTMLElement>('#sc-target h1')
+  const targetRows = q<HTMLElement>('#sc-targetRows')
   const countryEl = q<HTMLElement>('#sc-country')
   const countryTitle = q<HTMLElement>('#sc-country h1')
   const countrySearch = q<HTMLInputElement>('#sc-countrySearch')
   const countryGrid = q<HTMLElement>('#sc-countryGrid')
   const countryRand = q<HTMLButtonElement>('#sc-country .rand')
   const shopPlayer = q<HTMLElement>('#sc-shopPlayer')
-  const fortYouLabel = q<HTMLElement>('#sc-fortYou .label')
-  const fortFoeLabel = q<HTMLElement>('#sc-fortFoe .label')
 
   let bannerTimer = 0
   let msgTimer = 0
@@ -356,11 +393,23 @@ export function createHud(
   }
 
   return {
-    setIntegrity(you: number, foe: number) {
-      youBar.style.width = `${Math.round(you * 100)}%`
-      youPct.textContent = `${Math.round(you * 100)}%`
-      foeBar.style.width = `${Math.round(foe * 100)}%`
-      foePct.textContent = `${Math.round(foe * 100)}%`
+    // Per-seat integrity. Accepts either the legacy pair (you, foe) or an array of N.
+    setIntegrity(...vals: (number | number[])[]) {
+      const arr = Array.isArray(vals[0]) ? (vals[0] as number[]) : (vals as number[])
+      for (let i = 0; i < 4; i++) {
+        const v = i < arr.length ? arr[i] : 0
+        fortBars[i].style.width = `${Math.round(v * 100)}%`
+        fortPcts[i].textContent = `${Math.round(v * 100)}%`
+        fortPanels[i].classList.toggle('dead', i < arr.length && v < 0.01)
+      }
+    },
+    // Show `n` fort bars, label each, and outline whose turn it is.
+    showForts(n: number, labels: string[], turnSeat: number) {
+      for (let i = 0; i < 4; i++) {
+        fortPanels[i].style.display = i < n ? 'block' : 'none'
+        if (i < n && labels[i]) fortLabels[i].textContent = labels[i]
+        fortPanels[i].classList.toggle('turn', i === turnSeat)
+      }
     },
     // Arrow size and color escalate with strength so gales are unmissable.
     setWind(x: number, z: number) {
@@ -456,8 +505,8 @@ export function createHud(
       statusEl.style.opacity = '1' // re-shown after a round-over banner hid it
     },
     setFortLabels(you: string, foe: string) {
-      fortYouLabel.textContent = you
-      fortFoeLabel.textContent = foe
+      fortLabels[0].textContent = you
+      fortLabels[1].textContent = foe
     },
     showShop(
       data: {
@@ -606,15 +655,51 @@ export function createHud(
         onReady()
       }
     },
-    // Boot / rematch mode picker: resolves with true for 2-player hotseat.
-    showModePicker(onPick: (twoPlayer: boolean) => void) {
+    // Boot / rematch mode picker: resolves with the chosen player count (1–4).
+    showModePicker(onPick: (count: number) => void) {
       modeEl.style.display = 'flex'
-      const pick = (two: boolean) => {
-        modeEl.style.display = 'none'
-        onPick(two)
+      modeBtns.forEach((b, i) => {
+        b.onclick = () => {
+          modeEl.style.display = 'none'
+          onPick(i + 1)
+        }
+      })
+    },
+    // Seat setup (3–4 players): each seat toggles Human/Computer (seat 0 is always human),
+    // then START resolves with the human/AI flags.
+    showSeatSetup(count: number, onDone: (humanFlags: boolean[]) => void) {
+      const flags = Array.from({ length: count }, (_, i) => i === 0)
+      const render = () => {
+        seatRows.innerHTML = flags
+          .map((h, i) => `<button data-i="${i}"${i === 0 ? ' disabled' : ''}>Player ${i + 1}<span class="who ${h ? 'human' : 'cpu'}">${h ? '👤 HUMAN' : '💻 COMPUTER'}</span></button>`)
+          .join('')
+        seatRows.querySelectorAll('button').forEach(b => {
+          b.addEventListener('click', () => {
+            const i = +(b as HTMLElement).dataset.i!
+            if (i === 0) return // seat 1 is always you
+            flags[i] = !flags[i]
+            render()
+          })
+        })
       }
-      mode1.onclick = () => pick(false)
-      mode2.onclick = () => pick(true)
+      render()
+      seatsStart.onclick = () => {
+        seatsEl.style.display = 'none'
+        onDone(flags)
+      }
+      seatsEl.style.display = 'flex'
+    },
+    // Target picker (3–4 players): pick which opponent a hostile card hits.
+    showTargetPicker(title: string, options: { seat: number; label: string }[], onPick: (seat: number) => void) {
+      targetTitle.textContent = title
+      targetRows.innerHTML = options.map(o => `<button data-seat="${o.seat}">${o.label}<span>›</span></button>`).join('')
+      targetRows.querySelectorAll('button').forEach(b => {
+        b.addEventListener('click', () => {
+          targetEl.style.display = 'none'
+          onPick(+(b as HTMLElement).dataset.seat!)
+        })
+      })
+      targetEl.style.display = 'flex'
     },
     // Country picker: `who` labels the seat (e.g. "PLAYER 1"); resolves with the chosen
     // country. `taken` codes are hidden so two humans can't pick the same nation.
