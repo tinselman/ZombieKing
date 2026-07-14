@@ -381,8 +381,9 @@ function tradableItems(s: number): { kind: TradeKind; key: string; label: string
   return out
 }
 
-// Move one item from seat `from` to seat `to`, animate it flying across, and update trust.
-function transferItem(from: number, to: number, kind: TradeKind, key: string): boolean {
+// Physically move one item from seat `from` to seat `to` and arc a couple of voxels across
+// in the giver's colour — no diplomacy side-effects (used for the extra items in a bundle).
+function moveItem(from: number, to: number, kind: TradeKind, key: string): boolean {
   if (kind === 'card') {
     const i = hand[from].indexOf(key as CardId)
     if (i < 0) return false
@@ -400,21 +401,6 @@ function transferItem(from: number, to: number, kind: TradeKind, key: string): b
     sides[from].arsenal.set(key, n - 1)
     sides[to].arsenal.set(key, (sides[to].arsenal.get(key) ?? 0) + 1)
   }
-  // Trust: a gift raises the receiver's trust. A gift that answers an outstanding one is a
-  // completed trade — it seals an alliance by pushing BOTH directions across ALLY (the giver
-  // gains a second bump for this direction, and the original giver climbs too). Otherwise the
-  // giver is now owed a trade-back.
-  trust[to][from] += 1
-  if (giftOwed[to][from]) {
-    trust[to][from] += 1 // completed round-trip: this side crosses ALLY…
-    trust[from][to] += 1 // …and the seat being repaid climbs too, so the pact is mutual
-    giftOwed[to][from] = false
-    owedActedSince[to][from] = false
-  } else {
-    giftOwed[from][to] = true
-    owedActedSince[from][to] = false
-  }
-  // A couple of voxels arc from the giver's cannon to the recipient's, in the giver's colour.
   const a = sides[from].cannon.group.position
   const b = sides[to].cannon.group.position
   const pts = [
@@ -434,29 +420,154 @@ function transferItem(from: number, to: number, kind: TradeKind, key: string): b
   return true
 }
 
-// Human trade flow: pick a living opponent, then a two-panel overlay shows their holdings
-// (across the table) and yours — click any of your items to send it flying to them.
+// Move one item AND update trust: a gift raises the receiver's trust; a gift that answers an
+// outstanding one is a completed trade, pushing BOTH directions across ALLY (the giver gains
+// a second bump for this direction and the original giver climbs too). Otherwise the giver is
+// now owed a trade-back. Used for AI one-way gifts and the FIRST item each way in a trade.
+function transferItem(from: number, to: number, kind: TradeKind, key: string): boolean {
+  if (!moveItem(from, to, kind, key)) return false
+  trust[to][from] += 1
+  if (giftOwed[to][from]) {
+    trust[to][from] += 1
+    trust[from][to] += 1
+    giftOwed[to][from] = false
+    owedActedSince[to][from] = false
+  } else {
+    giftOwed[from][to] = true
+    owedActedSince[from][to] = false
+  }
+  return true
+}
+
+// Settle a negotiated trade: `offered` flows from→to, `returned` flows to→from. The first
+// item each way carries the trust bookkeeping (so a bundle counts as one reciprocated gift,
+// regardless of size); the rest are plain moves. An empty `returned` leaves the offerer owed
+// a trade-back — the one-way-gift (and possible betrayal) path.
+function resolveTrade(from: number, to: number, offered: { kind: TradeKind; key: string }[], returned: { kind: TradeKind; key: string }[]): void {
+  offered.forEach((it, i) => (i === 0 ? transferItem : moveItem)(from, to, it.kind, it.key))
+  returned.forEach((it, i) => (i === 0 ? transferItem : moveItem)(to, from, it.kind, it.key))
+}
+
+// ---- Trade negotiation (human offers; recipient accepts/rejects) ------------------------
+type StagedItem = { kind: TradeKind; key: string; label: string; emoji: string }
+let stagingBundle: StagedItem[] = [] // items being assembled for an offer or a return
+
+// Items in `items` minus one occurrence of each entry already staged in `bundle` (matched by
+// kind+key) — i.e. what's still available to add.
+function remainingItems(items: StagedItem[], bundle: StagedItem[]): StagedItem[] {
+  const used = new Map<string, number>()
+  for (const b of bundle) used.set(b.kind + b.key, (used.get(b.kind + b.key) ?? 0) + 1)
+  const out: StagedItem[] = []
+  for (const it of items) {
+    const k = it.kind + it.key
+    const u = used.get(k) ?? 0
+    if (u > 0) used.set(k, u - 1)
+    else out.push(it)
+  }
+  return out
+}
+
+// Human trade flow: pick a living opponent, assemble an offer, send it — the recipient then
+// accepts (choosing what to send back) or rejects (nothing changes hands). Trade is free.
 function offerTrade(side: number): void {
   if (phase !== 'aim') return
   const foes = livingSeats().filter(s => s !== side)
   if (!foes.length) return void hud.msg('no one left to trade with')
-  const open = (to: number) => {
-    hud.showTrade(
-      `🤝 TRADE WITH ${fortLabel(to)}`,
-      () => ({
-        them: tradableItems(to).map(i => ({ label: i.label, emoji: i.emoji })),
-        mine: tradableItems(side),
-      }),
-      (kind, key) => transferItem(side, to, kind as TradeKind, key),
-      () => {}
-    )
-  }
-  if (foes.length === 1) return void open(foes[0])
+  if (foes.length === 1) return void composeOffer(side, foes[0])
   hud.showTargetPicker(
     '🤝 Trade with whom?',
     foes.map(s => ({ seat: s, label: fortLabel(s) })),
-    open
+    to => composeOffer(side, to)
   )
+}
+
+function composeOffer(from: number, to: number): void {
+  stagingBundle = []
+  const avail = () => remainingItems(tradableItems(from), stagingBundle)
+  hud.showTradeCompose({
+    title: `🤝 OFFER TO ${fortLabel(to)}`,
+    subtitle: 'Click items to add them to your offer, then send it across.',
+    them: tradableItems(to).map(i => ({ label: i.label, emoji: i.emoji })),
+    poolLabel: 'YOUR ITEMS — click to add',
+    bundleLabel: 'OFFERING',
+    getPool: avail,
+    getBundle: () => stagingBundle,
+    onAdd: idx => { const p = avail()[idx]; if (p) stagingBundle.push(p) },
+    onRemove: idx => stagingBundle.splice(idx, 1),
+    primaryLabel: 'SEND OFFER',
+    onPrimary: () => {
+      if (!stagingBundle.length) return void (hud.msg('add at least one item to offer'), composeOffer(from, to))
+      submitOffer(from, to, stagingBundle.slice())
+    },
+    secondaryLabel: 'CANCEL',
+    onSecondary: () => {},
+  })
+}
+
+function submitOffer(from: number, to: number, offered: StagedItem[]): void {
+  if (isHuman(to)) humanRespondToTrade(from, to, offered)
+  else aiRespondToTrade(from, to, offered)
+}
+
+// The computer decides instantly by trust: a hard grudge rejects; otherwise it accepts and
+// sends back a fair token when it's friendly / allied / already owes you, else it takes the
+// gift and returns nothing (the owed-gift is repaid later on its own turn, per aiDiplomacy).
+function aiRespondToTrade(from: number, to: number, offered: StagedItem[]): void {
+  const label = fortLabel(to)
+  if (trust[to][from] <= -2) return void hud.msg(`${label} rejects your offer`)
+  const wantReturn = alliedWith(to, from) || giftOwed[from][to] || trust[to][from] >= 1
+  const spares = wantReturn ? tradableItems(to).slice(0, Math.max(1, offered.length)) : []
+  resolveTrade(from, to, offered, spares)
+  hud.msg(spares.length ? `${label} accepts — sends back ${spares.map(s => s.label).join(', ')}` : `${label} accepts your gift — sends nothing back`)
+}
+
+// A human recipient (hotseat) gets the keyboard, sees the offer, and accepts (then picks a
+// return) or rejects. Afterwards the keyboard passes back to the offerer, still mid-turn.
+function humanRespondToTrade(from: number, to: number, offered: StagedItem[]): void {
+  const decide = () =>
+    hud.showTradeDecision({
+      title: `${fortLabel(from)} OFFERS YOU A TRADE`,
+      subtitle: 'Accept and choose what to send back, or reject — on reject nothing changes hands.',
+      offered: offered.map(i => ({ label: i.label, emoji: i.emoji })),
+      onAccept: () => composeReturn(from, to, offered),
+      onReject: () => {
+        hud.msg(`${fortLabel(to)} rejected the offer`)
+        backToOfferer(from)
+      },
+    })
+  if (twoPlayer) hud.showHandoff(to + 1, decide, `PLAYER ${to + 1} — TRADE OFFER`, `${fortLabel(from)} wants to trade. Pass the keyboard to ${fortLabel(to)}.`, 'REVIEW OFFER')
+  else decide()
+}
+
+function composeReturn(from: number, to: number, offered: StagedItem[]): void {
+  stagingBundle = []
+  const avail = () => remainingItems(tradableItems(to), stagingBundle)
+  hud.showTradeCompose({
+    title: `SEND BACK TO ${fortLabel(from)}?`,
+    subtitle: 'Pick what to send back (a fair trade builds an alliance), or send nothing.',
+    them: offered.map(i => ({ label: i.label, emoji: i.emoji })),
+    poolLabel: 'YOUR ITEMS — click to add',
+    bundleLabel: 'SENDING BACK',
+    getPool: avail,
+    getBundle: () => stagingBundle,
+    onAdd: idx => { const p = avail()[idx]; if (p) stagingBundle.push(p) },
+    onRemove: idx => stagingBundle.splice(idx, 1),
+    primaryLabel: 'SEND BACK',
+    onPrimary: () => {
+      resolveTrade(from, to, offered, stagingBundle.slice())
+      backToOfferer(from)
+    },
+    secondaryLabel: 'SEND NOTHING',
+    onSecondary: () => {
+      resolveTrade(from, to, offered, []) // accepted the gift, returns nothing
+      backToOfferer(from)
+    },
+  })
+}
+
+// Hand the keyboard back to the offerer (hotseat only); their turn never left the aim phase.
+function backToOfferer(from: number): void {
+  if (twoPlayer) hud.showHandoff(from + 1, () => {}, `PLAYER ${from + 1} — BACK TO YOU`, 'Trade settled. Pass the keyboard back and take your shot.', 'CONTINUE')
 }
 
 // On a round win the victor lifts one random card from the loser's hand. Returns the
@@ -3328,6 +3439,7 @@ declare global {
       giveItem: (from: number, to: number, kind: string, key: string) => boolean
       aiTarget: (s: number) => number
       allied: (a: number, b: number) => boolean
+      setTrust: (a: number, b: number, v: number) => void
     }
   }
 }
@@ -3447,4 +3559,7 @@ window.__sv = {
   },
   aiTarget: (s: number) => aiTarget(s),
   allied: (a: number, b: number) => alliedWith(a, b),
+  setTrust(a: number, b: number, v: number) {
+    trust[a][b] = v
+  },
 }

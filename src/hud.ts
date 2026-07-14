@@ -113,17 +113,26 @@ const CSS = `
 #sc-tradeBtn.on { display: block; }
 #sc-tradeBtn:hover { background: #454c55; }
 #sc-trade { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 14px; background: rgba(244,246,248,0.92); backdrop-filter: blur(8px); pointer-events: auto; z-index: 11; }
-#sc-trade h1 { font-size: 22px; font-weight: 800; letter-spacing: 0.03em; color: #16181b; margin: 0 0 4px; text-align: center; }
-#sc-trade .them, #sc-trade .you { width: 640px; max-width: 92vw; background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 12px; padding: 14px 18px; }
+#sc-trade h1 { font-size: 22px; font-weight: 800; letter-spacing: 0.03em; color: #16181b; margin: 0 0 2px; text-align: center; }
+#sc-trade .tsub { font-size: 13px; color: #7a838d; margin: 0 0 8px; text-align: center; }
+#sc-trade .tsub:empty { display: none; }
+#sc-trade .them, #sc-trade .you, #sc-trade .bundle { width: 640px; max-width: 92vw; background: rgba(255,255,255,0.96); border: 1px solid #d8dde3; border-radius: 12px; padding: 14px 18px; }
+#sc-trade .bundle { border-color: #b8c0c8; background: rgba(248,250,252,0.98); }
 #sc-trade .tlabel { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; margin-bottom: 9px; }
 #sc-trade .items { display: flex; flex-wrap: wrap; gap: 8px; min-height: 30px; }
 #sc-trade .items .chip { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; border-radius: 9px; border: 1px solid #e2e6ea; background: #fff; font-size: 13px; color: #2c3138; }
-#sc-trade .you .chip { cursor: pointer; border-color: #c4cad1; }
-#sc-trade .you .chip:hover { border-color: #16181b; background: #f6f8fa; transform: translateY(-1px); }
+#sc-trade .you .chip, #sc-trade .bundle .chip { cursor: pointer; border-color: #c4cad1; }
+#sc-trade .you .chip:hover, #sc-trade .bundle .chip:hover { border-color: #16181b; background: #f6f8fa; transform: translateY(-1px); }
+#sc-trade .bundle .chip { border-color: #2c3138; background: #eef1f4; font-weight: 700; }
+#sc-trade .bundle .chip::after { content: '✕'; font-size: 11px; color: #9aa1a9; margin-left: 2px; }
 #sc-trade .them .chip { background: #f2f4f7; color: #7a838d; }
 #sc-trade .empty { font-size: 13px; color: #9aa1a9; font-style: italic; }
-#sc-tradeDone { font-size: 14px; font-weight: 800; letter-spacing: 0.08em; padding: 11px 34px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
-#sc-tradeDone:hover { background: #454c55; }
+#sc-tradeBtns { display: flex; gap: 12px; margin-top: 2px; }
+#sc-tradeBtns button { font-size: 14px; font-weight: 800; letter-spacing: 0.08em; padding: 11px 30px; border-radius: 10px; border: 1px solid #2c3138; cursor: pointer; }
+#sc-tradePrimary { background: #2c3138; color: #fff; }
+#sc-tradePrimary:hover { background: #454c55; }
+#sc-tradeSecondary { background: #fff; color: #2c3138; }
+#sc-tradeSecondary:hover { background: #eef1f4; }
 /* Country picker — pick a nation + flag before the match (cosmetic identity). */
 #sc-country { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #fff; pointer-events: auto; z-index: 9; }
 #sc-country h1 { font-size: 30px; font-weight: 800; letter-spacing: 0.04em; color: #16181b; margin: 0 0 4px; text-align: center; }
@@ -265,10 +274,11 @@ export function createHud(
       <div id="sc-countryGrid"></div>
       <button class="rand">🎲 SURPRISE ME</button></div>
     <div id="sc-target"><h1></h1><div id="sc-targetRows"></div></div>
-    <div id="sc-trade"><h1></h1>
-      <div class="them"><div class="tlabel">THEY HOLD</div><div id="sc-tradeThem" class="items"></div></div>
-      <div class="you"><div class="tlabel">YOUR ITEMS — click to send across</div><div id="sc-tradeMine" class="items"></div></div>
-      <button id="sc-tradeDone">DONE</button></div>
+    <div id="sc-trade"><h1></h1><div id="sc-tradeSub" class="tsub"></div>
+      <div class="them" id="sc-tradeThemBlock"><div class="tlabel">THEY HOLD</div><div id="sc-tradeThem" class="items"></div></div>
+      <div class="you" id="sc-tradePoolBlock"><div class="tlabel" id="sc-tradePoolLabel">YOUR ITEMS</div><div id="sc-tradeMine" class="items"></div></div>
+      <div class="bundle" id="sc-tradeBundleBlock"><div class="tlabel" id="sc-tradeBundleLabel">OFFERING</div><div id="sc-tradeBundle" class="items"></div></div>
+      <div id="sc-tradeBtns"><button id="sc-tradeSecondary"></button><button id="sc-tradePrimary"></button></div></div>
     <div id="sc-shop"><div class="box">
       <h2>ZOMBIE KING MARKET<span id="sc-shopPlayer"></span></h2>
       <div id="sc-shopResult"></div>
@@ -341,6 +351,7 @@ export function createHud(
   const endBtn = q<HTMLButtonElement>('#sc-end button')
   const handoff = q<HTMLElement>('#sc-handoff')
   const handoffTitle = q<HTMLElement>('#sc-handoff h1')
+  const handoffSub = q<HTMLElement>('#sc-handoff p')
   const handoffBtn = q<HTMLButtonElement>('#sc-handoff button')
   const modeEl = q<HTMLElement>('#sc-mode')
   const modeBtns = [1, 2, 3, 4].map(i => q<HTMLButtonElement>(`#sc-mode${i}`))
@@ -353,9 +364,18 @@ export function createHud(
   const tradeBtn = q<HTMLButtonElement>('#sc-tradeBtn')
   const tradeEl = q<HTMLElement>('#sc-trade')
   const tradeTitle = q<HTMLElement>('#sc-trade h1')
+  const tradeSub = q<HTMLElement>('#sc-tradeSub')
+  const tradeThemBlock = q<HTMLElement>('#sc-tradeThemBlock')
+  const tradeThemLabel = q<HTMLElement>('#sc-tradeThemBlock .tlabel')
   const tradeThem = q<HTMLElement>('#sc-tradeThem')
+  const tradePoolBlock = q<HTMLElement>('#sc-tradePoolBlock')
+  const tradePoolLabel = q<HTMLElement>('#sc-tradePoolLabel')
   const tradeMine = q<HTMLElement>('#sc-tradeMine')
-  const tradeDone = q<HTMLButtonElement>('#sc-tradeDone')
+  const tradeBundleBlock = q<HTMLElement>('#sc-tradeBundleBlock')
+  const tradeBundleLabel = q<HTMLElement>('#sc-tradeBundleLabel')
+  const tradeBundle = q<HTMLElement>('#sc-tradeBundle')
+  const tradePrimary = q<HTMLButtonElement>('#sc-tradePrimary')
+  const tradeSecondary = q<HTMLButtonElement>('#sc-tradeSecondary')
   const countryEl = q<HTMLElement>('#sc-country')
   const countryTitle = q<HTMLElement>('#sc-country h1')
   const countrySearch = q<HTMLInputElement>('#sc-countrySearch')
@@ -674,8 +694,10 @@ export function createHud(
       skipTimer = window.setTimeout(() => skipped.classList.remove('on'), 3000)
     },
     // Hotseat turn gate: names the player, waits for a click, then starts their turn.
-    showHandoff(player: number, onReady: () => void) {
-      handoffTitle.textContent = `PLAYER ${player} — YOUR TURN`
+    showHandoff(player: number, onReady: () => void, title?: string, sub?: string, btnLabel?: string) {
+      handoffTitle.textContent = title ?? `PLAYER ${player} — YOUR TURN`
+      handoffSub.textContent = sub ?? 'Pass the keyboard — everything on screen is now yours.'
+      handoffBtn.textContent = btnLabel ?? 'START TURN'
       handoff.style.display = 'flex'
       handoffBtn.onclick = () => {
         handoff.style.display = 'none'
@@ -733,36 +755,66 @@ export function createHud(
       tradeBtn.classList.toggle('on', show)
       tradeBtn.onclick = onClick ?? null
     },
-    // Trade overlay: shows the recipient's holdings across the table + your clickable items.
-    // `refresh()` returns the current {them,mine} lists so the panel updates as you give.
-    showTrade(
-      title: string,
-      refresh: () => { them: { label: string; emoji: string }[]; mine: { kind: string; key: string; label: string; emoji: string }[] },
-      onGive: (kind: string, key: string) => void,
-      onDone: () => void
-    ) {
+    // Assemble a bundle of your OWN items — used both for the opening offer and for a
+    // recipient's return. The pool is what you can still add; the bundle is what you've
+    // staged; clicking a chip moves it between them. Primary confirms, secondary cancels
+    // (or "send nothing"). `them` optionally shows the other side's holdings for context.
+    showTradeCompose(opts: {
+      title: string
+      subtitle?: string
+      them?: { label: string; emoji: string }[] | null
+      poolLabel: string
+      bundleLabel: string
+      getPool: () => { kind: string; key: string; label: string; emoji: string }[]
+      getBundle: () => { kind: string; key: string; label: string; emoji: string }[]
+      onAdd: (idx: number) => void
+      onRemove: (idx: number) => void
+      primaryLabel: string
+      onPrimary: () => void
+      secondaryLabel: string
+      onSecondary: () => void
+    }) {
+      const chip = (i: { label: string; emoji: string }, n?: number) =>
+        `<span class="chip"${n === undefined ? '' : ` data-n="${n}"`}>${i.emoji} ${i.label}</span>`
       const draw = () => {
-        const { them, mine } = refresh()
-        tradeTitle.textContent = title
-        tradeThem.innerHTML = them.length
-          ? them.map(i => `<span class="chip">${i.emoji} ${i.label}</span>`).join('')
-          : '<span class="empty">nothing to show</span>'
-        tradeMine.innerHTML = mine.length
-          ? mine.map((i, n) => `<span class="chip" data-n="${n}">${i.emoji} ${i.label}</span>`).join('')
-          : '<span class="empty">you have nothing to give</span>'
-        tradeMine.querySelectorAll('.chip').forEach(c => {
-          c.addEventListener('click', () => {
-            const item = mine[+(c as HTMLElement).dataset.n!]
-            onGive(item.kind, item.key)
-            draw() // re-render after the item flies away
-          })
-        })
+        tradeTitle.textContent = opts.title
+        tradeSub.textContent = opts.subtitle ?? ''
+        if (opts.them) {
+          tradeThemBlock.style.display = ''
+          tradeThemLabel.textContent = 'THEY HOLD'
+          tradeThem.innerHTML = opts.them.length ? opts.them.map(i => chip(i)).join('') : '<span class="empty">nothing</span>'
+        } else tradeThemBlock.style.display = 'none'
+        tradePoolBlock.style.display = ''
+        tradePoolLabel.textContent = opts.poolLabel
+        const pool = opts.getPool()
+        tradeMine.innerHTML = pool.length ? pool.map((i, n) => chip(i, n)).join('') : '<span class="empty">nothing left to add</span>'
+        tradeBundleBlock.style.display = ''
+        tradeBundleLabel.textContent = opts.bundleLabel
+        const bundle = opts.getBundle()
+        tradeBundle.innerHTML = bundle.length ? bundle.map((i, n) => chip(i, n)).join('') : '<span class="empty">nothing selected yet</span>'
+        tradeMine.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { opts.onAdd(+(c as HTMLElement).dataset.n!); draw() }))
+        tradeBundle.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { opts.onRemove(+(c as HTMLElement).dataset.n!); draw() }))
       }
       draw()
-      tradeDone.onclick = () => {
-        tradeEl.style.display = 'none'
-        onDone()
-      }
+      tradePrimary.textContent = opts.primaryLabel
+      tradePrimary.onclick = () => { tradeEl.style.display = 'none'; opts.onPrimary() }
+      tradeSecondary.textContent = opts.secondaryLabel
+      tradeSecondary.onclick = () => { tradeEl.style.display = 'none'; opts.onSecondary() }
+      tradeEl.style.display = 'flex'
+    },
+    // A human recipient's accept/reject decision on an incoming offer (shows what's on the table).
+    showTradeDecision(opts: { title: string; subtitle?: string; offered: { label: string; emoji: string }[]; onAccept: () => void; onReject: () => void }) {
+      tradeTitle.textContent = opts.title
+      tradeSub.textContent = opts.subtitle ?? ''
+      tradeThemBlock.style.display = ''
+      tradeThemLabel.textContent = 'THEY OFFER YOU'
+      tradeThem.innerHTML = opts.offered.length ? opts.offered.map(i => `<span class="chip">${i.emoji} ${i.label}</span>`).join('') : '<span class="empty">nothing</span>'
+      tradePoolBlock.style.display = 'none'
+      tradeBundleBlock.style.display = 'none'
+      tradePrimary.textContent = 'ACCEPT'
+      tradePrimary.onclick = () => { tradeEl.style.display = 'none'; opts.onAccept() }
+      tradeSecondary.textContent = 'REJECT'
+      tradeSecondary.onclick = () => { tradeEl.style.display = 'none'; opts.onReject() }
       tradeEl.style.display = 'flex'
     },
     // Country picker: `who` labels the seat (e.g. "PLAYER 1"); resolves with the chosen
