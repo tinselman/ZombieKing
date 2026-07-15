@@ -3510,7 +3510,7 @@ function startMatch(): void {
   fullReset()
   const c0 = playerCountry[0]
   hud.banner(
-    'RETURN OF THE ZOMBIE KING',
+    'VOXEL WARS',
     c0 ? `${flagOf(c0.code)} ${c0.name} marches to war!` : 'to war!',
     2600
   )

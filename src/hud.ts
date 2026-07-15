@@ -271,7 +271,7 @@ export function createHud(
     <div id="sc-end"><h1></h1><p></p><button>REMATCH</button></div>
     <div id="sc-handoff"><h1></h1><p>Pass the keyboard — everything on screen is now yours.</p><button>START TURN</button></div>
     <div id="sc-mode"><div class="voxwrap"><div class="vox"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
-    <h1><span class="rt">Return of the</span><span class="zk">Zombie King</span></h1>
+    <h1><span class="zk">Voxel Wars</span></h1>
     <p><b>WARNING:</b> This game includes massive violence, death, destruction, and war. Play at your own risk.</p>
     <div class="modes">
       <button id="sc-mode1"><span class="mt">1 PLAYER</span><span class="ms">Battle the computer — it builds, schemes, and shoots back.</span></button>
@@ -298,7 +298,7 @@ export function createHud(
       <div class="bundle" id="sc-tradeBundleBlock"><div class="tlabel" id="sc-tradeBundleLabel">OFFERING</div><div id="sc-tradeBundle" class="items"></div></div>
       <div id="sc-tradeBtns"><button id="sc-tradeSecondary"></button><button id="sc-tradePrimary"></button></div></div>
     <div id="sc-shop"><div class="box">
-      <h2>ZOMBIE KING MARKET<span id="sc-shopPlayer"></span></h2>
+      <h2>VOXEL WARS MARKET<span id="sc-shopPlayer"></span></h2>
       <div id="sc-shopResult"></div>
       <div id="sc-shopStatus"></div>
       <div class="slabel">Stratagem Cards</div>
