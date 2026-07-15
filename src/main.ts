@@ -2230,7 +2230,7 @@ function tributeStep(roller: number, tier: number, next: () => void): void {
     hud.banner(`👑 TRIBUTE ·  1/${tier}`, `all bow to ${fortLabel(t)} — $${pot.toLocaleString()} paid, and it can't be attacked for a round!`, 3600)
     next()
   }
-  if (isHuman(roller)) hud.showTargetPicker(`👑 Tribute (1/${tier} from everyone) — crown & shield whom?`, others.map(s => ({ seat: s, label: fortLabel(s) })), apply)
+  if (isHuman(roller)) hud.showTargetPicker(`👑 Tribute — crown & shield whom? Everyone (you too) pays them 1/${tier} of their cash, and they can't be attacked for a round.`, others.map(s => ({ seat: s, label: fortLabel(s) })), apply)
   else apply(aiPickTribute(roller))
 }
 

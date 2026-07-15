@@ -122,7 +122,7 @@ const CSS = `
 #sc-seatsStart:hover { background: #454c55; }
 /* Target picker: choose which opponent a hostile card hits (3–4 players). */
 #sc-target { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(244,246,248,0.9); backdrop-filter: blur(8px); pointer-events: auto; z-index: 10; }
-#sc-target h1 { font-size: 24px; font-weight: 800; letter-spacing: 0.03em; color: #16181b; margin: 0 0 18px; text-align: center; }
+#sc-target h1 { font-size: 24px; font-weight: 800; letter-spacing: 0.03em; color: #16181b; margin: 0 0 18px; text-align: center; max-width: 560px; line-height: 1.35; }
 #sc-targetRows { display: flex; flex-direction: column; gap: 10px; }
 #sc-targetRows button { width: 340px; padding: 14px 18px; border-radius: 11px; border: 1px solid #c4cad1; background: #fff; cursor: pointer; font-size: 16px; text-align: left; display: flex; justify-content: space-between; align-items: center; }
 #sc-targetRows button:hover { border-color: #16181b; background: #f6f8fa; }
