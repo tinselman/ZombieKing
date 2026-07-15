@@ -1493,6 +1493,27 @@ function ensurePlantArrows(): THREE.Group {
   return plantArrows
 }
 
+// Blinking steering arrows that ring the Flying Saucer while you pilot it (top-down), one per
+// horizontal direction the arrow keys glide it — the same cue used for resource placement.
+let saucerArrows: THREE.Group | null = null
+let saucerBlinkT = 0
+const SAUCER_ARROW_DIRS = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1)]
+function ensureSaucerArrows(): THREE.Group {
+  if (!saucerArrows) {
+    saucerArrows = new THREE.Group()
+    const mat = new THREE.MeshBasicMaterial({ color: 0x7ad0ff, transparent: true, opacity: 0.95, depthTest: false })
+    const geo = new THREE.ConeGeometry(1.3, 4.2, 4)
+    for (const d of SAUCER_ARROW_DIRS) {
+      const a = new THREE.Mesh(geo, mat)
+      a.quaternion.setFromUnitVectors(PLANT_UP, d) // lay the cone flat, tip pointing outward
+      saucerArrows.add(a)
+    }
+    saucerArrows.renderOrder = 9
+    scene.add(saucerArrows)
+  }
+  return saucerArrows
+}
+
 function plantHudMsg(): void {
   const spec = PRODUCER_SPECS[plantType]
   const left = pendingResources[turn].filter(t => t === plantType).length
@@ -2408,9 +2429,20 @@ function steerSaucer(p: Proj, h: number): void {
   p.vel.x += (tx * SPEED - p.vel.x) * ease
   p.vel.z += (tz * SPEED - p.vel.z) * ease
   p.vel.y += (0 - p.vel.y) * ease // hold altitude
+  // Blinking arrows around the drone cueing the four steer directions.
+  const arrows = ensureSaucerArrows()
+  arrows.visible = true
+  saucerBlinkT += h
+  const blinkOn = saucerBlinkT % 0.5 < 0.32
+  for (let k = 0; k < arrows.children.length; k++) {
+    const d = SAUCER_ARROW_DIRS[k]
+    arrows.children[k].position.set(p.pos.x + d.x * 7, p.pos.y, p.pos.z + d.z * 7)
+    arrows.children[k].visible = blinkOn
+  }
 }
 
 function stepProjectiles(h: number): void {
+  if (saucerArrows) saucerArrows.visible = false // re-shown each step only while a saucer is piloted
   for (let i = projs.length - 1; i >= 0; i--) {
     const p = projs[i]
     const piloted = i === 0 && isHuman(p.side) && p.side === turn
@@ -2558,16 +2590,16 @@ function concludeRound(dead: number[]): boolean {
 // ---- Nuclear meltdown & fallout (Nuclear Power Plant) -----------------------------------
 const MELT_R = 16 // radius of the initial radioactive blast around a destroyed reactor
 
-// Any Nuclear Power Plant reduced to rubble this resolve melts down. If an ENEMY (the acting
-// seat) struck it, the catastrophe fires; a self-inflicted hit just loses the producer.
+// A reactor is a hair-trigger: ANY damage to it (even a graze, and even self-inflicted) sets
+// off the full meltdown. It stops producing the instant a single voxel is gone.
 function checkMeltdowns(): void {
   for (let s = 0; s < numPlayers; s++) {
     for (let i = planted[s].length - 1; i >= 0; i--) {
       const p = planted[s][i]
-      if (p.type !== PLANT || world.integrityAt(p.cx, p.cz) >= 0.35) continue
+      if (p.type !== PLANT || world.integrityAt(p.cx, p.cz) >= 0.98) continue
       planted[s].splice(i, 1)
       world.removeProducer(p.cx, p.cz)
-      if (turn !== s) meltdown(s, p.cx, p.cz)
+      meltdown(s, p.cx, p.cz)
     }
   }
   syncStatus()
@@ -2576,15 +2608,17 @@ function checkMeltdowns(): void {
 
 function meltdown(owner: number, cx: number, cz: number): void {
   sfx.rumble()
-  hud.banner('☢️ NUCLEAR MELTDOWN', `${capName(owner)}'s reactor is destroyed — the fallout spreads!`, 3600)
+  hud.banner('☢️ NUCLEAR MELTDOWN', `${capName(owner)}'s reactor detonates — the fallout spreads!`, 3600)
   killCropsNear(cx, cz, MELT_R) // every crop in the blast (anyone's) dies
   world.contaminated.push({ cx, cz, r: MELT_R }) // and the ground is poisoned for the round
-  world.dirty = true
+  // The reactor goes up with the force of a Nuke — a real crater that carves terrain and
+  // caves in anything (forts included) caught in the blast.
+  crater(new THREE.Vector3(cx, world.surfaceY(cx, cz), cz), 9.5, true)
   const at = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 6, cz)
-  spawnExplosion(at, 14, true)
-  addShake(16, at)
+  spawnExplosion(at, 16, true)
+  addShake(18, at)
   skipTurns[owner] = Math.max(skipTurns[owner], 2) // the owner is knocked out for two turns
-  spawnFallout(owner, cx, cz)
+  spawnFallout(cx, cz) // the black cloud can drift over anyone — the owner included
 }
 
 // Destroy every crop (any seat's) whose bed sits within `r` of (cx,cz). Permanent — they're
@@ -2601,7 +2635,8 @@ function killCropsNear(cx: number, cz: number, r: number): void {
 }
 
 // Loose a single black fallout cloud from the meltdown site, drifting in a RANDOM direction.
-function spawnFallout(owner: number, cx: number, cz: number): void {
+// Nothing is safe — it can roll over anyone, the reactor's owner included.
+function spawnFallout(cx: number, cz: number): void {
   if (fallout) scene.remove(fallout.mesh)
   const geo = new THREE.SphereGeometry(9, 12, 10)
   const mat = new THREE.MeshLambertMaterial({ color: 0x1a1e16, emissive: 0x1f2a12, emissiveIntensity: 0.5, transparent: true, opacity: 0.72 })
@@ -2611,7 +2646,7 @@ function spawnFallout(owner: number, cx: number, cz: number): void {
   const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 20, cz)
   mesh.position.copy(pos)
   scene.add(mesh)
-  fallout = { pos, vx: Math.cos(ang) * speed, vz: Math.sin(ang) * speed, life: 0, mesh, hit: new Set([owner]) }
+  fallout = { pos, vx: Math.cos(ang) * speed, vz: Math.sin(ang) * speed, life: 0, mesh, hit: new Set() }
 }
 
 // Drift the fallout cloud each frame; the first OTHER seat it reaches loses its crops and two
