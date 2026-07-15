@@ -47,14 +47,15 @@ const CSS = `
 #sc-worldBtn.on { background: #2c3138; color: #fff; }
 #sc-side .tag { position: absolute; top: -1px; left: -1px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; background: rgba(255,255,255,0.85); border: 1px solid #d8dde3; border-radius: 9px 0 8px 0; padding: 2px 8px; }
 #sc-banner { position: absolute; top: 22%; left: 0; right: 0; text-align: center; font-size: 40px; font-weight: 800; letter-spacing: 0.06em; color: #2c3138; text-shadow: 0 2px 12px rgba(255,255,255,0.9); opacity: 0; transition: opacity 0.35s ease; }
-/* Resource wheels — two bright discs that spin at the start of every turn. */
-#sc-wheels { position: absolute; top: 16%; left: 0; right: 0; display: none; flex-direction: column; align-items: center; gap: 16px; pointer-events: none; z-index: 10; }
-#sc-wheels .wcap { font-size: 17px; font-weight: 800; letter-spacing: 0.05em; color: #16181b; background: rgba(255,255,255,0.9); padding: 7px 18px; border-radius: 999px; box-shadow: 0 4px 16px rgba(40,50,60,0.14); text-align: center; }
-#sc-wheels .wrow { display: flex; gap: 34px; }
-#sc-wheels .wheel { width: 128px; height: 128px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 60px; background: conic-gradient(#ff5a5a,#ffd24a,#4ad07a,#4aa3ff,#c06aff,#ff5a5a); box-shadow: 0 8px 28px rgba(40,50,60,0.28), inset 0 0 0 7px #fff, inset 0 0 0 9px #2c3138; }
-#sc-wheels .wheel.spin { animation: sc-wheelspin 0.5s linear infinite; }
-#sc-wheels .wheel span { display: flex; align-items: center; justify-content: center; width: 84px; height: 84px; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px rgba(40,50,60,0.2); }
-@keyframes sc-wheelspin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+/* Resource wheels — a centered modal: two bright discs spin under a fixed pointer and settle. */
+#sc-wheels { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: rgba(18,22,28,0.55); backdrop-filter: blur(3px); pointer-events: auto; z-index: 12; }
+#sc-wheels .wcap { font-size: 22px; font-weight: 800; letter-spacing: 0.04em; color: #fff; text-shadow: 0 2px 12px rgba(0,0,0,0.5); text-align: center; max-width: 80vw; }
+#sc-wheels .wrow { display: flex; gap: 56px; }
+#sc-wheels .wwrap { position: relative; width: 176px; height: 194px; }
+#sc-wheels .wptr { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 13px solid transparent; border-right: 13px solid transparent; border-top: 22px solid #ffef5a; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); z-index: 2; }
+#sc-wheels .wdisc { position: absolute; top: 16px; left: 0; width: 176px; height: 176px; border-radius: 50%; background: conic-gradient(#ff5a5a,#ffd24a,#4ad07a,#4aa3ff,#c06aff,#ff5a5a,#ff5a5a); box-shadow: 0 10px 34px rgba(0,0,0,0.45), inset 0 0 0 8px #fff, inset 0 0 0 10px #2c3138; }
+#sc-wheels .wdisc .face { position: absolute; top: 50%; left: 50%; width: 42px; height: 42px; margin: -21px 0 0 -21px; display: flex; align-items: center; justify-content: center; font-size: 30px; }
+#sc-wheels .whint { font-size: 15px; font-weight: 700; letter-spacing: 0.08em; color: #ffef5a; text-shadow: 0 2px 8px rgba(0,0,0,0.5); min-height: 20px; }
 #sc-banner small { display: block; font-size: 15px; font-weight: 500; letter-spacing: 0.1em; color: #7a838d; margin-top: 6px; }
 /* Round-over celebration banner, shown over the wreckage when a castle bursts. */
 #sc-roundover { position: absolute; top: 15%; left: 0; right: 0; text-align: center; opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
@@ -265,7 +266,12 @@ export function createHud(
     <div id="sc-side"><span class="tag">side view</span></div>
     <button id="sc-worldBtn">World View</button>
     <div id="sc-banner"></div>
-    <div id="sc-wheels"><div class="wcap"></div><div class="wrow"><div class="wheel" id="sc-wheelA"><span></span></div><div class="wheel" id="sc-wheelB"><span></span></div></div></div>
+    <div id="sc-wheels"><div class="wcap"></div>
+      <div class="wrow">
+        <div class="wwrap"><div class="wptr"></div><div class="wdisc" id="sc-discA"></div></div>
+        <div class="wwrap"><div class="wptr"></div><div class="wdisc" id="sc-discB"></div></div>
+      </div>
+      <div class="whint"></div></div>
     <div id="sc-roundover"></div>
     <div id="sc-msg"></div>
     <div id="sc-skipped"><span>You've been SKIPPED!</span></div>
@@ -369,10 +375,9 @@ export function createHud(
   const banner = q<HTMLElement>('#sc-banner')
   const wheelsEl = q<HTMLElement>('#sc-wheels')
   const wheelCap = q<HTMLElement>('#sc-wheels .wcap')
-  const wheelAIcon = q<HTMLElement>('#sc-wheelA span')
-  const wheelBIcon = q<HTMLElement>('#sc-wheelB span')
-  const wheelADisc = q<HTMLElement>('#sc-wheelA')
-  const wheelBDisc = q<HTMLElement>('#sc-wheelB')
+  const wheelHint = q<HTMLElement>('#sc-wheels .whint')
+  const wheelADisc = q<HTMLElement>('#sc-discA')
+  const wheelBDisc = q<HTMLElement>('#sc-discB')
   const roundoverEl = q<HTMLElement>('#sc-roundover')
   let roundoverTimer = 0
   const msgEl = q<HTMLElement>('#sc-msg')
@@ -553,16 +558,33 @@ export function createHud(
       clearTimeout(msgTimer)
       msgTimer = window.setTimeout(() => (msgEl.style.opacity = '0'), ms)
     },
-    // The resource-wheels overlay (driven each frame from the game loop). `spinning` blurs the
-    // discs; caption + icons show the current/landed faces.
-    setWheels(show: boolean, iconA = '', iconB = '', caption = '', spinning = false) {
-      wheelsEl.style.display = show ? 'flex' : 'none'
-      if (!show) return
-      wheelAIcon.textContent = iconA
-      wheelBIcon.textContent = iconB
+    // Open the resource-wheels modal: paint each disc's icons around its rim. `onClick` (if given)
+    // fires once on the first click anywhere — how a human stops the spin.
+    showWheels(facesA: string[], facesB: string[], caption: string, onClick: (() => void) | null) {
+      const paint = (disc: HTMLElement, faces: string[]) => {
+        const step = 360 / faces.length
+        disc.innerHTML = faces.map((f, i) => `<div class="face" style="transform: rotate(${i * step}deg) translateY(-62px)">${f}</div>`).join('')
+      }
+      paint(wheelADisc, facesA)
+      paint(wheelBDisc, facesB)
       wheelCap.textContent = caption
-      wheelADisc.classList.toggle('spin', spinning)
-      wheelBDisc.classList.toggle('spin', spinning)
+      wheelHint.textContent = ''
+      wheelsEl.onclick = onClick ? () => { wheelsEl.onclick = null; onClick() } : null
+      wheelsEl.style.cursor = onClick ? 'pointer' : 'default'
+      wheelsEl.style.display = 'flex'
+    },
+    // Per-frame rotation (degrees) of each disc, driven by the game loop.
+    setWheelRotation(rotA: number, rotB: number) {
+      wheelADisc.style.transform = `rotate(${rotA}deg)`
+      wheelBDisc.style.transform = `rotate(${rotB}deg)`
+    },
+    setWheelText(caption: string, hint: string) {
+      wheelCap.textContent = caption
+      wheelHint.textContent = hint
+    },
+    hideWheels() {
+      wheelsEl.style.display = 'none'
+      wheelsEl.onclick = null
     },
     // Big two-line round-over banner. `winner`: 0 (red) / 1 (blue) / -1 (neutral draw).
     roundOver(line1: string, line2: string, winner: number, ms = 4200) {

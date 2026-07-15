@@ -2079,35 +2079,84 @@ function incomeFromType(s: number, type: number): number {
   return Math.round(sum)
 }
 
-let wheelSpin: { roller: number; a: WheelSlice; b: WheelSlice; t: number; paid: boolean; done: () => void } | null = null
-const WHEEL_SPIN_T = 0.85 // seconds the discs blur before settling
-const WHEEL_HOLD_T = 1.75 // total seconds the overlay stays up
+// The two discs' visual rim order (each face shown once), used to land the pointer on the result.
+const WHEEL_A_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'blockade']
+const WHEEL_B_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'tribute8', 'tribute4']
 
+type WheelState = {
+  roller: number; a: WheelSlice; b: WheelSlice; human: boolean; done: () => void
+  rotA: number; rotB: number; spA: number; spB: number // live rotation (deg) + spin speed (deg/s)
+  mode: 'spin' | 'decel' | 'hold'; t: number
+  startA: number; startB: number; targetA: number; targetB: number; decelDur: number
+}
+let wheelSpin: WheelState | null = null
 let wheelForce: { a: WheelSlice; b: WheelSlice } | null = null // test hook: preset the next spin
+
 function spinWheels(roller: number, done: () => void): void {
   phase = 'shop' // inert while the wheels are up
   const a = wheelForce ? wheelForce.a : pickSlice(WHEEL_A)
   const b = wheelForce ? wheelForce.b : pickSlice(WHEEL_B)
   wheelForce = null
-  wheelSpin = { roller, a, b, t: 0, paid: false, done }
-  hud.setWheels(true, '🎰', '🎰', `${fortLabel(roller)} spins the resource wheels…`, true)
+  const human = isHuman(roller)
+  wheelSpin = {
+    roller, a, b, human, done,
+    rotA: 0, rotB: 0, spA: 900 + Math.random() * 220, spB: 820 + Math.random() * 220,
+    mode: 'spin', t: 0, startA: 0, startB: 0, targetA: 0, targetB: 0, decelDur: 1.7,
+  }
+  hud.showWheels(WHEEL_A_FACES.map(sliceIcon), WHEEL_B_FACES.map(sliceIcon), `${fortLabel(roller)} spins the resource wheels`, human ? stopWheels : null)
+  hud.setWheelRotation(0, 0)
+  hud.setWheelText(human ? `${fortLabel(roller)} — SPIN!` : `${fortLabel(roller)} spins the wheels…`, human ? 'CLICK to stop the wheels' : '')
+}
+
+// Human click → the wheels begin to decelerate onto the result.
+function stopWheels(): void {
+  if (wheelSpin && wheelSpin.mode === 'spin') beginWheelDecel(wheelSpin)
+}
+
+function beginWheelDecel(w: WheelState): void {
+  w.mode = 'decel'
+  w.t = 0
+  w.startA = w.rotA
+  w.startB = w.rotB
+  const land = (faces: WheelSlice[], win: WheelSlice, cur: number) => {
+    const step = 360 / faces.length
+    const at = (360 - faces.indexOf(win) * step) % 360 // disc rotation that puts the winning face at the top pointer
+    let t = cur - (cur % 360) + at
+    while (t < cur + 900) t += 360 // at least ~2.5 more turns before it lands
+    return t
+  }
+  w.targetA = land(WHEEL_A_FACES, w.a, w.rotA)
+  w.targetB = land(WHEEL_B_FACES, w.b, w.rotB)
+  if (w.human) hud.setWheelText(`${fortLabel(w.roller)} spins the wheels…`, '')
 }
 
 function updateWheels(dt: number): void {
   const w = wheelSpin
   if (!w) return
   w.t += dt
-  if (w.t < WHEEL_SPIN_T) {
-    hud.setWheels(true, sliceIcon(WHEEL_A[Math.floor(Math.random() * WHEEL_A.length)].s), sliceIcon(WHEEL_B[Math.floor(Math.random() * WHEEL_B.length)].s), `${fortLabel(w.roller)} spins the resource wheels…`, true)
-  } else if (!w.paid) {
-    w.paid = true
-    payWheels(w.roller, w.a, w.b) // discs settle → pay every owner
-    hud.setWheels(true, sliceIcon(w.a), sliceIcon(w.b), wheelCaption(w.a, w.b), false)
-    sfx.tick()
-  } else if (w.t >= WHEEL_HOLD_T) {
+  if (w.mode === 'spin') {
+    w.rotA += w.spA * dt
+    w.rotB += w.spB * dt
+    hud.setWheelRotation(w.rotA, w.rotB)
+    if (!w.human && w.t > 0.9) beginWheelDecel(w) // AI stops itself after a beat
+  } else if (w.mode === 'decel') {
+    const u = Math.min(1, w.t / w.decelDur)
+    const e = 1 - Math.pow(1 - u, 3) // ease-out: fast → gliding to a stop
+    w.rotA = w.startA + (w.targetA - w.startA) * e
+    w.rotB = w.startB + (w.targetB - w.startB) * e
+    hud.setWheelRotation(w.rotA, w.rotB)
+    if (u >= 1) {
+      payWheels(w.roller, w.a, w.b) // settled → pay every owner
+      hud.setWheelText(wheelCaption(w.a, w.b), w.human ? '' : 'everyone sees the roll…')
+      sfx.tick()
+      w.mode = 'hold'
+      w.t = 0
+    }
+  } else if (w.t >= (w.human ? 1.4 : 3.0)) {
+    // Hold the result — briefly for a human, a full 3s on an enemy spin so everyone can read it.
     const { roller, a, b, done } = w
     wheelSpin = null
-    hud.setWheels(false)
+    hud.hideWheels()
     runWheelSpecials(roller, a, b, done) // Blockade / Tribute (may prompt), then continue the turn
   }
 }
@@ -2246,15 +2295,14 @@ function reallyStartTurn(s: number): void {
     if (r && r.done && s !== v) armyRaidOf[v] = null
   }
   if (!livingSeats().some(v => armyRaidOf[v])) world.clearRaided()
-  // Age this side's producers a turn (crops mature). Income no longer trickles in per-turn —
-  // it comes ONLY from the resource wheels, spun now; the rest of the turn runs once they land.
-  for (const p of planted[s]) p.age++
-  spinWheels(s, () => afterTurnSpin(s))
+  for (const p of planted[s]) p.age++ // age this side's producers a turn (crops mature)
+  beginTurnActions(s)
 }
 
-// The wheels have finished paying out: give the AI its catch-up subsidy, then open the market
-// (human) or run the computer's turn (AI).
-function afterTurnSpin(s: number): void {
+// Open the market (human) or run the computer's shopping (AI). The resource wheels spin AFTER
+// this "store" step — for a human, once they leave the market (onMarketDone); for the AI, right
+// after it has bought its cards/producers — then income lands and the shot phase begins.
+function beginTurnActions(s: number): void {
   if (!isHuman(s)) money[s] += 400 // modest per-turn subsidy so each AI seat can keep up
   if (isHuman(s)) {
     const st = sides[s]
@@ -2263,7 +2311,6 @@ function afterTurnSpin(s: number): void {
     syncStatus()
     refreshHand()
     refreshResources()
-    // Every turn opens the market (buy cards + resources; weapons only at round start).
     openMarket(roundStartPending[s])
     roundStartPending[s] = false
   } else {
@@ -2272,13 +2319,17 @@ function afterTurnSpin(s: number): void {
     if (numPlayers > 2) aiDiplomacy(s) // repay gifts / keep allies / open overtures, before cards
     aiCards(s) // buy/play a stratagem first (so producers don't eat the card budget)
     aiPlant(s) // then grow the economy with what's left
-    if (phase !== 'fly') {
-      phase = 'aiThink'
-      aiT = 0
-      aiPlanned = null
-      hud.banner(twoPlayer || numPlayers > 2 ? `PLAYER ${s + 1} (COMPUTER)` : 'ENEMY TURN')
-    }
+    if (phase === 'fly') return // a played Toaster took over the turn — no wheel this turn
+    spinWheels(s, () => startAiThink(s)) // wheels spin after the AI's shopping, then it aims
   }
+}
+
+function startAiThink(s: number): void {
+  if (phase === 'fly') return
+  phase = 'aiThink'
+  aiT = 0
+  aiPlanned = null
+  hud.banner(twoPlayer || numPlayers > 2 ? `PLAYER ${s + 1} (COMPUTER)` : 'ENEMY TURN')
 }
 
 // The enemy buys a card now and then, and plays its best applicable one by simple
@@ -2900,7 +2951,7 @@ function setupRoundWorld(): void {
   // Card effects don't carry between rounds: clear ghost/field/raid, restore cannons.
   ghostReposition = false
   if (fallout) { scene.remove(fallout.mesh); fallout = null } // no cloud carries into a new round
-  if (wheelSpin) { wheelSpin = null; hud.setWheels(false) }
+  if (wheelSpin) { wheelSpin = null; hud.hideWheels() }
   for (let s = 0; s < 4; s++) {
     ghostDecoyOf[s] = null
     forceField[s] = false
@@ -3069,8 +3120,12 @@ function buyResource(index: number): void {
 // straight to your turn (aim), where you place resources from the list and/or fire.
 function onMarketDone(): void {
   syncStatus()
-  if (marketFull) beginCastlePlacement()
-  else enterAim()
+  // Purchases done → NOW spin the resource wheels; income lands, then placement / aiming begins.
+  spinWheels(turn, () => {
+    syncStatus()
+    if (marketFull) beginCastlePlacement()
+    else enterAim()
+  })
 }
 
 function openMarket(full: boolean): void {
