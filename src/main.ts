@@ -297,6 +297,22 @@ const owedActedSince: boolean[][] = [0, 1, 2, 3].map(() => [false, false, false,
 function alliedWith(a: number, b: number): boolean {
   return a !== b && trust[a][b] >= ALLY_TRUST && trust[b][a] >= ALLY_TRUST
 }
+// The Bitter Truth surrender/vassalage: overlord[s] = the seat s knelt to (-1 if independent).
+// Surrender forms a LOYAL ALLIANCE — a permanent team that never fires on itself and wins
+// together. Teams follow the overlord chain to a root; two seats share a team iff same root.
+const overlord = [-1, -1, -1, -1]
+function teamRoot(s: number): number {
+  let r = s
+  const seen = new Set<number>()
+  while (overlord[r] >= 0 && !seen.has(r)) { seen.add(r); r = overlord[r] }
+  return r
+}
+function sameTeam(a: number, b: number): boolean {
+  return teamRoot(a) === teamRoot(b)
+}
+function teamSize(s: number): number {
+  return livingSeats().filter(o => sameTeam(o, s)).length
+}
 // Full Moon ghost strike in progress: how the caster's turn resumes once the ghosts
 // have flown home, plus the defender's live flashlight-defence window.
 let ghostResume: 'casterAim' | 'aiThink' | null = null
@@ -356,8 +372,8 @@ function playCard(side: number, idx: number): void {
     applyCard(side, id, target)
     refreshResources() // steal/zombie move producers between sides
   }
-  // In a 3–4 player game a human chooses which opponent a hostile card hits.
-  const foes = livingSeats().filter(s => s !== side)
+  // In a 3–4 player game a human chooses which opponent a hostile card hits (never a teammate).
+  const foes = livingSeats().filter(s => !sameTeam(s, side))
   if (isHuman(side) && HOSTILE_CARDS.has(id) && foes.length > 1) {
     hud.showTargetPicker(
       `${cardDef(id).emoji} ${cardDef(id).name} — strike whom?`,
@@ -574,6 +590,40 @@ function backToOfferer(from: number): void {
   if (twoPlayer) hud.showHandoff(from + 1, () => {}, `PLAYER ${from + 1} — BACK TO YOU`, 'Trade settled. Pass the keyboard back and take your shot.', 'CONTINUE')
 }
 
+// ---- Surrender / vassalage (The Bitter Truth) -------------------------------------------
+// Kneel to `master`: a permanent loyal alliance. The vassal and master (and all their kin)
+// form one team that never fires on itself and wins together; the vassal fights the master's
+// enemies from here on. Trust is pinned high so no diplomacy code treats them as foes.
+function surrender(vassal: number, master: number): void {
+  if (vassal === master || sameTeam(vassal, master)) return
+  overlord[vassal] = master
+  trust[vassal][master] = Math.max(trust[vassal][master], ALLY_TRUST + 2)
+  trust[master][vassal] = Math.max(trust[master][vassal], ALLY_TRUST + 2)
+  giftOwed[vassal][master] = false
+  giftOwed[master][vassal] = false
+  refreshForts()
+  hud.setSurrender(false) // you can only kneel once
+  sfx.rumble()
+  hud.banner(`${fortLabel(vassal)} SURRENDERS`, `now fights for ${fortLabel(master)}`, 2400)
+  // If that leaves only one faction on the field, the war is already won — no shot needed.
+  if (new Set(livingSeats().map(teamRoot)).size <= 1) concludeRound([])
+}
+
+// A human presses SURRENDER (aim phase, Bitter Truth): choose which rival to kneel to. Only
+// rival TEAMS are offered (no point surrendering to your own side).
+function offerSurrender(side: number): void {
+  if (phase !== 'aim') return
+  const foes = livingSeats().filter(s => !sameTeam(s, side))
+  if (!foes.length) return void hud.msg('no rival left to surrender to')
+  const pick = (master: number) => surrender(side, master)
+  if (foes.length === 1) return void pick(foes[0])
+  hud.showTargetPicker(
+    '🏳️ Who do you surrender to?',
+    foes.map(s => ({ seat: s, label: fortLabel(s) })),
+    pick
+  )
+}
+
 // On a round win the victor lifts one random card from the loser's hand. Returns the
 // card's name (for the result message), or '' if the loser held none.
 function stealRandomCard(winner: number, loser: number): string {
@@ -587,7 +637,7 @@ function stealRandomCard(winner: number, loser: number): string {
 // The default victim for a hostile card: the weakest living opponent (the sole opponent
 // in a 2-player game). Callers may override with an explicit target (human picker / AI).
 function defaultFoe(side: number): number {
-  const foes = livingSeats().filter(s => s !== side)
+  const foes = livingSeats().filter(s => !sameTeam(s, side))
   if (!foes.length) return (side + 1) % Math.max(2, numPlayers)
   foes.sort((a, b) => world.integrity(a) - world.integrity(b))
   return foes[0]
@@ -1096,6 +1146,19 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
       forceField[fsel] = false
       lastImpact.copy(at)
       return // nothing gets through
+    }
+  }
+  // Loyal-alliance ceasefire (Bitter Truth): a shell reaching a TEAMMATE of the acting seat
+  // is turned aside at their walls — you cannot bombard your own side (nor they you).
+  if (bitterTruth) {
+    for (let a = 0; a < numPlayers; a++) {
+      if (a === turn || !alive[a] || !sameTeam(a, turn)) continue
+      const ft = world.forts[a]?.towers[0]
+      if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
+        spawnShieldBlock(ft.cx, ft.cz)
+        lastImpact.copy(at)
+        return
+      }
     }
   }
   world.carve(at.x, at.y, at.z, r)
@@ -1698,6 +1761,8 @@ function enterAim(): void {
   // Trading is a free action offered only on a human's turn in a 3–4 player game.
   const canTrade = isHuman(turn) && numPlayers > 2
   hud.setTrade(canTrade, () => offerTrade(turn))
+  // Surrender: a human in The Bitter Truth (3–4P) who hasn't already knelt to someone.
+  hud.setSurrender(bitterTruth && isHuman(turn) && numPlayers > 2 && overlord[turn] < 0, () => offerSurrender(turn))
   // Nudge a human who was gifted last round: trading back forms an alliance.
   if (canTrade) {
     const gifter = livingSeats().find(g => g !== turn && giftOwed[g][turn])
@@ -2315,6 +2380,8 @@ function reallyStartTurn(s: number): void {
     openMarket(roundStartPending[s])
     roundStartPending[s] = false
   } else {
+    aiMaybeSurrender(s) // a broken seat may kneel to a stronger power (Bitter Truth)
+    if (phase === 'end') return // that surrender just decided the round
     if (numPlayers > 2) aiDiplomacy(s) // repay gifts / keep allies / open overtures, before cards
     aiCards(s) // buy/play a stratagem first (so producers don't eat the card budget)
     aiPlant(s) // then grow the economy with what's left
@@ -2335,10 +2402,11 @@ function reallyStartTurn(s: number): void {
 // ties broken by nearest to this seat's cannon. Used for both its shot and hostile cards.
 function aiTarget(s: number): number {
   const living = livingSeats()
-  const foes = living.filter(o => o !== s)
+  // Teammates (surrendered vassals / masters) are never targets — that bond is unbreakable.
+  const foes = living.filter(o => o !== s && !sameTeam(o, s))
   if (!foes.length) return -1
-  // Allies are spared — unless every remaining foe is an ally, or only two seats are left
-  // (last castle standing forces the final betrayal). Attacking then breaks the pact.
+  // Trade-allies are spared too — unless every remaining foe is an ally, or only two seats are
+  // left (last castle standing forces the final betrayal). Attacking then breaks the pact.
   const nonAllies = foes.filter(o => !alliedWith(s, o))
   const pool = nonAllies.length && living.length > 2 ? nonAllies : foes
   const me = sides[s].cannon.group.position
@@ -2354,6 +2422,23 @@ function aiTarget(s: number): number {
     }
   }
   return best
+}
+
+// Bitter Truth: a badly-battered computer seat bends the knee to the strongest rival left,
+// joining their team to survive rather than be finished off. Called at its turn start.
+function aiMaybeSurrender(s: number): void {
+  if (!bitterTruth || numPlayers <= 2 || overlord[s] >= 0) return
+  if (world.integrity(s) > 0.42) return // only when its fort is more than half gone
+  const foes = livingSeats().filter(o => !sameTeam(o, s))
+  if (!foes.length) return
+  let best = -1
+  let bestScore = -Infinity
+  for (const o of foes) {
+    // Kneel to the mightiest: most-intact fort, richest treasury, biggest team.
+    const sc = world.integrity(o) * 2 + money[o] / 20000 + teamSize(o)
+    if (sc > bestScore) { bestScore = sc; best = o }
+  }
+  if (best >= 0 && Math.random() < 0.6) surrender(s, best)
 }
 
 // Diplomacy at an AI seat's turn start: repay outstanding gifts (which seals alliances),
@@ -2685,7 +2770,10 @@ function concludeRound(dead: number[]): boolean {
   }
   sfx.rumble()
   const survivors = livingSeats()
-  if (survivors.length > 1) {
+  // The round ends only when a single FACTION is left standing — a lone survivor, or one
+  // surrendered team (Bitter Truth). More than one team still in the fight → play on.
+  const teamsLeft = new Set(survivors.map(teamRoot))
+  if (teamsLeft.size > 1) {
     // Round goes on: pop the crumbled fort(s) now (no deferred 'end' blast) and continue.
     for (const l of dead) {
       const lt = world.forts[l].towers[0]
@@ -2696,12 +2784,12 @@ function concludeRound(dead: number[]): boolean {
     }
     world.rebuild()
     refreshIntegrity()
-    hud.banner(`${capName(dead[0])} IS OUT!`, `${livingSeats().length} castles still standing`, 2600)
+    hud.banner(`${capName(dead[0])} IS OUT!`, `${teamsLeft.size} factions still standing`, 2600)
     return false
   }
-  // Round over — the lone survivor wins (or nobody, on a mutual kill).
-  const winner = survivors.length === 1 ? survivors[0] : -1
-  if (winner >= 0) score[winner]++
+  // Round over — the surviving faction wins (its whole team scores), or nobody on a mutual kill.
+  const winner = survivors.length ? teamRoot(survivors[0]) : -1
+  for (const w of survivors) score[w]++
   // Plunder (2-player only): the winner takes half the loser's cash + one random card.
   let plunder = 0
   let stole = ''
@@ -2717,7 +2805,9 @@ function concludeRound(dead: number[]): boolean {
     winner < 0
       ? `Round ${round} drawn — mutual destruction.`
       : numPlayers > 2
-        ? `Round ${round}: ${capName(winner)} is the last castle standing!`
+        ? survivors.length > 1
+          ? `Round ${round}: ${capName(winner)} and their vassals stand victorious!`
+          : `Round ${round}: ${capName(winner)} is the last castle standing!`
         : twoPlayer
           ? `Round ${round}: Player ${winner + 1} wins! Plundered half of Player ${(1 - winner) + 1}'s treasury ($${plunder.toLocaleString()})${cardNote}.`
           : winner === 0
@@ -3073,8 +3163,9 @@ function nextRound(): void {
 function fullReset(): void {
   round = 0
   lastRoundResult = ''
-  // Fresh diplomacy for the new match — no one trusts anyone yet.
+  // Fresh diplomacy for the new match — no one trusts anyone yet, no vassals.
   for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) { trust[a][b] = 0; giftOwed[a][b] = false; owedActedSince[a][b] = false }
+  for (let s = 0; s < 4; s++) overlord[s] = -1
   // Fresh battlefield for the new match, fixed across this match's rounds. Producers
   // can be placed anywhere (even water), so any seed is playable.
   roundSeed = Math.floor(Math.random() * 1e9)
@@ -3120,6 +3211,7 @@ window.addEventListener('keydown', e => {
     } else if (phase === 'aim' && !e.repeat) {
       phase = 'charge'
       hud.setTrade(false) // no trading once you commit to the shot
+      hud.setSurrender(false)
       chargeT = 0
       chargePower = 0
     } else if (phase === 'fly' && !e.repeat) {
@@ -3452,6 +3544,10 @@ declare global {
       aiTarget: (s: number) => number
       allied: (a: number, b: number) => boolean
       setTrust: (a: number, b: number, v: number) => void
+      surrender: (vassal: number, master: number) => void
+      overlord: () => number[]
+      team: (s: number) => number
+      aiSurrenderCheck: (s: number) => void
     }
   }
 }
@@ -3576,4 +3672,8 @@ window.__sv = {
   setTrust(a: number, b: number, v: number) {
     trust[a][b] = v
   },
+  surrender: (vassal: number, master: number) => surrender(vassal, master),
+  overlord: () => overlord.slice(0, numPlayers),
+  team: (s: number) => teamRoot(s),
+  aiSurrenderCheck: (s: number) => aiMaybeSurrender(s),
 }

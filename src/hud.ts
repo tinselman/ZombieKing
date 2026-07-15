@@ -121,6 +121,9 @@ const CSS = `
 #sc-tradeBtn { display: none; pointer-events: auto; align-self: flex-start; font-size: 13px; font-weight: 800; letter-spacing: 0.06em; padding: 9px 16px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-tradeBtn.on { display: block; }
 #sc-tradeBtn:hover { background: #454c55; }
+#sc-surrenderBtn { display: none; pointer-events: auto; align-self: flex-start; font-size: 13px; font-weight: 800; letter-spacing: 0.06em; padding: 9px 16px; border-radius: 10px; border: 1px solid #8a3120; background: #8a3120; color: #fff; cursor: pointer; }
+#sc-surrenderBtn.on { display: block; }
+#sc-surrenderBtn:hover { background: #a4331f; }
 #sc-trade { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 14px; background: rgba(244,246,248,0.92); backdrop-filter: blur(8px); pointer-events: auto; z-index: 11; }
 #sc-trade h1 { font-size: 22px; font-weight: 800; letter-spacing: 0.03em; color: #16181b; margin: 0 0 2px; text-align: center; }
 #sc-trade .tsub { font-size: 13px; color: #7a838d; margin: 0 0 8px; text-align: center; }
@@ -242,6 +245,7 @@ export function createHud(
     <div class="panel" id="sc-wind"><div class="label">Wind</div><span id="sc-windArrow">➤</span><div id="sc-windSpeed"></div></div>
     <div class="panel" id="sc-status"></div>
     <div id="sc-blstack">
+      <button id="sc-surrenderBtn">🏳️ SURRENDER</button>
       <button id="sc-tradeBtn">🤝 OFFER TRADE</button>
       <div class="panel" id="sc-hand"><div class="label">Stratagems &nbsp;· click to view</div><div id="sc-handList"></div></div>
       <div class="panel" id="sc-resources"><div class="label">Resources &nbsp;· click to place</div><div id="sc-resList"></div></div>
@@ -379,6 +383,7 @@ export function createHud(
   const targetTitle = q<HTMLElement>('#sc-target h1')
   const targetRows = q<HTMLElement>('#sc-targetRows')
   const tradeBtn = q<HTMLButtonElement>('#sc-tradeBtn')
+  const surrenderBtn = q<HTMLButtonElement>('#sc-surrenderBtn')
   const tradeEl = q<HTMLElement>('#sc-trade')
   const tradeTitle = q<HTMLElement>('#sc-trade h1')
   const tradeSub = q<HTMLElement>('#sc-tradeSub')
@@ -777,6 +782,11 @@ export function createHud(
     setTrade(show: boolean, onClick?: () => void) {
       tradeBtn.classList.toggle('on', show)
       tradeBtn.onclick = onClick ?? null
+    },
+    // The 🏳️ SURRENDER button (Bitter Truth, human's turn, 3–4 players, not yet a vassal).
+    setSurrender(show: boolean, onClick?: () => void) {
+      surrenderBtn.classList.toggle('on', show)
+      surrenderBtn.onclick = onClick ?? null
     },
     // Assemble a bundle of your OWN items — used both for the opening offer and for a
     // recipient's return. The pool is what you can still add; the bundle is what you've
