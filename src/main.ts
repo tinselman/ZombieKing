@@ -3131,10 +3131,11 @@ function buyFort(index: number): void {
   u.apply(turn)
   // Construction happens on the spot, behind the shop — scoped to the buyer's own
   // fort so mid-round purchases never regenerate (and heal) the battlefield.
-  const t = world.forts[turn]?.towers[0]
+  const fort = world.forts[turn]
+  const t = fort?.towers[0]
   if (t) {
-    if (index === 0) world.buildBarricade(t.cx, t.cz, turn === 0 ? 1 : -1, forti[turn].barricade)
-    else world.moveFort(turn, t.cx, t.cz, forti[turn]) // re-raise towers with the upgrade
+    if (index === 0) world.buildBarricade(t.cx, t.cz, fort.facing, forti[turn].towers, forti[turn].barricade)
+    else world.moveFort(turn, t.cx, t.cz, forti[turn]) // re-raise towers (+ berm) with the upgrade
     world.rebuild()
     snapCannonToSeat(turn)
   }

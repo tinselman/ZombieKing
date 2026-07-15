@@ -417,7 +417,7 @@ export class World {
         fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
       }
       this.forts.push(fort)
-      this.buildBarricade(b.cx, b.cz, b.facing, forti[side].barricade)
+      this.buildBarricade(b.cx, b.cz, b.facing, forti[side].towers, forti[side].barricade)
     }
     // Producers are player/AI-placed each turn; main.ts rebuilds them here from its
     // persistent placement lists (see rebuildRoundWorld). generate() leaves the land bare.
@@ -448,9 +448,15 @@ export class World {
       }
     }
     for (let i = 0; i < this.grid.length; i++) if (this.grid[i] === cell) this.grid[i] = EMPTY
-    const sites = [{ cx, cz }]
-    if (forti.towers >= 1) sites.push({ cx: cx + facing * 3, cz: Math.min(GZ - 8, cz + 13) })
-    if (forti.towers >= 2) sites.push({ cx: cx + facing * 3, cz: Math.max(7, cz - 13) })
+    // Tear down THIS fort's old berm (BARRICADE near the old keep) so it moves with the tower
+    // rather than being left behind. Forts sit far apart, so a local box only clears our own.
+    if (old) {
+      const oc = old.towers[0]
+      for (let x = Math.max(0, oc.cx - 32); x < Math.min(GX, oc.cx + 32); x++)
+        for (let z = Math.max(0, oc.cz - 32); z < Math.min(GZ, oc.cz + 32); z++)
+          for (let y = 0; y < GY; y++) if (this.grid[this.idx(x, y, z)] === BARRICADE) this.grid[this.idx(x, y, z)] = EMPTY
+    }
+    const sites = this.fortSites(cx, cz, facing, forti.towers)
     const fort: FortInfo = { cell, towers: [], origCount: 0, facing }
     for (let ti = 0; ti < sites.length; ti++) {
       const extraH = ti === 0 ? forti.height : 0
@@ -469,6 +475,7 @@ export class World {
       }
     }
     this.forts[side] = fort
+    this.buildBarricade(cx, cz, facing, forti.towers, forti.barricade) // the curtain wall moves too
     this.dirty = true
   }
 
@@ -708,19 +715,34 @@ export class World {
   // A destructible berm a few voxels in front of a fort (toward the enemy). It
   // blocks and soaks flat shots so they must be lobbed over — bought in the shop,
   // taller/thicker with each level. Not counted in fort integrity.
-  // A defensive berm now RINGS the keep on all four sides (a full curtain wall), and each
-  // extra berm bought makes the wall taller and thicker — so stacking them visibly rears up.
-  buildBarricade(cx: number, cz: number, _dir: number, level: number): void {
+  // The tower footprints for a fort with `extraTowers` extras at (cx,cz) facing `facing` —
+  // shared by generation, relocation, and the berm so they always agree.
+  private fortSites(cx: number, cz: number, facing: number, extraTowers: number): { cx: number; cz: number }[] {
+    const sites = [{ cx, cz }]
+    if (extraTowers >= 1) sites.push({ cx: cx + facing * 3, cz: Math.min(GZ - 8, cz + 13) })
+    if (extraTowers >= 2) sites.push({ cx: cx + facing * 3, cz: Math.max(7, cz - 13) })
+    return sites
+  }
+
+  // A defensive berm builds a full CURTAIN WALL that rings the fortress on all four sides.
+  // With more than one tower the wall grows to ENCLOSE every tower (a rectangle around their
+  // combined footprint), and each extra berm bought makes it taller and thicker.
+  buildBarricade(cx: number, cz: number, facing: number, extraTowers: number, level: number): void {
     if (level <= 0) return
     const height = 4 + level * 4 // 1 berm: 8 tall, 2: 12, 3: 16 — more berms → higher wall
     const thick = 1 + level // 1: 2 thick, 2: 3, 3: 4 (a chunkier wall soaks more)
-    const R = 9 // stand-off ring radius from the keep centre (clears the 9×9 footprint)
-    for (let dx = -R; dx <= R; dx++) {
-      for (let dz = -R; dz <= R; dz++) {
-        const ring = Math.max(Math.abs(dx), Math.abs(dz))
-        if (ring > R || ring <= R - thick) continue // only the outer `thick`-wide border band
-        const x = cx + dx
-        const z = cz + dz
+    const gap = 4 // clear space between the outermost tower wall and the inner face of the berm
+    // Bounding box of every tower footprint, then the open interior (hole) and outer extent.
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+    for (const s of this.fortSites(cx, cz, facing, extraTowers)) {
+      minX = Math.min(minX, s.cx - FORT_HALF); maxX = Math.max(maxX, s.cx + FORT_HALF)
+      minZ = Math.min(minZ, s.cz - FORT_HALF); maxZ = Math.max(maxZ, s.cz + FORT_HALF)
+    }
+    const ix0 = minX - gap, ix1 = maxX + gap, iz0 = minZ - gap, iz1 = maxZ + gap // open hole
+    const ox0 = ix0 - thick, ox1 = ix1 + thick, oz0 = iz0 - thick, oz1 = iz1 + thick // outer edge
+    for (let x = ox0; x <= ox1; x++) {
+      for (let z = oz0; z <= oz1; z++) {
+        if (x >= ix0 && x <= ix1 && z >= iz0 && z <= iz1) continue // inside the hole → open
         if (x < 0 || x >= GX || z < 0 || z >= GZ) continue
         const base = this.surfaceY(x, z) + 1
         for (let dy = 0; dy < height; dy++) {
