@@ -5,6 +5,7 @@ import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './wea
 import { planShot } from './ai'
 import { createHud } from './hud'
 import { flagOf, randomCountry, type Country } from './countries'
+import { statOf, cashFromGdp, girthFromMil } from './worldstats'
 import * as sfx from './audio'
 
 const COLLAPSE_AT = 0.2 // fort integrity below this = destroyed (≈8/10 of the tower gone)
@@ -170,6 +171,9 @@ let roundSeed = 0
 // True when more than one human shares the keyboard (hotseat) — gates the handoff screen
 // and the "Player N" labelling. Derived from seatHuman when a match starts.
 let twoPlayer = false
+// "The Bitter Truth" mode: real-world economies set starting cash, militaries set fortress
+// girth, and the Surrender button unlocks. False = "Just Having a Fun Time" (the base game).
+let bitterTruth = false
 // Cosmetic per-seat nation (flag + name shown on the fort bars); null until chosen.
 const playerCountry: (Country | null)[] = [null, null, null, null]
 // The fort-bar label for a seat: its flag + country name if picked, else a plain label.
@@ -3077,11 +3081,15 @@ function fullReset(): void {
   world.castleOverride = Array.from({ length: numPlayers }, () => null) // revert to seed spots
   for (let s = 0; s < numPlayers; s++) {
     score[s] = 0
-    money[s] = START_CASH
+    // Bitter Truth: your nation's real economy is your war chest, and its military might is
+    // the girth of your fortress (extra towers + storeys). Fun Time keeps everyone equal.
+    const stat = statOf(playerCountry[s]?.code)
+    money[s] = bitterTruth ? cashFromGdp(stat.gdp) : START_CASH
+    const girth = bitterTruth ? girthFromMil(stat.mil) : { towers: 0, height: 0 }
     sides[s].arsenal = newArsenal()
     sides[s].wsel = 0
-    forti[s].height = 0
-    forti[s].towers = 0
+    forti[s].height = girth.height
+    forti[s].towers = girth.towers
     forti[s].barricade = 0
     planted[s] = []
     pendingResources[s] = []
@@ -3359,9 +3367,13 @@ let skipRender = false
 function showModePicker(): void {
   phase = 'shop' // inert while the picker is up — no aiming/firing behind the overlay
   hud.showModePicker(count => {
-    if (count === 1) startWithSeats(2, [true, false]) // you vs the computer
-    else if (count === 2) startWithSeats(2, [true, true]) // hotseat duel
-    else hud.showSeatSetup(count, flags => startWithSeats(count, flags)) // 3–4 player lobby
+    // Right after the player count, choose the reality: Fun Time (as-is) or The Bitter Truth.
+    hud.showGameModePicker(hard => {
+      bitterTruth = hard
+      if (count === 1) startWithSeats(2, [true, false]) // you vs the computer
+      else if (count === 2) startWithSeats(2, [true, true]) // hotseat duel
+      else hud.showSeatSetup(count, flags => startWithSeats(count, flags)) // 3–4 player lobby
+    })
   })
 }
 
@@ -3432,7 +3444,7 @@ declare global {
       sampleDraws: (n: number) => Record<string, number>
       setMode: (two: boolean) => void
       setBerms: (side: number, n: number) => void
-      setPlayers: (count: number, humanFlags: boolean[]) => void
+      setPlayers: (count: number, humanFlags: boolean[], hard?: boolean, codes?: string[]) => void
       trust: () => number[][]
       giftOwed: () => boolean[][]
       tradable: (s: number) => { kind: string; key: string; label: string; emoji: string }[]
@@ -3525,6 +3537,7 @@ window.__sv = {
   // Mode test hook: pick 1P/2P headlessly (the UI picker does the same).
   setMode(two: boolean) {
     numPlayers = 2
+    bitterTruth = false
     seatHuman[0] = true
     seatHuman[1] = two
     seatHuman[2] = false
@@ -3534,12 +3547,13 @@ window.__sv = {
     fullReset()
   },
   // Test hook: start a headless N-player match (humanFlags[s] = human vs AI) — the lobby
-  // (2.4) does the same with real UI.
-  setPlayers(count: number, humanFlags: boolean[]) {
+  // (2.4) does the same with real UI. `hard` toggles The Bitter Truth (default Fun Time).
+  setPlayers(count: number, humanFlags: boolean[], hard = false, codes?: string[]) {
     numPlayers = count
+    bitterTruth = hard
     for (let s = 0; s < 4; s++) {
       seatHuman[s] = s < count ? !!humanFlags[s] : false
-      playerCountry[s] = s < count ? randomCountry([]) : null
+      playerCountry[s] = s < count ? (codes && codes[s] ? { code: codes[s], name: codes[s] } : randomCountry([])) : null
     }
     twoPlayer = seatHuman.slice(0, count).filter(Boolean).length > 1
     fullReset()

@@ -90,6 +90,15 @@ const CSS = `
 #sc-mode .modes button:hover { border-color: #16181b; transform: translateY(-2px); box-shadow: 0 6px 18px rgba(40,50,60,0.12); }
 #sc-mode .modes .mt { display: block; font-size: 19px; font-weight: 800; letter-spacing: 0.04em; margin-bottom: 5px; color: #16181b; }
 #sc-mode .modes .ms { display: block; font-size: 12px; color: #7a838d; line-height: 1.4; }
+/* Game-mode picker (Fun Time vs Bitter Truth), shown right after the player count. */
+#sc-gamemode { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #fff; pointer-events: auto; z-index: 9; }
+#sc-gamemode h1 { font-size: 30px; font-weight: 800; letter-spacing: 0.06em; color: #16181b; margin: 0 0 26px; }
+#sc-gamemode .modes { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; max-width: 560px; }
+#sc-gamemode .modes button { width: 264px; padding: 22px 18px; border-radius: 14px; border: 1px solid #c4cad1; background: #fff; color: #2c3138; cursor: pointer; text-align: center; }
+#sc-gamemode .modes button:hover { border-color: #16181b; transform: translateY(-2px); box-shadow: 0 6px 18px rgba(40,50,60,0.12); }
+#sc-gamemode .modes .mt { display: block; font-size: 18px; font-weight: 800; letter-spacing: 0.03em; margin-bottom: 7px; color: #16181b; }
+#sc-gamemode .modes .ms { display: block; font-size: 12px; color: #7a838d; line-height: 1.45; }
+#sc-gamemode .modes #sc-gmHard:hover { border-color: #a4331f; box-shadow: 0 6px 18px rgba(150,40,30,0.16); }
 /* Seat setup (3–4 players): a Human/Computer toggle per seat. */
 #sc-seats { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: #fff; pointer-events: auto; z-index: 9; }
 #sc-seats h1 { font-size: 30px; font-weight: 800; letter-spacing: 0.04em; color: #16181b; margin: 0 0 4px; }
@@ -266,6 +275,11 @@ export function createHud(
       <button id="sc-mode3"><span class="mt">3 PLAYERS</span><span class="ms">Three-corner free-for-all — humans and computers, informal alliances.</span></button>
       <button id="sc-mode4"><span class="mt">4 PLAYERS</span><span class="ms">Four-corner war — mix humans and computers, everyone for themselves.</span></button>
     </div></div>
+    <div id="sc-gamemode"><h1>CHOOSE YOUR REALITY</h1>
+      <div class="modes">
+        <button id="sc-gmFun"><span class="mt">🎉 Just Having a Fun Time</span><span class="ms">The game as you know it — every nation starts equal and fights it out.</span></button>
+        <button id="sc-gmHard"><span class="mt">💀 The Bitter Truth</span><span class="ms">Real economies set your starting cash; real militaries set the girth of your fortress. Giants loom over the weak — surrender, or be crushed.</span></button>
+      </div></div>
     <div id="sc-seats"><h1>Set up the seats</h1><p>Tap each seat to switch between Human and Computer.</p>
       <div id="sc-seatRows"></div>
       <button id="sc-seatsStart">START WAR</button></div>
@@ -355,6 +369,9 @@ export function createHud(
   const handoffBtn = q<HTMLButtonElement>('#sc-handoff button')
   const modeEl = q<HTMLElement>('#sc-mode')
   const modeBtns = [1, 2, 3, 4].map(i => q<HTMLButtonElement>(`#sc-mode${i}`))
+  const gamemodeEl = q<HTMLElement>('#sc-gamemode')
+  const gmFun = q<HTMLButtonElement>('#sc-gmFun')
+  const gmHard = q<HTMLButtonElement>('#sc-gmHard')
   const seatsEl = q<HTMLElement>('#sc-seats')
   const seatRows = q<HTMLElement>('#sc-seatRows')
   const seatsStart = q<HTMLButtonElement>('#sc-seatsStart')
@@ -713,6 +730,12 @@ export function createHud(
           onPick(i + 1)
         }
       })
+    },
+    // The reality picker (right after the player count): Fun Time (as-is) vs Bitter Truth.
+    showGameModePicker(onPick: (bitterTruth: boolean) => void) {
+      gamemodeEl.style.display = 'flex'
+      gmFun.onclick = () => { gamemodeEl.style.display = 'none'; onPick(false) }
+      gmHard.onclick = () => { gamemodeEl.style.display = 'none'; onPick(true) }
     },
     // Seat setup (3–4 players): each seat toggles Human/Computer (seat 0 is always human),
     // then START resolves with the human/AI flags.
