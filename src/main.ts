@@ -315,6 +315,12 @@ function teamSize(s: number): number {
 const forceField = [false, false, false, false]
 const incomeBoost = [1, 1, 1, 1]
 const skipNext = [false, false, false, false]
+// Extra turns a seat must sit out (nuclear meltdown on its own reactor, or a fallout cloud
+// drifting over it) — counts DOWN one per would-be turn, on top of the one-shot Skip card.
+const skipTurns = [0, 0, 0, 0]
+// A drifting radioactive cloud from a meltdown (null when none is loose). It blows in a
+// random direction; any OTHER seat it passes over loses its crops and misses two turns.
+let fallout: { pos: THREE.Vector3; vx: number; vz: number; life: number; mesh: THREE.Mesh; hit: Set<number> } | null = null
 // Ghost Tower: set while the player is hand-repositioning their (still-visible) tower.
 let ghostReposition = false
 function cardDef(id: CardId): CardDef {
@@ -2006,8 +2012,9 @@ function advanceTurn(): void {
   for (let k = 0; k < numPlayers; k++) {
     next = (next + 1) % numPlayers
     if (!alive[next]) continue
-    if (skipNext[next]) {
-      skipNext[next] = false
+    if (skipNext[next] || skipTurns[next] > 0) {
+      if (skipNext[next]) skipNext[next] = false
+      else skipTurns[next]--
       if (isHuman(next)) hud.showSkipped(twoPlayer || numPlayers > 2 ? `Player ${next + 1}, you've been SKIPPED!` : "You've been SKIPPED!")
       else hud.msg(`${capName(next)} is skipped!`)
       continue
@@ -2255,15 +2262,19 @@ function aiPlant(s: number): void {
   const fort = world.forts[s]?.towers[0]
   if (!fort) return
   if (planted[s].length >= 8) return // soft cap — keeps the AI economy in range
-  // Buy the best producer that still leaves ~a card's worth in reserve.
-  const type = money[s] >= DERRICK_SPEC.cost + 1600 ? DERRICK
+  // A cash-flush AI splurges on ONE Nuclear Power Plant (if a water-side spot exists near its
+  // fort); otherwise it buys the best affordable producer, keeping ~a card's worth in reserve.
+  const hasPlant = planted[s].some(p => p.type === PLANT)
+  let type = money[s] >= PLANT_SPEC.cost + 4000 && !hasPlant ? PLANT
+    : money[s] >= DERRICK_SPEC.cost + 1600 ? DERRICK
     : money[s] >= MINE_SPEC.cost + 1600 ? MINE
     : money[s] >= CROP_SPEC.cost + 900 ? CROP
     : -1
   if (type < 0) return
-  const spec = PRODUCER_SPECS[type]
-  const spot = world.findProducerSpot(s, fort.cx, fort.cz, type)
+  let spot = world.findProducerSpot(s, fort.cx, fort.cz, type)
+  if (!spot && type === PLANT) { type = DERRICK; spot = world.findProducerSpot(s, fort.cx, fort.cz, type) } // no water — fall back
   if (!spot) return
+  const spec = PRODUCER_SPECS[type]
   money[s] -= spec.cost
   planted[s].push({ cx: spot.cx, cz: spot.cz, type, baseYield: spec.baseYield, age: 0 })
   world.buildProducer(spot.cx, spot.cz, s, type, spec.baseYield, 0)
@@ -2271,6 +2282,7 @@ function aiPlant(s: number): void {
 const CROP_SPEC = PRODUCER_SPECS[CROP]
 const MINE_SPEC = PRODUCER_SPECS[MINE]
 const DERRICK_SPEC = PRODUCER_SPECS[DERRICK]
+const PLANT_SPEC = PRODUCER_SPECS[PLANT]
 
 function aiPickWeapon(seat: number): WeaponDef {
   const s = sides[seat]
@@ -2543,6 +2555,97 @@ function concludeRound(dead: number[]): boolean {
   return true
 }
 
+// ---- Nuclear meltdown & fallout (Nuclear Power Plant) -----------------------------------
+const MELT_R = 16 // radius of the initial radioactive blast around a destroyed reactor
+
+// Any Nuclear Power Plant reduced to rubble this resolve melts down. If an ENEMY (the acting
+// seat) struck it, the catastrophe fires; a self-inflicted hit just loses the producer.
+function checkMeltdowns(): void {
+  for (let s = 0; s < numPlayers; s++) {
+    for (let i = planted[s].length - 1; i >= 0; i--) {
+      const p = planted[s][i]
+      if (p.type !== PLANT || world.integrityAt(p.cx, p.cz) >= 0.35) continue
+      planted[s].splice(i, 1)
+      world.removeProducer(p.cx, p.cz)
+      if (turn !== s) meltdown(s, p.cx, p.cz)
+    }
+  }
+  syncStatus()
+  if (isHuman(turn)) refreshResources()
+}
+
+function meltdown(owner: number, cx: number, cz: number): void {
+  sfx.rumble()
+  hud.banner('☢️ NUCLEAR MELTDOWN', `${capName(owner)}'s reactor is destroyed — the fallout spreads!`, 3600)
+  killCropsNear(cx, cz, MELT_R) // every crop in the blast (anyone's) dies
+  world.contaminated.push({ cx, cz, r: MELT_R }) // and the ground is poisoned for the round
+  world.dirty = true
+  const at = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 6, cz)
+  spawnExplosion(at, 14, true)
+  addShake(16, at)
+  skipTurns[owner] = Math.max(skipTurns[owner], 2) // the owner is knocked out for two turns
+  spawnFallout(owner, cx, cz)
+}
+
+// Destroy every crop (any seat's) whose bed sits within `r` of (cx,cz). Permanent — they're
+// ripped off the map, not merely shelled.
+function killCropsNear(cx: number, cz: number, r: number): void {
+  for (let s = 0; s < numPlayers; s++) {
+    for (let i = planted[s].length - 1; i >= 0; i--) {
+      const p = planted[s][i]
+      if (p.type !== CROP || Math.hypot(p.cx - cx, p.cz - cz) > r) continue
+      planted[s].splice(i, 1)
+      world.removeProducer(p.cx, p.cz)
+    }
+  }
+}
+
+// Loose a single black fallout cloud from the meltdown site, drifting in a RANDOM direction.
+function spawnFallout(owner: number, cx: number, cz: number): void {
+  if (fallout) scene.remove(fallout.mesh)
+  const geo = new THREE.SphereGeometry(9, 12, 10)
+  const mat = new THREE.MeshLambertMaterial({ color: 0x1a1e16, emissive: 0x1f2a12, emissiveIntensity: 0.5, transparent: true, opacity: 0.72 })
+  const mesh = new THREE.Mesh(geo, mat)
+  const ang = wind.x || wind.z ? Math.atan2(wind.z, wind.x) + (Math.random() - 0.5) : Math.random() * Math.PI * 2
+  const speed = 7
+  const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 20, cz)
+  mesh.position.copy(pos)
+  scene.add(mesh)
+  fallout = { pos, vx: Math.cos(ang) * speed, vz: Math.sin(ang) * speed, life: 0, mesh, hit: new Set([owner]) }
+}
+
+// Drift the fallout cloud each frame; the first OTHER seat it reaches loses its crops and two
+// turns. It fizzles after ~14s or once it blows off the map — it may hit no one.
+function updateFallout(dt: number): void {
+  if (!fallout) return
+  const f = fallout
+  f.life += dt
+  f.pos.x += f.vx * dt
+  f.pos.z += f.vz * dt
+  f.pos.y = world.surfaceY(Math.round(Math.max(0, Math.min(GX - 1, f.pos.x))), Math.round(Math.max(0, Math.min(GZ - 1, f.pos.z)))) + 20
+  f.mesh.position.copy(f.pos)
+  f.mesh.rotation.y += dt * 0.6
+  for (let s = 0; s < numPlayers; s++) {
+    if (f.hit.has(s) || !alive[s]) continue
+    const ft = world.forts[s]?.towers[0]
+    const overFort = ft && Math.hypot(f.pos.x - ft.cx, f.pos.z - ft.cz) < 13
+    const overCrop = planted[s].some(p => p.type === CROP && Math.hypot(f.pos.x - p.cx, f.pos.z - p.cz) < 13)
+    if (overFort || overCrop) {
+      f.hit.add(s)
+      killCropsNear(f.pos.x, f.pos.z, 15)
+      skipTurns[s] = Math.max(skipTurns[s], 2)
+      if (isHuman(turn)) refreshResources()
+      syncStatus()
+      hud.banner('☢️ FALLOUT', `the radioactive cloud rolls over ${nameOf(s)} — crops ruined, two turns lost!`, 3200)
+      sfx.boom(4)
+    }
+  }
+  if (f.life > 14 || f.pos.x < -6 || f.pos.x > GX + 6 || f.pos.z < -6 || f.pos.z > GZ + 6) {
+    scene.remove(f.mesh)
+    fallout = null
+  }
+}
+
 function finishResolve(force = false): void {
   // One more support pass — settling rubble can undermine what's left. The `force`
   // path (safety timeout) skips this so perpetually-settling rubble can't wedge us.
@@ -2560,6 +2663,7 @@ function finishResolve(force = false): void {
     sides[s].targetZ = seat.z
   }
   refreshIntegrity()
+  checkMeltdowns() // a nuclear plant reduced to rubble this shot melts down
   // Attacking a seat costs their trust in you — an ally you shell defects (and a betrayer
   // you already dislike sinks further). Only the acting seat `turn` is blamed for this shot.
   if (numPlayers > 2) {
@@ -2623,9 +2727,11 @@ function setupRoundWorld(): void {
   tasks.length = 0
   // Card effects don't carry between rounds: clear ghost/field/raid, restore cannons.
   ghostReposition = false
+  if (fallout) { scene.remove(fallout.mesh); fallout = null } // no cloud carries into a new round
   for (let s = 0; s < 4; s++) {
     ghostDecoyOf[s] = null
     forceField[s] = false
+    skipTurns[s] = 0
     armyRaidOf[s] = null
     world.hiddenForts[s] = false
     // Stale trade obligations don't carry between rounds, but TRUST/alliances do (they build
@@ -2999,6 +3105,7 @@ function tick(now: number): void {
   updatePlayerAim(dt)
   updatePlant(dt)
   updateCastle(dt)
+  updateFallout(dt)
   updateAi(dt)
 
   acc += dt
@@ -3233,6 +3340,9 @@ declare global {
       overlord: () => number[]
       team: (s: number) => number
       aiSurrenderCheck: (s: number) => void
+      giveProducer: (seat: number, type: number, cx: number, cz: number) => void
+      meltdownAt: (owner: number, cx: number, cz: number) => void
+      moveFallout: (x: number, z: number) => void
     }
   }
 }
@@ -3273,6 +3383,10 @@ window.__sv = {
     ghosted: ghostDecoyOf.slice(0, numPlayers).map(d => !!d),
     armyRaidOn: armyRaidOf.slice(0, numPlayers).map(r => (r ? r.caster : -1)),
     forceField: forceField.slice(0, numPlayers),
+    skipTurns: skipTurns.slice(0, numPlayers),
+    contaminated: world.contaminated.length,
+    fallout: fallout ? { x: Math.round(fallout.pos.x), z: Math.round(fallout.pos.z), hit: [...fallout.hit] } : null,
+    plantedTypes: Array.from({ length: numPlayers }, (_, s) => planted[s].map(p => p.type)),
   }),
   world,
   newMatch: fullReset,
@@ -3357,4 +3471,13 @@ window.__sv = {
   overlord: () => overlord.slice(0, numPlayers),
   team: (s: number) => teamRoot(s),
   aiSurrenderCheck: (s: number) => aiMaybeSurrender(s),
+  giveProducer(seat: number, type: number, cx: number, cz: number) {
+    const spec = PRODUCER_SPECS[type]
+    planted[seat].push({ cx, cz, type, baseYield: spec.baseYield, age: 3 })
+    world.buildProducer(cx, cz, seat, type, spec.baseYield, 3)
+  },
+  meltdownAt: (owner: number, cx: number, cz: number) => meltdown(owner, cx, cz),
+  moveFallout(x: number, z: number) {
+    if (fallout) { fallout.pos.x = x; fallout.pos.z = z }
+  },
 }

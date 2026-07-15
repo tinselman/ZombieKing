@@ -183,6 +183,7 @@ export class World {
   // Ghost Tower: which side's fort voxels to skip rendering (invisible), or -1. The
   // cells stay solid (integrity/collisions intact) — only their instances are hidden.
   hiddenForts: boolean[] = [false, false, false, false] // Ghost Tower: skip rendering these seats' forts
+  contaminated: { cx: number; cz: number; r: number }[] = [] // radioactive meltdown zones — no building
   mesh: THREE.InstancedMesh
   debrisMesh: THREE.InstancedMesh
   debris: Debris[] = []
@@ -296,6 +297,7 @@ export class World {
     this.producers = []
     this.raidedCells = null
     this.hiddenForts = [false, false, false, false]
+    this.contaminated = [] // a fresh battlefield each round has no fallout craters
     this.colorSeed = seed & 0xffff
     const rand = mulberry32(seed)
 
@@ -502,6 +504,8 @@ export class World {
     // A Nuclear Power Plant needs water for cooling: at least one water cell must border its
     // footprint (the ring one cell out on each side).
     if (type === PLANT && !this.waterAdjacent(cx, cz, half)) return false
+    // Nothing grows on radioactive ground left by a meltdown.
+    for (const z of this.contaminated) if (Math.hypot(cx - z.cx, cz - z.cz) <= z.r + half) return false
     return true
   }
 
