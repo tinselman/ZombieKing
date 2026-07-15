@@ -318,6 +318,10 @@ const skipNext = [false, false, false, false]
 // Extra turns a seat must sit out (nuclear meltdown on its own reactor, or a fallout cloud
 // drifting over it) — counts DOWN one per would-be turn, on top of the one-shot Skip card.
 const skipTurns = [0, 0, 0, 0]
+// Resource-wheel round states: a Blockade denies a seat all wheel income for a round; a Tribute
+// makes a seat immune to attack for a round. Both reset at each round start.
+const resourceBlocked = [false, false, false, false]
+const attackProtected = [false, false, false, false]
 // A drifting radioactive cloud from a meltdown (null when none is loose). It blows in a
 // random direction; any OTHER seat it passes over loses its crops and misses two turns.
 let fallout: { pos: THREE.Vector3; vx: number; vz: number; life: number; mesh: THREE.Mesh; hit: Set<number> } | null = null
@@ -369,8 +373,9 @@ function playCard(side: number, idx: number): void {
     applyCard(side, id, target)
     refreshResources() // steal/zombie move producers between sides
   }
-  // In a 3–4 player game a human chooses which opponent a hostile card hits (never a teammate).
-  const foes = livingSeats().filter(s => !sameTeam(s, side))
+  // In a 3–4 player game a human chooses which opponent a hostile card hits (never a teammate or
+  // a Tribute-shielded country).
+  const foes = livingSeats().filter(s => !sameTeam(s, side) && !attackProtected[s])
   if (isHuman(side) && HOSTILE_CARDS.has(id) && foes.length > 1) {
     hud.showTargetPicker(
       `${cardDef(id).emoji} ${cardDef(id).name} — strike whom?`,
@@ -634,7 +639,7 @@ function stealRandomCard(winner: number, loser: number): string {
 // The default victim for a hostile card: the weakest living opponent (the sole opponent
 // in a 2-player game). Callers may override with an explicit target (human picker / AI).
 function defaultFoe(side: number): number {
-  const foes = livingSeats().filter(s => !sameTeam(s, side))
+  const foes = livingSeats().filter(s => !sameTeam(s, side) && !attackProtected[s])
   if (!foes.length) return (side + 1) % Math.max(2, numPlayers)
   foes.sort((a, b) => world.integrity(a) - world.integrity(b))
   return foes[0]
@@ -988,17 +993,16 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
       return // nothing gets through
     }
   }
-  // Loyal-alliance ceasefire (Bitter Truth): a shell reaching a TEAMMATE of the acting seat
-  // is turned aside at their walls — you cannot bombard your own side (nor they you).
-  if (bitterTruth) {
-    for (let a = 0; a < numPlayers; a++) {
-      if (a === turn || !alive[a] || !sameTeam(a, turn)) continue
-      const ft = world.forts[a]?.towers[0]
-      if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
-        spawnShieldBlock(ft.cx, ft.cz)
-        lastImpact.copy(at)
-        return
-      }
+  // Loyal-alliance ceasefire (Bitter Truth) + Tribute protection: a shell reaching a TEAMMATE of
+  // the acting seat, or a Tribute-shielded country, is turned aside at their walls.
+  for (let a = 0; a < numPlayers; a++) {
+    if (a === turn || !alive[a]) continue
+    if (!attackProtected[a] && !(bitterTruth && sameTeam(a, turn))) continue
+    const ft = world.forts[a]?.towers[0]
+    if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
+      spawnShieldBlock(ft.cx, ft.cz)
+      lastImpact.copy(at)
+      return
     }
   }
   world.carve(at.x, at.y, at.z, r)
@@ -2046,6 +2050,157 @@ function advanceTurn(): void {
   startTurn(turn) // fallback (shouldn't happen while >1 seat is alive)
 }
 
+// ---- Resource wheels — the income engine ----------------------------------------------
+// Two discs spun at the start of EVERY turn. Wheel A carries the four producers + Blockade;
+// Wheel B carries the four producers + two Tribute tiers. Whatever a wheel lands on, EVERY
+// owner of that resource is paid its income (doubled when both wheels match). Income comes from
+// nowhere else. Blockade lets the spinner deny one rival a round of income; Tribute (rare)
+// shields a chosen country from attack and makes everyone bow with a slice of their cash.
+type WheelSlice = number | 'blockade' | 'tribute8' | 'tribute4'
+const WHEEL_A: { s: WheelSlice; w: number }[] = [
+  { s: CROP, w: 22 }, { s: MINE, w: 22 }, { s: DERRICK, w: 22 }, { s: PLANT, w: 20 }, { s: 'blockade', w: 12 },
+]
+const WHEEL_B: { s: WheelSlice; w: number }[] = [
+  { s: CROP, w: 24 }, { s: MINE, w: 24 }, { s: DERRICK, w: 24 }, { s: PLANT, w: 22 }, { s: 'tribute8', w: 4 }, { s: 'tribute4', w: 1 },
+]
+function pickSlice(wheel: { s: WheelSlice; w: number }[]): WheelSlice {
+  const total = wheel.reduce((a, e) => a + e.w, 0)
+  let r = Math.random() * total
+  for (const e of wheel) { r -= e.w; if (r <= 0) return e.s }
+  return wheel[0].s
+}
+function sliceIcon(s: WheelSlice): string {
+  return s === 'blockade' ? '🚫' : s === 'tribute8' || s === 'tribute4' ? '👑' : s === CROP ? '🌾' : s === MINE ? '⛏️' : s === DERRICK ? '🛢️' : '☢️'
+}
+// A seat's live income from producers of one type (yield × integrity × maturity).
+function incomeFromType(s: number, type: number): number {
+  let sum = 0
+  for (const p of planted[s]) if (p.type === type) sum += p.baseYield * world.integrityAt(p.cx, p.cz) * maturity(p.type, p.age)
+  return Math.round(sum)
+}
+
+let wheelSpin: { roller: number; a: WheelSlice; b: WheelSlice; t: number; paid: boolean; done: () => void } | null = null
+const WHEEL_SPIN_T = 0.85 // seconds the discs blur before settling
+const WHEEL_HOLD_T = 1.75 // total seconds the overlay stays up
+
+let wheelForce: { a: WheelSlice; b: WheelSlice } | null = null // test hook: preset the next spin
+function spinWheels(roller: number, done: () => void): void {
+  phase = 'shop' // inert while the wheels are up
+  const a = wheelForce ? wheelForce.a : pickSlice(WHEEL_A)
+  const b = wheelForce ? wheelForce.b : pickSlice(WHEEL_B)
+  wheelForce = null
+  wheelSpin = { roller, a, b, t: 0, paid: false, done }
+  hud.setWheels(true, '🎰', '🎰', `${fortLabel(roller)} spins the resource wheels…`, true)
+}
+
+function updateWheels(dt: number): void {
+  const w = wheelSpin
+  if (!w) return
+  w.t += dt
+  if (w.t < WHEEL_SPIN_T) {
+    hud.setWheels(true, sliceIcon(WHEEL_A[Math.floor(Math.random() * WHEEL_A.length)].s), sliceIcon(WHEEL_B[Math.floor(Math.random() * WHEEL_B.length)].s), `${fortLabel(w.roller)} spins the resource wheels…`, true)
+  } else if (!w.paid) {
+    w.paid = true
+    payWheels(w.roller, w.a, w.b) // discs settle → pay every owner
+    hud.setWheels(true, sliceIcon(w.a), sliceIcon(w.b), wheelCaption(w.a, w.b), false)
+    sfx.tick()
+  } else if (w.t >= WHEEL_HOLD_T) {
+    const { roller, a, b, done } = w
+    wheelSpin = null
+    hud.setWheels(false)
+    runWheelSpecials(roller, a, b, done) // Blockade / Tribute (may prompt), then continue the turn
+  }
+}
+
+function wheelCaption(a: WheelSlice, b: WheelSlice): string {
+  if (typeof a === 'number' && a === b) return `DOUBLE ${PRODUCER_SPECS[a].name.toUpperCase()}!`
+  const label = (s: WheelSlice) => (typeof s === 'number' ? PRODUCER_SPECS[s].name : s === 'blockade' ? 'Blockade' : s === 'tribute4' ? 'Tribute ¼' : 'Tribute ⅛')
+  return `${label(a)}  +  ${label(b)}`
+}
+
+// Pay every owner of the shown resource(s); a matching pair pays double.
+function payWheels(roller: number, a: WheelSlice, b: WheelSlice): void {
+  const aRes = typeof a === 'number' ? a : -1
+  const bRes = typeof b === 'number' ? b : -1
+  const pay = (type: number, mult: number) => {
+    for (let s = 0; s < numPlayers; s++) {
+      if (!alive[s] || resourceBlocked[s]) continue
+      let inc = incomeFromType(s, type) * mult
+      if (s === roller) inc = Math.round(inc * incomeBoost[s]) // Bumper Crop doubles the spinner's take
+      if (inc <= 0) continue
+      const raid = armyRaidOf[s]
+      if (raid && !raid.done) { raid.done = true; money[raid.caster] += inc } // Army diverts the payout
+      else money[s] += inc
+    }
+  }
+  if (aRes >= 0 && aRes === bRes) pay(aRes, 2)
+  else { if (aRes >= 0) pay(aRes, 1); if (bRes >= 0) pay(bRes, 1) }
+  incomeBoost[roller] = 1
+  syncStatus()
+  if (isHuman(turn)) updateWeaponHud()
+}
+
+// Blockade / Tribute resolve in sequence (each may prompt the human roller), then `done`.
+function runWheelSpecials(roller: number, a: WheelSlice, b: WheelSlice, done: () => void): void {
+  const steps: ((next: () => void) => void)[] = []
+  if (a === 'blockade') steps.push(next => blockadeStep(roller, next))
+  if (b === 'tribute8') steps.push(next => tributeStep(roller, 8, next))
+  if (b === 'tribute4') steps.push(next => tributeStep(roller, 4, next))
+  const run = (i: number) => (i >= steps.length ? done() : steps[i](() => run(i + 1)))
+  run(0)
+}
+
+function blockadeStep(roller: number, next: () => void): void {
+  const foes = livingSeats().filter(s => s !== roller)
+  if (!foes.length) return void next()
+  const apply = (t: number) => {
+    resourceBlocked[t] = true
+    refreshForts()
+    hud.banner('🚫 BLOCKADE', `${fortLabel(t)} is cut off — no resource income for a round!`, 2800)
+    next()
+  }
+  if (isHuman(roller)) hud.showTargetPicker('🚫 Blockade — starve whom of income?', foes.map(s => ({ seat: s, label: fortLabel(s) })), apply)
+  else apply(aiPickBlockade(roller))
+}
+
+function tributeStep(roller: number, tier: number, next: () => void): void {
+  const others = livingSeats().filter(s => s !== roller) // must choose ANOTHER country
+  if (!others.length) return void next()
+  const apply = (t: number) => {
+    attackProtected[t] = true
+    let pot = 0
+    for (let s = 0; s < numPlayers; s++) {
+      if (!alive[s] || s === t) continue
+      const pay = Math.floor(money[s] / tier)
+      money[s] -= pay
+      pot += pay
+    }
+    money[t] += pot
+    refreshForts()
+    syncStatus()
+    hud.banner(`👑 TRIBUTE ·  1/${tier}`, `all bow to ${fortLabel(t)} — $${pot.toLocaleString()} paid, and it can't be attacked for a round!`, 3600)
+    next()
+  }
+  if (isHuman(roller)) hud.showTargetPicker(`👑 Tribute (1/${tier} from everyone) — crown & shield whom?`, others.map(s => ({ seat: s, label: fortLabel(s) })), apply)
+  else apply(aiPickTribute(roller))
+}
+
+// AI blockades the richest/strongest non-teammate; tributes a teammate (enrich + shield an ally)
+// if it has one, else it's forced to crown the poorest rival (least harmful).
+function aiPickBlockade(roller: number): number {
+  const foes = livingSeats().filter(s => !sameTeam(s, roller))
+  if (!foes.length) return livingSeats().filter(s => s !== roller)[0]
+  foes.sort((a, b) => money[b] + world.integrity(b) * 5000 - (money[a] + world.integrity(a) * 5000))
+  return foes[0]
+}
+function aiPickTribute(roller: number): number {
+  const mates = livingSeats().filter(s => s !== roller && sameTeam(s, roller))
+  if (mates.length) return mates[0]
+  const foes = livingSeats().filter(s => s !== roller)
+  foes.sort((a, b) => money[a] - money[b]) // enrich the poorest rival — least harmful
+  return foes[0]
+}
+
 function startTurn(s: number): void {
   // Hotseat: gate every human turn behind a "pass the keyboard" screen so the other
   // player's leftover keypresses can't act, and it's unmistakable whose turn it is.
@@ -2091,40 +2246,24 @@ function reallyStartTurn(s: number): void {
     if (r && r.done && s !== v) armyRaidOf[v] = null
   }
   if (!livingSeats().some(v => armyRaidOf[v])) world.clearRaided()
-  // Age this side's producers a turn (crops mature), then produce — scaled by how
-  // intact each is (integrity) and how mature (crops ramp in over a couple turns).
+  // Age this side's producers a turn (crops mature). Income no longer trickles in per-turn —
+  // it comes ONLY from the resource wheels, spun now; the rest of the turn runs once they land.
   for (const p of planted[s]) p.age++
-  // Bumper Crop doubles this one payout, then the boost is spent.
-  const produced = Math.round(sideIncome(s) * incomeBoost[s])
-  incomeBoost[s] = 1
-  // Army raid: the victim's whole payout is carried off to the raider instead.
-  let received = produced
-  const raid = armyRaidOf[s]
-  if (raid && !raid.done) {
-    raid.done = true
-    received = 0
-    if (produced > 0) {
-      money[raid.caster] += produced
-      hud.msg(`${capName(raid.caster)}'s army carries off ${nameOf(s)}'s whole harvest — $${produced.toLocaleString()}`)
-    }
-  }
-  if (received > 0) money[s] += received
-  // Modest AI catch-up: the computer doesn't optimise its spending like a human, so a
-  // small per-turn subsidy keeps it able to field weapons, producers AND stratagems.
+  spinWheels(s, () => afterTurnSpin(s))
+}
+
+// The wheels have finished paying out: give the AI its catch-up subsidy, then open the market
+// (human) or run the computer's turn (AI).
+function afterTurnSpin(s: number): void {
   if (!isHuman(s)) money[s] += 400 // modest per-turn subsidy so each AI seat can keep up
   if (isHuman(s)) {
     const st = sides[s]
-    if ((st.arsenal.get(WEAPONS[st.wsel].id) ?? 0) <= 0) {
-      st.wsel = 0 // out of the fancy stuff — back to missiles
-    }
+    if ((st.arsenal.get(WEAPONS[st.wsel].id) ?? 0) <= 0) st.wsel = 0 // out of the fancy stuff
     updateWeaponHud()
     syncStatus()
-    lastIncome[s] = received // surfaced in the market (the msg here is hidden by the overlay)
-    if (received > 0) hud.msg(`income +$${received.toLocaleString()}`)
     refreshHand()
     refreshResources()
-    // Every turn opens the market (buy cards + resources; weapons only at round
-    // start). Leaving it runs castle placement (round start) then resource placement.
+    // Every turn opens the market (buy cards + resources; weapons only at round start).
     openMarket(roundStartPending[s])
     roundStartPending[s] = false
   } else {
@@ -2133,8 +2272,6 @@ function reallyStartTurn(s: number): void {
     if (numPlayers > 2) aiDiplomacy(s) // repay gifts / keep allies / open overtures, before cards
     aiCards(s) // buy/play a stratagem first (so producers don't eat the card budget)
     aiPlant(s) // then grow the economy with what's left
-    // A played Flying Toaster (fly) or Full Moon (ghosts) takes over the pipeline and
-    // resumes the AI's shot itself; don't stomp it with aiThink here.
     if (phase !== 'fly') {
       phase = 'aiThink'
       aiT = 0
@@ -2150,8 +2287,8 @@ function reallyStartTurn(s: number): void {
 // ties broken by nearest to this seat's cannon. Used for both its shot and hostile cards.
 function aiTarget(s: number): number {
   const living = livingSeats()
-  // Teammates (surrendered vassals / masters) are never targets — that bond is unbreakable.
-  const foes = living.filter(o => o !== s && !sameTeam(o, s))
+  // Teammates (surrendered vassals / masters) are never targets, nor is a Tribute-shielded seat.
+  const foes = living.filter(o => o !== s && !sameTeam(o, s) && !attackProtected[o])
   if (!foes.length) return -1
   // Trade-allies are spared too — unless every remaining foe is an ally, or only two seats are
   // left (last castle standing forces the final betrayal). Attacking then breaks the pact.
@@ -2763,10 +2900,13 @@ function setupRoundWorld(): void {
   // Card effects don't carry between rounds: clear ghost/field/raid, restore cannons.
   ghostReposition = false
   if (fallout) { scene.remove(fallout.mesh); fallout = null } // no cloud carries into a new round
+  if (wheelSpin) { wheelSpin = null; hud.setWheels(false) }
   for (let s = 0; s < 4; s++) {
     ghostDecoyOf[s] = null
     forceField[s] = false
     skipTurns[s] = 0
+    resourceBlocked[s] = false // blockade / tribute effects are round-long
+    attackProtected[s] = false
     armyRaidOf[s] = null
     world.hiddenForts[s] = false
     // Stale trade obligations don't carry between rounds, but TRUST/alliances do (they build
@@ -3141,6 +3281,7 @@ function tick(now: number): void {
   updatePlant(dt)
   updateCastle(dt)
   updateFallout(dt)
+  updateWheels(dt)
   updateAi(dt)
 
   acc += dt
@@ -3378,6 +3519,9 @@ declare global {
       giveProducer: (seat: number, type: number, cx: number, cz: number) => void
       meltdownAt: (owner: number, cx: number, cz: number) => void
       moveFallout: (x: number, z: number) => void
+      forceWheel: (a: number | string, b: number | string) => void
+      testWheel: (roller: number, a: number | string, b: number | string) => void
+      wheelState: () => { blocked: boolean[]; protected: boolean[]; spinning: boolean }
     }
   }
 }
@@ -3515,4 +3659,13 @@ window.__sv = {
   moveFallout(x: number, z: number) {
     if (fallout) { fallout.pos.x = x; fallout.pos.z = z }
   },
+  forceWheel(a: number | string, b: number | string) {
+    wheelForce = { a: a as WheelSlice, b: b as WheelSlice }
+  },
+  // Resolve a spin synchronously (payout + any Blockade/Tribute) for an AI roller — test only.
+  testWheel(roller: number, a: number | string, b: number | string) {
+    payWheels(roller, a as WheelSlice, b as WheelSlice)
+    runWheelSpecials(roller, a as WheelSlice, b as WheelSlice, () => {})
+  },
+  wheelState: () => ({ blocked: resourceBlocked.slice(0, numPlayers), protected: attackProtected.slice(0, numPlayers), spinning: !!wheelSpin }),
 }

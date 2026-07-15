@@ -47,6 +47,14 @@ const CSS = `
 #sc-worldBtn.on { background: #2c3138; color: #fff; }
 #sc-side .tag { position: absolute; top: -1px; left: -1px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #7a838d; background: rgba(255,255,255,0.85); border: 1px solid #d8dde3; border-radius: 9px 0 8px 0; padding: 2px 8px; }
 #sc-banner { position: absolute; top: 22%; left: 0; right: 0; text-align: center; font-size: 40px; font-weight: 800; letter-spacing: 0.06em; color: #2c3138; text-shadow: 0 2px 12px rgba(255,255,255,0.9); opacity: 0; transition: opacity 0.35s ease; }
+/* Resource wheels — two bright discs that spin at the start of every turn. */
+#sc-wheels { position: absolute; top: 16%; left: 0; right: 0; display: none; flex-direction: column; align-items: center; gap: 16px; pointer-events: none; z-index: 10; }
+#sc-wheels .wcap { font-size: 17px; font-weight: 800; letter-spacing: 0.05em; color: #16181b; background: rgba(255,255,255,0.9); padding: 7px 18px; border-radius: 999px; box-shadow: 0 4px 16px rgba(40,50,60,0.14); text-align: center; }
+#sc-wheels .wrow { display: flex; gap: 34px; }
+#sc-wheels .wheel { width: 128px; height: 128px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 60px; background: conic-gradient(#ff5a5a,#ffd24a,#4ad07a,#4aa3ff,#c06aff,#ff5a5a); box-shadow: 0 8px 28px rgba(40,50,60,0.28), inset 0 0 0 7px #fff, inset 0 0 0 9px #2c3138; }
+#sc-wheels .wheel.spin { animation: sc-wheelspin 0.5s linear infinite; }
+#sc-wheels .wheel span { display: flex; align-items: center; justify-content: center; width: 84px; height: 84px; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px rgba(40,50,60,0.2); }
+@keyframes sc-wheelspin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
 #sc-banner small { display: block; font-size: 15px; font-weight: 500; letter-spacing: 0.1em; color: #7a838d; margin-top: 6px; }
 /* Round-over celebration banner, shown over the wreckage when a castle bursts. */
 #sc-roundover { position: absolute; top: 15%; left: 0; right: 0; text-align: center; opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
@@ -257,6 +265,7 @@ export function createHud(
     <div id="sc-side"><span class="tag">side view</span></div>
     <button id="sc-worldBtn">World View</button>
     <div id="sc-banner"></div>
+    <div id="sc-wheels"><div class="wcap"></div><div class="wrow"><div class="wheel" id="sc-wheelA"><span></span></div><div class="wheel" id="sc-wheelB"><span></span></div></div></div>
     <div id="sc-roundover"></div>
     <div id="sc-msg"></div>
     <div id="sc-skipped"><span>You've been SKIPPED!</span></div>
@@ -358,6 +367,12 @@ export function createHud(
   const cardPlay = q<HTMLButtonElement>('#sc-cardPlay')
   const cardClose = q<HTMLButtonElement>('#sc-cardClose')
   const banner = q<HTMLElement>('#sc-banner')
+  const wheelsEl = q<HTMLElement>('#sc-wheels')
+  const wheelCap = q<HTMLElement>('#sc-wheels .wcap')
+  const wheelAIcon = q<HTMLElement>('#sc-wheelA span')
+  const wheelBIcon = q<HTMLElement>('#sc-wheelB span')
+  const wheelADisc = q<HTMLElement>('#sc-wheelA')
+  const wheelBDisc = q<HTMLElement>('#sc-wheelB')
   const roundoverEl = q<HTMLElement>('#sc-roundover')
   let roundoverTimer = 0
   const msgEl = q<HTMLElement>('#sc-msg')
@@ -537,6 +552,17 @@ export function createHud(
       msgEl.style.opacity = '1'
       clearTimeout(msgTimer)
       msgTimer = window.setTimeout(() => (msgEl.style.opacity = '0'), ms)
+    },
+    // The resource-wheels overlay (driven each frame from the game loop). `spinning` blurs the
+    // discs; caption + icons show the current/landed faces.
+    setWheels(show: boolean, iconA = '', iconB = '', caption = '', spinning = false) {
+      wheelsEl.style.display = show ? 'flex' : 'none'
+      if (!show) return
+      wheelAIcon.textContent = iconA
+      wheelBIcon.textContent = iconB
+      wheelCap.textContent = caption
+      wheelADisc.classList.toggle('spin', spinning)
+      wheelBDisc.classList.toggle('spin', spinning)
     },
     // Big two-line round-over banner. `winner`: 0 (red) / 1 (blue) / -1 (neutral draw).
     roundOver(line1: string, line2: string, winner: number, ms = 4200) {
