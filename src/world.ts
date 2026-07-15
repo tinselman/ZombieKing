@@ -17,7 +17,7 @@ export const BARRICADE = 5 // bought defensive berm in front of a fort — soaks
 export const CROP = 6 // income-producer (crop bed) planted on a side's land
 export const MINE = 7 // income-producer (ore mine) — smaller, richer than a crop
 export const DERRICK = 8 // income-producer (oil derrick) — smallest, richest
-export const CEMETERY = 9 // no income — launches ghosts when its owner plays Full Moon
+export const PLANT = 9 // Nuclear Power Plant — richest producer; must sit beside water; melts down if destroyed
 export const FORT_C = 10 // player 3 fort voxel (3–4 player free-for-all)
 export const FORT_D = 11 // player 4 fort voxel
 
@@ -69,7 +69,9 @@ export const PRODUCER_SPECS: Record<number, { half: number; tall: number; baseYi
   [CROP]: { half: 4, tall: 2, baseYield: 150, cost: 800, name: 'Crop farm', matures: true },
   [MINE]: { half: 2, tall: 3, baseYield: 320, cost: 1500, name: 'Ore mine', matures: false },
   [DERRICK]: { half: 1, tall: 6, baseYield: 560, cost: 3000, name: 'Oil derrick', matures: false },
-  [CEMETERY]: { half: 3, tall: 2, baseYield: 0, cost: 1000, name: 'Cemetery', matures: false },
+  // Nuclear Power Plant: premium income (~$6,000/turn, best-in-game per dollar) for its $20,000
+  // cost — but it must be built beside water, and a meltdown if destroyed is a catastrophe.
+  [PLANT]: { half: 4, tall: 8, baseYield: 6000, cost: 20000, name: 'Nuclear Power Plant', matures: false },
 }
 
 export type Vec3 = { x: number; y: number; z: number }
@@ -494,10 +496,22 @@ export class World {
         const sy = this.surfaceY(x, z)
         if (sy < 0) return false
         const top = this.cellAt(x, sy, z)
-        if (isFortCell(top) || top === BARRICADE || top === CROP || top === MINE || top === DERRICK || top === CEMETERY) return false
+        if (isFortCell(top) || top === BARRICADE || top === CROP || top === MINE || top === DERRICK || top === PLANT) return false
       }
     }
+    // A Nuclear Power Plant needs water for cooling: at least one water cell must border its
+    // footprint (the ring one cell out on each side).
+    if (type === PLANT && !this.waterAdjacent(cx, cz, half)) return false
     return true
+  }
+
+  // Is there open water immediately bordering the (2·half+1) footprint at (cx,cz)?
+  waterAdjacent(cx: number, cz: number, half: number): boolean {
+    for (let d = -half - 1; d <= half + 1; d++) {
+      if (this.isWaterTop(cx + d, cz - half - 1) || this.isWaterTop(cx + d, cz + half + 1)) return true
+      if (this.isWaterTop(cx - half - 1, cz + d) || this.isWaterTop(cx + half + 1, cz + d)) return true
+    }
+    return false
   }
 
   // Raise one raised bed of producer voxels (footprint & height per type) on the
@@ -1410,10 +1424,10 @@ export class World {
             // Oil derrick: near-black industrial with a warm-brown cast.
             const v = 0.2 + h * 0.08
             col.setRGB(v * 1.15, v * 0.95, v * 0.8)
-          } else if (c === CEMETERY) {
-            // Cemetery: cold desaturated purple-gray, like weathered headstones.
-            const v = 0.4 + h * 0.12
-            col.setRGB(v * 0.86, v * 0.8, v * 0.98)
+          } else if (c === PLANT) {
+            // Nuclear Power Plant: pale concrete with a sickly radioactive-green glow.
+            const v = 0.55 + h * 0.12
+            col.setRGB(v * 0.72, Math.min(1, v + 0.22), v * 0.5)
           } else {
             // Fallback (all known cells are handled above).
             const v = 0.7 + h * 0.1

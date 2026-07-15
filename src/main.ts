@@ -1,6 +1,6 @@
 // Scorched Earth 3D — main entry: scene, game loop, turns, camera, input.
 import * as THREE from 'three'
-import { World, GX, GZ, GRAVITY, WIND_ACCEL, CROP, MINE, DERRICK, CEMETERY, PRODUCER_SPECS, type Wind, type Fortifications } from './world'
+import { World, GX, GZ, GRAVITY, WIND_ACCEL, CROP, MINE, DERRICK, PLANT, PRODUCER_SPECS, type Wind, type Fortifications } from './world'
 import { WEAPONS, FUNKY_CHILD, newArsenal, speedOf, type WeaponDef } from './weapons'
 import { planShot } from './ai'
 import { createHud } from './hud'
@@ -147,7 +147,7 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop' | 'ghosts'
+type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
 
 // Match economy: best-of-ROUNDS. Income comes from producers (see sideIncome);
 // winning a round plunders half the loser's cash + one card (not per-hit pay).
@@ -259,19 +259,18 @@ function refreshForts(): void {
 // A weighted deck: common cards (Skip, Bumper Crop) come up far more often than the
 // rare power cards (Zombie King, Toaster). Buy as many as you can afford each turn,
 // hold a hand across turns, and play cards before your shot.
-type CardId = 'skip' | 'bumper' | 'army' | 'ghost' | 'forcefield' | 'steal' | 'rebuild' | 'toaster' | 'zombie' | 'fullmoon' | 'money1' | 'money2' | 'money5'
+type CardId = 'skip' | 'bumper' | 'army' | 'ghost' | 'forcefield' | 'steal' | 'stealres' | 'rebuild' | 'toaster' | 'money1' | 'money2' | 'money5'
 type CardDef = { id: CardId; name: string; blurb: string; weight: number; impl: boolean; emoji: string }
 const DECK: CardDef[] = [
   { id: 'skip', name: 'Skip Player', weight: 18, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
   { id: 'bumper', name: 'Bumper Crop', weight: 28, impl: true, emoji: '🌾', blurb: 'A bounty harvest! Your next income payout from resources is doubled.' },
   { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: "An army overruns the enemy's resources — their producers glow pink and their ENTIRE next payout is delivered to you instead. They collect nothing." },
   { id: 'ghost', name: 'Ghost Tower', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
-  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks you. The next hostile act — a shell on your castle, a toaster, an army, a theft, or the Zombie King himself — is blocked completely, then the field is spent.' },
+  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks you. The next hostile act — a shell on your castle, a toaster, an army, or a theft — is blocked completely, then the field is spent.' },
   { id: 'steal', name: 'Steal', weight: 12, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — it's ripped off the map and added to YOUR resources, to place anywhere you like." },
+  { id: 'stealres', name: 'Steal Resources!', weight: 6, impl: true, emoji: '🏴‍☠️', blurb: 'A world-wide heist — the single richest producer from EVERY opponent is ripped off the map at once and added to YOUR resources to re-place.' },
   { id: 'rebuild', name: 'Rebuild', weight: 11, impl: true, emoji: '🧱', blurb: "Repair your castle voxel by voxel — every missing block refills using bricks ripped from the enemy tower, spending up to half their tower. Never builds past the turret top." },
   { id: 'toaster', name: 'Flying Toaster', weight: 6, impl: true, emoji: '🍞', blurb: 'A winged toaster homes onto the enemy castle and strikes with the power of a nuke — a free bonus attack on top of your shot.' },
-  { id: 'zombie', name: 'Zombie King', weight: 4, impl: true, emoji: '🧟', blurb: 'The Zombie King AWAKENS — the enemy is warned. At the start of your NEXT turn he stomps the field and seizes HALF their producers as your own placeable resources. Only a Force Field stops him.' },
-  { id: 'fullmoon', name: 'Full Moon', weight: 7, impl: true, emoji: '🌕', blurb: 'Night falls and every cemetery you own erupts with ghosts that fly at the enemy tower — 1 cemetery wrecks a quarter of it, 4 raze it entirely. A Force Field, or the enemy shining a Flashlight, sends them home.' },
   { id: 'money1', name: 'Money: $2,000', weight: 6, impl: true, emoji: '💵', blurb: 'Found money. Play to pocket $2,000.' },
   { id: 'money2', name: 'Money: $3,500', weight: 4, impl: true, emoji: '💰', blurb: 'A fat purse. Play to pocket $3,500.' },
   { id: 'money5', name: 'Money: $6,000', weight: 2, impl: true, emoji: '🤑', blurb: "A king's ransom. Play to pocket $6,000." },
@@ -282,8 +281,6 @@ const hand: CardId[][] = [[], [], [], []] // cards each seat is holding
 // that seat's real tower is hidden/moved (null = not ghosted). In hotseat a ghosted tower
 // is hidden only during OTHER seats' turns (see reallyStartTurn).
 const ghostDecoyOf: ({ cx: number; cz: number } | null)[] = [null, null, null, null]
-// Zombie King, per CASTER: the seat they'll stomp at the start of their next turn (-1 none).
-const zombieTarget = [-1, -1, -1, -1]
 // Army raid, per VICTIM: who raided them ({caster,done}) — their next payout goes to caster.
 const armyRaidOf: ({ caster: number; done: boolean } | null)[] = [null, null, null, null]
 // Diplomacy (3+ players). trust[a][b] = how much seat a trusts b: a reciprocated trade lifts
@@ -313,11 +310,6 @@ function sameTeam(a: number, b: number): boolean {
 function teamSize(s: number): number {
   return livingSeats().filter(o => sameTeam(o, s)).length
 }
-// Full Moon ghost strike in progress: how the caster's turn resumes once the ghosts
-// have flown home, plus the defender's live flashlight-defence window.
-let ghostResume: 'casterAim' | 'aiThink' | null = null
-let flashActive = false // the defender's flashlight beam is currently sweeping
-let flashSweep = 0 // beam heading (rad), swept with the arrow keys during defence
 // Force Field: per-seat active (as-yet-unhit) shield. Bumper Crop: ×2 on the seat's NEXT
 // income payout. Skip Player: the seat's next turn is skipped.
 const forceField = [false, false, false, false]
@@ -354,15 +346,14 @@ function buyCard(side: number): void {
   }
 }
 
-// Cards that strike a chosen opponent (vs. self-buff/economy cards which don't).
-const HOSTILE_CARDS = new Set<CardId>(['skip', 'army', 'steal', 'rebuild', 'toaster', 'zombie', 'fullmoon'])
+// Cards that strike a CHOSEN opponent (vs. self-buff/economy cards, or Steal Resources! which
+// hits every opponent at once — neither needs the target picker).
+const HOSTILE_CARDS = new Set<CardId>(['skip', 'army', 'steal', 'rebuild', 'toaster'])
 
 function playCard(side: number, idx: number): void {
   const id = hand[side][idx]
   if (!id) return
   if (isHuman(side) && phase !== 'aim' && phase !== 'plant') return void hud.msg('play cards before firing')
-  // Full Moon does nothing without a cemetery to raise — keep it in hand.
-  if (id === 'fullmoon' && cemeteriesOf(side) === 0) return void (isHuman(side) && hud.msg('you have no cemeteries to awaken'))
   const finish = (target?: number) => {
     hand[side].splice(idx, 1)
     if (isHuman(side)) {
@@ -646,11 +637,10 @@ function defaultFoe(side: number): number {
 function applyCard(side: number, id: CardId, target = defaultFoe(side)): void {
   const foe = target
   if (id === 'steal') cardSteal(side, foe)
+  else if (id === 'stealres') cardStealResources(side)
   else if (id === 'army') cardArmy(side, foe)
   else if (id === 'toaster') cardToaster(side, foe)
-  else if (id === 'zombie') cardZombie(side, foe)
   else if (id === 'ghost') cardGhost(side)
-  else if (id === 'fullmoon') cardFullMoon(side, foe)
   else if (id === 'bumper') cardBumper(side)
   else if (id === 'skip') cardSkip(side, foe)
   else if (id === 'forcefield') cardForcefield(side)
@@ -735,8 +725,7 @@ function spawnVoxelFlight(from: THREE.Vector3[] | { x: number; y: number; z: num
 // Steal: the enemy's richest producer is ripped off the map and lands in YOUR
 // unplaced-resources list — place it anywhere you like on your turns.
 function cardSteal(side: number, foe: number): void {
-  // Only income producers can be stolen — cemeteries (no yield) are ignored.
-  const income = planted[foe].filter(p => p.type !== CEMETERY)
+  const income = planted[foe]
   if (!income.length) return void (isHuman(side) && hud.msg(`${nameOf(foe)} has nothing to steal`))
   if (shieldBlocks(foe)) return void hud.msg('the force field repels the thief!')
   let richest = income[0]
@@ -783,177 +772,24 @@ function cardToaster(side: number, foe: number): void {
   hud.msg(`${capName(side)}'s flying toaster is inbound!`)
 }
 
-// Zombie King, part 1: playing the card only AWAKENS him — the defender is warned
-// loudly and has one full turn to raise a Force Field before the stomp.
-function cardZombie(side: number, foe: number): void {
-  if (zombieTarget[side] >= 0) return void (isHuman(side) && hud.msg('your Zombie King is already awake'))
-  zombieTarget[side] = foe
-  sfx.rumble()
-  hud.banner('THE ZOMBIE KING HAS AWAKENED', `he stomps ${nameOf(foe)}'s lands next turn — only a Force Field can stop him`, 3400)
-}
-
-// Zombie King, part 2: at the start of the caster's next turn he stomps the field,
-// seizing HALF the victim's producers (richest first) into the caster's Resources
-// list to re-place anywhere — unless a Force Field eats the stomp.
-function resolveZombieStomp(caster: number): void {
-  const foe = zombieTarget[caster]
-  zombieTarget[caster] = -1
-  if (foe < 0 || !alive[foe]) return // target already eliminated
-  if (shieldBlocks(foe)) return void hud.msg('the force field stops the Zombie King cold!')
-  const foeProd = planted[foe]
-  // Seize only income producers (cemeteries have no yield to steal).
-  const incomeIdx = foeProd.map((_, i) => i).filter(i => foeProd[i].type !== CEMETERY)
-  if (!incomeIdx.length) return void hud.msg('the Zombie King stomps… and finds nothing to seize')
-  incomeIdx.sort((a, b) => foeProd[b].baseYield - foeProd[a].baseYield)
-  const takeIdx = incomeIdx.slice(0, Math.ceil(incomeIdx.length / 2)).sort((a, b) => b - a) // descending → safe splice
-  let atX = world.forts[foe]?.towers[0]?.cx ?? GX / 2
-  let atZ = GZ / 2
-  for (const i of takeIdx) {
-    const p = foeProd.splice(i, 1)[0]
+// Steal Resources!: a world-wide heist — the single richest producer of EVERY opponent is
+// ripped off the map at once and dropped into the caster's unplaced-resources list. A foe's
+// Force Field saves theirs.
+function cardStealResources(side: number): void {
+  const foes = livingSeats().filter(s => !sameTeam(s, side))
+  let taken = 0
+  for (const foe of foes) {
+    if (shieldBlocks(foe) || !planted[foe].length) continue
+    let richest = planted[foe][0]
+    for (const p of planted[foe]) if (p.baseYield > richest.baseYield) richest = p
+    const p = planted[foe].splice(planted[foe].indexOf(richest), 1)[0]
     world.removeProducer(p.cx, p.cz)
-    pendingResources[caster].push(p.type)
-    atX = p.cx
-    atZ = p.cz
+    pendingResources[side].push(p.type)
+    taken++
   }
-  spawnZombieKing(caster, atX, atZ)
-  if (isHuman(caster)) refreshResources()
-  hud.msg(`${capName(caster)}'s Zombie King seized ${takeIdx.length} producers — re-place them from the Resources list`)
-}
-
-// ---- Full Moon: cemeteries launch ghosts at the enemy tower --------------------
-function cemeteriesOf(side: number): number {
-  return planted[side].filter(p => p.type === CEMETERY).length
-}
-
-const ghostGeo = new THREE.SphereGeometry(1.6, 10, 8)
-const ghostMat = new THREE.MeshLambertMaterial({ color: 0xdff2ff, emissive: 0xaee0ff, emissiveIntensity: 0.9, transparent: true, opacity: 0.82 })
-let flashBeam: THREE.SpotLight | null = null
-let flashBeamTarget: THREE.Object3D | null = null
-
-// Full Moon: night falls and every cemetery the caster owns erupts with ghosts that
-// swarm the enemy tower. Damage scales with cemetery count (1/4 each, 4 = total).
-// Force Field auto-repels; a human defender can flash them back; the AI reflexes a
-// flashlight if it owns one. Handled over the 'ghosts' phase (see updateTasks/tick).
-function cardFullMoon(side: number, foe: number): void {
-  const cems = planted[side].filter(p => p.type === CEMETERY)
-  if (!cems.length) return
-  setNight(true)
-  const frac = Math.min(4, cems.length) / 4
-  const ft = world.forts[foe]?.towers[0]
-  const tx = ft ? ft.cx : foe === 0 ? GX / 4 : (3 * GX) / 4
-  const tz = ft ? ft.cz : GZ / 2
-  const target = new THREE.Vector3(tx, world.surfaceY(tx, tz) + 15, tz)
-  const ghosts: { mesh: THREE.Mesh; home: THREE.Vector3; from?: THREE.Vector3 }[] = []
-  for (const c of cems) {
-    const hy = world.surfaceY(c.cx, c.cz) + 3
-    for (let k = 0; k < 5; k++) {
-      const m = new THREE.Mesh(ghostGeo, ghostMat)
-      const home = new THREE.Vector3(c.cx + (Math.random() - 0.5) * 5, hy, c.cz + (Math.random() - 0.5) * 5)
-      m.position.copy(home)
-      scene.add(m)
-      ghosts.push({ mesh: m, home })
-    }
-  }
-  const g: Extract<Task, { kind: 'ghosts' }> = { kind: 'ghosts', ghosts, target, caster: side, defender: foe, frac, state: 'out', prog: 0, repelled: false, damaged: false, t: 0 }
-  tasks.push(g)
-  phase = 'ghosts'
-  hud.showCards(false)
-  ghostResume = isHuman(side) ? 'casterAim' : 'aiThink'
-  flashActive = false
-  flashSweep = foe === 0 ? 0 : Math.PI
-  sfx.rumble()
-  // Immediate counters: Force Field always eats it; the AI defender flashes on reflex.
-  if (forceField[foe]) {
-    forceField[foe] = false
-    g.repelled = true
-    if (ft) spawnShieldBlock(ft.cx, ft.cz)
-    hud.banner('🌕 FULL MOON', `${capName(side)}'s ghosts rise — ${nameOf(foe)}'s force field turns them back!`, 3200)
-  } else if (!isHuman(foe) && (sides[foe].arsenal.get('flashlight') ?? 0) > 0) {
-    sides[foe].arsenal.set('flashlight', (sides[foe].arsenal.get('flashlight') ?? 0) - 1)
-    g.repelled = true
-    hud.banner('🌕 FULL MOON', `${capName(side)}'s ghosts rise — ${nameOf(foe)} flashes them back!`, 3200)
-  } else if (isHuman(foe) && (sides[foe].arsenal.get('flashlight') ?? 0) > 0) {
-    updateWeaponHud() // show the defender's arsenal so they can grab the flashlight
-    hud.banner('🌕 FULL MOON — GHOSTS!', `${capName(foe)}: press F or click your FLASHLIGHT, sweep ← → ↑ ↓ to repel!`, 3600)
-  } else {
-    hud.banner('🌕 FULL MOON', `${capName(side)}'s ${cems.length} cemetery${cems.length > 1 ? 'ies' : ''} unleash the dead on ${nameOf(foe)}!`, 3200)
-  }
-}
-
-// The defender fires their flashlight: all ghosts flee home, the strike is cancelled,
-// one flashlight is spent, and a bright beam sweeps the night for the retreat.
-function activateFlashlight(defender: number): void {
-  const g = tasks.find(t => t.kind === 'ghosts') as Extract<Task, { kind: 'ghosts' }> | undefined
-  if (!g || g.state !== 'out' || g.repelled) return
-  if ((sides[defender].arsenal.get('flashlight') ?? 0) <= 0) return void hud.msg('no flashlight to shine')
-  sides[defender].arsenal.set('flashlight', (sides[defender].arsenal.get('flashlight') ?? 0) - 1)
-  g.repelled = true
-  for (const gh of g.ghosts) gh.from = gh.mesh.position.clone()
-  g.state = 'back'
-  g.prog = 0
-  flashActive = true
-  // A bright beam from the defender's tower to show the sweep.
-  const ft = world.forts[defender]?.towers[0]
-  if (ft && !flashBeam) {
-    const bx = ft.cx
-    const bz = ft.cz
-    const by = world.surfaceY(bx, bz) + 12
-    flashBeam = new THREE.SpotLight(0xfff2c0, 60, 220, Math.PI / 7, 0.5, 1.2)
-    flashBeam.position.set(bx, by, bz)
-    flashBeamTarget = new THREE.Object3D()
-    scene.add(flashBeamTarget)
-    flashBeam.target = flashBeamTarget
-    scene.add(flashBeam)
-  }
-  updateWeaponHud()
-  hud.msg('🔦 Flashlight! The ghosts flee home!')
-  sfx.pop()
-}
-
-// Ghosts reach the enemy tower: rip out `frac` of it. If that collapses it, the round
-// is won there and then; otherwise the ghosts turn for home.
-function applyGhostDamage(caster: number, defender: number, frac: number): void {
-  const removed = world.damageFortFraction(defender, frac, Math.random)
-  world.rebuild()
-  // Spooky poofs where the ghosts spirited the voxels away.
-  for (let k = 0; k < removed.length; k += 12) {
-    const c = removed[k]
-    spawnExplosion(new THREE.Vector3(c.x, c.y, c.z), 2.4, false)
-  }
-  refreshIntegrity()
-  const t = world.forts[defender]?.towers[0]
-  if (t) addShake(9, new THREE.Vector3(t.cx, t.baseY + 6, t.cz))
-  sfx.boom(6)
-  hud.msg(`${capName(caster)}'s ghosts tore into ${nameOf(defender)}'s tower!`)
-  // If the ghosts collapsed the defender's tower, run it through the elimination flow.
-  if (alive[defender] && world.integrity(defender) < COLLAPSE_AT) concludeRound([defender])
-}
-
-// Ghosts are home and the strike is over (no collapse) — day returns, the caster
-// resumes their turn to take their normal shot.
-function endGhostSequence(): void {
-  if (flashBeam) {
-    scene.remove(flashBeam)
-    if (flashBeamTarget) scene.remove(flashBeamTarget)
-    flashBeam = null
-    flashBeamTarget = null
-  }
-  flashActive = false
-  if (phase === 'end') return // a collapse already took the round over
-  setNight(false)
-  const resume = ghostResume
-  ghostResume = null
-  if (resume === 'aiThink') {
-    phase = 'aiThink'
-    aiT = 0
-    aiPlanned = null
-    hud.banner('ENEMY TURN')
-  } else {
-    phase = 'aim'
-    updateWeaponHud() // restore the caster's own arsenal in the HUD
-    hud.showCards(true)
-    hud.banner(twoPlayer ? `PLAYER ${turn + 1} — TAKE YOUR SHOT` : 'YOUR TURN', 'take your shot')
-  }
+  if (isHuman(side)) refreshResources()
+  syncStatus()
+  hud.msg(taken ? `${capName(side)} raided ${taken} producer${taken > 1 ? "s" : ""} from across the map — re-place them from your Resources list` : "nothing to steal — no one has producers")
 }
 
 // Ghost Tower. A HUMAN caster repositions their castle by hand; it stays visible to
@@ -1126,10 +962,8 @@ type Task =
   | { kind: 'napalm'; blobs: { x: number; z: number; life: number }[]; t: number }
   | { kind: 'toaster'; mesh: THREE.Mesh; pos: THREE.Vector3; target: THREE.Vector3; t: number }
   | { kind: 'army'; runners: THREE.Mesh[]; z0: number[]; x: number; dir: number; t: number }
-  | { kind: 'king'; mesh: THREE.Mesh; x: number; z: number; dir: number; t: number }
   | { kind: 'voxfly'; items: { mesh: THREE.Mesh; from: THREE.Vector3; to: THREE.Vector3 }[]; t: number; dur: number }
   | { kind: 'shield'; mesh: THREE.Mesh; t: number }
-  | { kind: 'ghosts'; ghosts: { mesh: THREE.Mesh; home: THREE.Vector3; from?: THREE.Vector3 }[]; target: THREE.Vector3; caster: number; defender: number; frac: number; state: 'out' | 'back'; prog: number; repelled: boolean; damaged: boolean; t: number }
 const tasks: Task[] = []
 // When true, the current fly→resolve pass is a played card (Flying Toaster), not a
 // normal shot: on resolve it hands the turn back to the shooter instead of advancing.
@@ -1361,17 +1195,6 @@ function updateTasks(dt: number): void {
         for (const r of t.runners) scene.remove(r)
         tasks.splice(i, 1)
       }
-    } else if (t.kind === 'king') {
-      // Lumber across the field with a heavy stomp; fade near the far edge.
-      t.x += t.dir * 16 * dt
-      const sy = world.surfaceY(Math.round(t.x), Math.round(t.z))
-      const stomp = Math.abs(Math.sin(t.t * 4)) * 3
-      t.mesh.position.set(t.x, (sy < 0 ? 0 : sy) + 8 + stomp, t.z)
-      t.mesh.rotation.y = t.dir > 0 ? 0 : Math.PI
-      if (t.t > 4 || t.x < 6 || t.x > GX - 6) {
-        scene.remove(t.mesh)
-        tasks.splice(i, 1)
-      }
     } else if (t.kind === 'voxfly') {
       // Rebuild card: arc each sampled voxel from its old cell to its new one.
       const u = Math.min(1, t.t / t.dur)
@@ -1394,44 +1217,6 @@ function updateTasks(dt: number): void {
       if (u >= 1) {
         scene.remove(t.mesh)
         tasks.splice(i, 1)
-      }
-    } else if (t.kind === 'ghosts') {
-      const OUT = 3.6 // seconds of outbound flight — the defender's reaction window
-      const BACK = 1.6
-      if (t.state === 'out') {
-        t.prog += dt / OUT
-        const p = Math.min(1, t.prog)
-        const e = p * p * (3 - 2 * p)
-        for (let k = 0; k < t.ghosts.length; k++) {
-          const g = t.ghosts[k]
-          g.mesh.position.lerpVectors(g.home, t.target, e)
-          g.mesh.position.y += Math.sin(t.prog * 6 + k) * 1.6 + (1 - e) * 8 // rise then swoop in
-        }
-        if (p >= 1) {
-          if (!t.damaged) {
-            t.damaged = true
-            if (!t.repelled) applyGhostDamage(t.caster, t.defender, t.frac)
-          }
-          if (phase === 'end') {
-            // The strike collapsed the tower — clear the ghosts and let 'end' take over.
-            for (const g of t.ghosts) scene.remove(g.mesh)
-            tasks.splice(i, 1)
-            continue
-          }
-          for (const g of t.ghosts) g.from = g.mesh.position.clone()
-          t.state = 'back'
-          t.prog = 0
-        }
-      } else {
-        t.prog += dt / BACK
-        const p = Math.min(1, t.prog)
-        const e = p * p * (3 - 2 * p)
-        for (const g of t.ghosts) g.mesh.position.lerpVectors(g.from ?? t.target, g.home, e)
-        if (p >= 1) {
-          for (const g of t.ghosts) scene.remove(g.mesh)
-          tasks.splice(i, 1)
-          endGhostSequence()
-        }
       }
     } else {
       let acted = false
@@ -1500,38 +1285,12 @@ function makeToasterMesh(): THREE.Mesh {
 
 // A giant zombie king: a hulking green body with a gold crown, spawned on the loser's
 // side; he stomps toward the winner's side dragging the plundered resources, then fades.
-const kingBodyGeo = new THREE.BoxGeometry(7, 14, 5)
-const kingBodyMat = new THREE.MeshLambertMaterial({ color: 0x4f7a3a, emissive: 0x152510, emissiveIntensity: 0.4 })
-const kingCrownGeo = new THREE.BoxGeometry(6, 2.4, 6)
-const kingCrownMat = new THREE.MeshLambertMaterial({ color: 0xe8c04a, emissive: 0x5a4410, emissiveIntensity: 0.5 })
-function spawnZombieKing(side: number, cx: number, cz: number): void {
-  const body = new THREE.Mesh(kingBodyGeo, kingBodyMat)
-  const crown = new THREE.Mesh(kingCrownGeo, kingCrownMat)
-  crown.position.y = 8
-  body.add(crown)
-  body.position.set(cx, world.surfaceY(cx, cz) + 8, cz)
-  scene.add(body)
-  tasks.push({ kind: 'king', mesh: body, x: cx, z: cz, dir: side === 0 ? -1 : 1, t: 0 })
-}
-
 // ---------------------------------------------------------------- explosion FX
 
 type Fx = { pts: THREE.Points; vel: Float32Array; age: number; life: number; mat: THREE.PointsMaterial }
 const fxs: Fx[] = []
 type Flash = { light: THREE.PointLight; age: number; life: number; base: number }
 const flashes: Flash[] = []
-
-// Night mode (Full Moon): a dark blue world so the defender's flashlight beam reads.
-let isNight = false
-function setNight(on: boolean): void {
-  if (isNight === on) return
-  isNight = on
-  const bg = on ? 0x0b1024 : 0xeef1f4
-  ;(scene.background as THREE.Color).setHex(bg)
-  ;(scene.fog as THREE.Fog).color.setHex(bg)
-  hemi.intensity = on ? 0.16 : 1.2
-  sun.intensity = on ? 0.2 : 1.7
-}
 
 function spawnExplosion(at: THREE.Vector3, r: number, fire: boolean): void {
   const n = Math.min(220, Math.floor(40 + r * 20))
@@ -1687,7 +1446,7 @@ let plantCZ = GZ / 2
 let plantType = CROP
 let plantGhost: THREE.Mesh | null = null
 let ghostForType = -1 // the type the ghost geometry is currently sized for
-const PRODUCER_TYPES = [CROP, MINE, DERRICK, CEMETERY]
+const PRODUCER_TYPES = [CROP, MINE, DERRICK, PLANT]
 
 function ensurePlantGhost(): THREE.Mesh {
   if (!plantGhost) {
@@ -1955,20 +1714,6 @@ function updateCastle(dt: number): void {
   }
 }
 
-// During a Full Moon strike the human defender sweeps their flashlight beam with the
-// arrow keys once it's lit — pure flourish over the ghosts' retreat.
-function updateGhostDefense(dt: number): void {
-  if (phase !== 'ghosts' || !flashActive || !flashBeam || !flashBeamTarget) return
-  const rate = 1.6 * dt
-  if (keys.has('ArrowLeft')) flashSweep -= rate
-  if (keys.has('ArrowRight')) flashSweep += rate
-  let pitch = 0.2
-  if (keys.has('ArrowUp')) pitch = 0.05
-  if (keys.has('ArrowDown')) pitch = 0.4
-  const p = flashBeam.position
-  flashBeamTarget.position.set(p.x + Math.cos(flashSweep) * 60, p.y - pitch * 120, p.z + Math.sin(flashSweep) * 60)
-}
-
 function addShake(r: number, at: THREE.Vector3): void {
   const dist = camPosCur.distanceTo(at)
   const amp = Math.min(2.2, r * 0.35) * Math.max(0.15, 1 - dist / 180)
@@ -2076,15 +1821,6 @@ function updateCamera(dt: number): void {
     )
     desiredLook.copy(endInfo.center)
     k = 2.2
-  } else if (phase === 'ghosts') {
-    // Frame the defender's tower from their own side so the incoming ghosts (and the
-    // flashlight sweep) read against the night sky.
-    const g = tasks.find(t => t.kind === 'ghosts') as Extract<Task, { kind: 'ghosts' }> | undefined
-    const c = g ? g.target : new THREE.Vector3(GX / 2, 20, GZ / 2)
-    const m = g && g.defender === 0 ? -1 : 1
-    desiredPos.set(c.x + m * 62, 46, c.z + 66)
-    desiredLook.set(c.x, 8, c.z)
-    k = 2.4
   } else if (phase === 'shop') {
     // Slow scenic orbit of the fresh battlefield behind the armory overlay.
     endOrbit += dt * 0.18
@@ -2182,13 +1918,7 @@ function rerollWind(): void {
 }
 
 // The in-game list shows only weapons the acting player owns (full roster in the shop).
-// Whose arsenal the weapon HUD shows: normally the acting player, but during a Full
-// Moon ghost strike it's the DEFENDER (they reach for the flashlight).
 function hudSide(): number {
-  if (phase === 'ghosts') {
-    const g = tasks.find(t => t.kind === 'ghosts') as Extract<Task, { kind: 'ghosts' }> | undefined
-    if (g) return g.defender
-  }
   return isHuman(turn) ? turn : 0
 }
 
@@ -2213,7 +1943,6 @@ function cycleWeapon(dirn: number): void {
   const s = sides[turn]
   for (let i = 1; i <= WEAPONS.length; i++) {
     const j = (s.wsel + dirn * i + WEAPONS.length * i) % WEAPONS.length
-    if (WEAPONS[j].kind === 'flashlight') continue // not a firing weapon
     if ((s.arsenal.get(WEAPONS[j].id) ?? 0) > 0) {
       s.wsel = j
       break
@@ -2226,12 +1955,6 @@ function cycleWeapon(dirn: number): void {
 // Shared by the number keys and mouse clicks on the weapon list.
 function selectWeapon(idx: number): void {
   if (idx < 0 || idx >= WEAPONS.length) return
-  // The Flashlight isn't fired — it's the defender's one-shot ghost repellent.
-  if (WEAPONS[idx].kind === 'flashlight') {
-    if (phase === 'ghosts') activateFlashlight(hudSide())
-    else hud.msg('Flashlight — shine it to repel ghosts on a Full Moon night')
-    return
-  }
   if (phase !== 'aim' && phase !== 'charge') return
   if ((sides[turn].arsenal.get(WEAPONS[idx].id) ?? 0) > 0) {
     sides[turn].wsel = idx
@@ -2243,7 +1966,6 @@ function selectWeapon(idx: number): void {
 }
 
 function fireShot(side: number, weapon: WeaponDef, power: number): void {
-  if (weapon.kind === 'flashlight') return // safety: the flashlight is never fired
   const s = sides[side]
   const ammo = s.arsenal.get(weapon.id) ?? 0
   if (Number.isFinite(ammo)) s.arsenal.set(weapon.id, Math.max(0, ammo - 1))
@@ -2341,8 +2063,6 @@ function reallyStartTurn(s: number): void {
     if (r && r.done && s !== v) armyRaidOf[v] = null
   }
   if (!livingSeats().some(v => armyRaidOf[v])) world.clearRaided()
-  // An awakened Zombie King stomps at the start of his caster's turn.
-  if (zombieTarget[s] >= 0) resolveZombieStomp(s)
   // Age this side's producers a turn (crops mature), then produce — scaled by how
   // intact each is (integrity) and how mature (crops ramp in over a couple turns).
   for (const p of planted[s]) p.age++
@@ -2387,7 +2107,7 @@ function reallyStartTurn(s: number): void {
     aiPlant(s) // then grow the economy with what's left
     // A played Flying Toaster (fly) or Full Moon (ghosts) takes over the pipeline and
     // resumes the AI's shot itself; don't stomp it with aiThink here.
-    if (phase !== 'fly' && phase !== 'ghosts') {
+    if (phase !== 'fly') {
       phase = 'aiThink'
       aiT = 0
       aiPlanned = null
@@ -2483,12 +2203,6 @@ function aiCards(s: number): void {
     money[s] -= CARD_COST
     hand[s].push(drawCard())
   }
-  // Defend first: if an opponent's Zombie King is aimed at me, raise a Force Field now.
-  const zombieOnMe = zombieTarget.slice(0, numPlayers).some((tg, c) => c !== s && tg === s)
-  if (zombieOnMe && hand[s].includes('forcefield') && !forceField[s]) {
-    hand[s].splice(hand[s].indexOf('forcefield'), 1)
-    applyCard(s, 'forcefield')
-  }
   if (!hand[s].length || Math.random() > 0.7) return
   const id = pickAiCard(s)
   if (!id) return
@@ -2505,8 +2219,7 @@ function pickAiCard(s: number): CardId | null {
   if (h.includes('money2')) return 'money2'
   if (h.includes('money1')) return 'money1'
   if (h.includes('toaster')) return 'toaster'
-  if (h.includes('fullmoon') && cemeteriesOf(s) > 0) return 'fullmoon' // unleash the dead
-  if (foeHasProd && h.includes('zombie') && zombieTarget[s] < 0) return 'zombie'
+  if (foeHasProd && h.includes('stealres')) return 'stealres' // rob everyone at once
   if (foeHasProd && h.includes('steal')) return 'steal'
   if (foeHasProd && h.includes('army')) return 'army'
   if (myHurt && h.includes('ghost')) return 'ghost'
@@ -2541,16 +2254,6 @@ function refreshResources(): void {
 function aiPlant(s: number): void {
   const fort = world.forts[s]?.towers[0]
   if (!fort) return
-  // Holding a Full Moon? Invest in cemeteries so the strike actually bites.
-  if (hand[s].includes('fullmoon') && cemeteriesOf(s) < 3 && money[s] >= PRODUCER_SPECS[CEMETERY].cost + 1600) {
-    const spot = world.findProducerSpot(s, fort.cx, fort.cz, CEMETERY)
-    if (spot) {
-      money[s] -= PRODUCER_SPECS[CEMETERY].cost
-      planted[s].push({ cx: spot.cx, cz: spot.cz, type: CEMETERY, baseYield: 0, age: 0 })
-      world.buildProducer(spot.cx, spot.cz, s, CEMETERY, 0, 0)
-      return
-    }
-  }
   if (planted[s].length >= 8) return // soft cap — keeps the AI economy in range
   // Buy the best producer that still leaves ~a card's worth in reserve.
   const type = money[s] >= DERRICK_SPEC.cost + 1600 ? DERRICK
@@ -2832,7 +2535,6 @@ function concludeRound(dead: number[]): boolean {
           ? 'YOU WON!'
           : 'YOU LOST!'
   endInfo = { line1, line2, winner, center }
-  setNight(false)
   phase = 'end'
   endT = 0
   endShown = false
@@ -2915,19 +2617,15 @@ function rebuildRoundWorld(): void {
 function setupRoundWorld(): void {
   for (const p of [...projs]) removeProj(p)
   for (const t of tasks) {
-    if (t.kind === 'roller' || t.kind === 'toaster' || t.kind === 'king') scene.remove(t.mesh)
+    if (t.kind === 'roller' || t.kind === 'toaster') scene.remove(t.mesh)
     else if (t.kind === 'army') for (const r of t.runners) scene.remove(r)
-    else if (t.kind === 'ghosts') for (const g of t.ghosts) scene.remove(g.mesh)
   }
   tasks.length = 0
-  // Card effects don't carry between rounds: clear ghost/field/king/raid, restore cannons.
+  // Card effects don't carry between rounds: clear ghost/field/raid, restore cannons.
   ghostReposition = false
-  ghostResume = null
-  flashActive = false
   for (let s = 0; s < 4; s++) {
     ghostDecoyOf[s] = null
     forceField[s] = false
-    zombieTarget[s] = -1
     armyRaidOf[s] = null
     world.hiddenForts[s] = false
     // Stale trade obligations don't carry between rounds, but TRUST/alliances do (they build
@@ -2937,13 +2635,6 @@ function setupRoundWorld(): void {
       owedActedSince[s][o] = false
     }
   }
-  if (flashBeam) {
-    scene.remove(flashBeam)
-    if (flashBeamTarget) scene.remove(flashBeamTarget)
-    flashBeam = null
-    flashBeamTarget = null
-  }
-  setNight(false)
   world.clearRaided()
   for (let s = 0; s < 4; s++) {
     incomeBoost[s] = 1
@@ -2989,11 +2680,6 @@ function aiShop(s: number): void {
   if (money[s] >= 5000 && forti[s].height < 12 && Math.random() < 0.5) {
     money[s] -= 5000
     forti[s].height += 6
-  }
-  // A flashlight is cheap insurance against a Full Moon ghost strike.
-  if (money[s] >= 3000 && (sides[s].arsenal.get('flashlight') ?? 0) < 1 && Math.random() < 0.4) {
-    money[s] -= 1500
-    sides[s].arsenal.set('flashlight', 1)
   }
   const caps: Record<string, number> = {
     babynuke: 4, mirv: 3, bigmissile: 20, nuke: 2, roller: 3, funky: 2,
@@ -3043,7 +2729,7 @@ function shopForts() {
 
 function shopResources() {
   return PRODUCER_TYPES.map(t => ({
-    name: t === CEMETERY ? `${PRODUCER_SPECS[t].name} (ghost launcher — Full Moon)` : `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield}/turn)`,
+    name: t === PLANT ? `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield}/turn — needs water, MELTDOWN if destroyed)` : `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield}/turn)`,
     price: PRODUCER_SPECS[t].cost,
     queued: pendingResources[turn].filter(x => x === t).length,
   }))
@@ -3225,7 +2911,6 @@ window.addEventListener('keydown', e => {
   if (e.code === 'Enter' && phase === 'plant') placeProducer() // Enter also places a resource
   if (e.code === 'Escape' && phase === 'plant') enterAim() // back to aiming
   if (e.code === 'KeyV') toggleWorldView()
-  if (e.code === 'KeyF' && phase === 'ghosts') activateFlashlight(hudSide()) // shine the flashlight
   if (/^Digit[1-9]$/.test(e.code)) {
     // Digits address the visible (owned) weapon list, not the full roster.
     const n = parseInt(e.code.slice(5)) - 1
@@ -3314,7 +2999,6 @@ function tick(now: number): void {
   updatePlayerAim(dt)
   updatePlant(dt)
   updateCastle(dt)
-  updateGhostDefense(dt)
   updateAi(dt)
 
   acc += dt
@@ -3361,7 +3045,7 @@ function tick(now: number): void {
   if (phase === 'fly' && (flyTotal > 16 || (projs.length === 0 && tasks.length === 0))) {
     for (const p of [...projs]) removeProj(p)
     for (const t of tasks) {
-      if (t.kind === 'roller' || t.kind === 'toaster' || t.kind === 'king') scene.remove(t.mesh)
+      if (t.kind === 'roller' || t.kind === 'toaster') scene.remove(t.mesh)
       else if (t.kind === 'army') for (const r of t.runners) scene.remove(r)
     }
     tasks.length = 0
@@ -3571,12 +3255,9 @@ window.__sv = {
     tasks: tasks.length,
     debris: world.debris.length,
     fxCount: fxs.length,
-    night: isNight,
     numPlayers,
     alive: alive.slice(0, numPlayers),
     score: score.slice(0, numPlayers),
-    cemeteries: Array.from({ length: numPlayers }, (_, s) => cemeteriesOf(s)),
-    ghostActive: tasks.some(t => t.kind === 'ghosts'),
     integrity: Array.from({ length: numPlayers }, (_, s) => +world.integrity(s).toFixed(3)),
     wind,
     power: chargePower,
@@ -3590,7 +3271,6 @@ window.__sv = {
     hand: [...hand[isHuman(turn) ? turn : 0]],
     enemyHand: hand[1].length,
     ghosted: ghostDecoyOf.slice(0, numPlayers).map(d => !!d),
-    zombieTarget: zombieTarget.slice(0, numPlayers),
     armyRaidOn: armyRaidOf.slice(0, numPlayers).map(r => (r ? r.caster : -1)),
     forceField: forceField.slice(0, numPlayers),
   }),
