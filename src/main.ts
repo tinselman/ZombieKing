@@ -3018,8 +3018,8 @@ function aiShop(s: number): void {
 }
 
 const FORT_UPGRADES = [
-  { name: 'Defensive berm (blocks flat shots)', price: 2500, max: 2, owned: (s: number) => forti[s].barricade, apply: (s: number) => (forti[s].barricade += 1) },
-  { name: 'Raise main tower (+6 levels)', price: 5000, max: 2, owned: (s: number) => forti[s].height / 6, apply: (s: number) => (forti[s].height += 6) },
+  { name: 'Curtain wall (rings the keep, +higher each)', price: 2500, max: 4, owned: (s: number) => forti[s].barricade, apply: (s: number) => (forti[s].barricade += 1) },
+  { name: 'Raise main tower (+6 levels, from the base)', price: 5000, max: 10, owned: (s: number) => Math.round(forti[s].height / 6), apply: (s: number) => (forti[s].height += 6) },
   { name: 'Extra tower', price: 8000, max: 2, owned: (s: number) => forti[s].towers, apply: (s: number) => (forti[s].towers += 1) },
 ]
 

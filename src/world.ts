@@ -708,17 +708,20 @@ export class World {
   // A destructible berm a few voxels in front of a fort (toward the enemy). It
   // blocks and soaks flat shots so they must be lobbed over — bought in the shop,
   // taller/thicker with each level. Not counted in fort integrity.
-  buildBarricade(cx: number, cz: number, dir: number, level: number): void {
+  // A defensive berm now RINGS the keep on all four sides (a full curtain wall), and each
+  // extra berm bought makes the wall taller and thicker — so stacking them visibly rears up.
+  buildBarricade(cx: number, cz: number, _dir: number, level: number): void {
     if (level <= 0) return
-    const height = 5 + level * 2 // level 1: 7 tall, level 2: 9
-    const thick = 1 + level // level 1: 2 thick, level 2: 3 (a chunkier wall soaks more)
-    const front = cx + dir * 10 // stand-off far enough that a crater here won't reach the fort
-    for (let dz = -6; dz <= 6; dz++) {
-      const z = cz + dz
-      if (z < 0 || z >= GZ) continue
-      for (let t = 0; t < thick; t++) {
-        const x = front + dir * t
-        if (x < 0 || x >= GX) continue
+    const height = 4 + level * 4 // 1 berm: 8 tall, 2: 12, 3: 16 — more berms → higher wall
+    const thick = 1 + level // 1: 2 thick, 2: 3, 3: 4 (a chunkier wall soaks more)
+    const R = 9 // stand-off ring radius from the keep centre (clears the 9×9 footprint)
+    for (let dx = -R; dx <= R; dx++) {
+      for (let dz = -R; dz <= R; dz++) {
+        const ring = Math.max(Math.abs(dx), Math.abs(dz))
+        if (ring > R || ring <= R - thick) continue // only the outer `thick`-wide border band
+        const x = cx + dx
+        const z = cz + dz
+        if (x < 0 || x >= GX || z < 0 || z >= GZ) continue
         const base = this.surfaceY(x, z) + 1
         for (let dy = 0; dy < height; dy++) {
           if (this.inBounds(x, base + dy, z)) this.grid[this.idx(x, base + dy, z)] = BARRICADE

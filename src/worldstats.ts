@@ -209,23 +209,26 @@ export const WORLD_STATS: Record<string, CountryStat> = {
   LB: { gdp: 25, mil: 20 },
 }
 
-// Nominal GDP (USD billions) → starting cash. Real GDP spans ~$0.03B to ~$27,000B — a ratio
-// far too extreme to play with raw, so it rides a square-root curve compressed into a wide
-// but survivable band: a $500 floor for the poorest, up to ~$100,000 for a superpower.
+// Nominal GDP (USD billions) → starting cash. The real spread is absurd (~$0.03B to ~$27,000B),
+// and The Bitter Truth leans INTO it: a steep power curve (exponent > 1) so a handful of giants
+// hoard almost everything while everyone else scrapes the floor — grotesquely, comically unfair.
+// $500 for the poorest, up to a quarter-MILLION for the top economy.
 export function cashFromGdp(gdp: number): number {
   const CAP_GDP = 27000 // ≈ the largest economy; anchors the top of the curve
-  const A = 100000 / Math.sqrt(CAP_GDP) // so sqrt(CAP_GDP) maps to $100k
-  return Math.round(Math.max(500, Math.min(100000, A * Math.sqrt(Math.max(0, gdp)))))
+  const CAP_CASH = 250000
+  const FLOOR = 500
+  const g = Math.min(1, Math.max(0, gdp) / CAP_GDP)
+  return Math.round(Math.max(FLOOR, Math.min(CAP_CASH, FLOOR + (CAP_CASH - FLOOR) * Math.pow(g, 1.35))))
 }
 
-// Military power (0–100) → fortification: how many extra towers and how much bonus height the
-// starting fortress gets. Returns forti-style { towers, height } layered onto the base tower.
+// Military power (0–100) → fortification: extra towers + bonus height (in 6-voxel storeys) on the
+// starting fortress. Also deliberately lopsided — a superpower rears up as a triple-towered spire
+// while a minnow gets a lone stub — so the board reads the inequality at a glance.
 export function girthFromMil(mil: number): { towers: number; height: number } {
-  // Extra towers: a wide fort for real powers. towers is the "extra" count (0 → 1 tower total).
-  const towers = mil >= 60 ? 2 : mil >= 34 ? 1 : 0
-  // Bonus height in 6-voxel storeys, scaling with military strength.
-  const height = 6 * (mil >= 80 ? 3 : mil >= 55 ? 2 : mil >= 30 ? 1 : 0)
-  return { towers, height }
+  const m = Math.min(1, Math.max(0, mil) / 100)
+  const towers = mil >= 55 ? 2 : mil >= 26 ? 1 : 0 // "extra" count (0 → 1 tower total)
+  const storeys = Math.round(Math.pow(m, 1.3) * 9) // 0 (minnow) … 9 (superpower ≈ 3× base height)
+  return { towers, height: storeys * 6 }
 }
 
 export function statOf(code: string | undefined): CountryStat {
