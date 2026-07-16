@@ -1,1 +1,1 @@
-{"root":["./src/ai.ts","./src/audio.ts","./src/countries.ts","./src/hud.ts","./src/main.ts","./src/weapons.ts","./src/world.ts"],"errors":true,"version":"5.9.3"}
+{"root":["./src/ai.ts","./src/audio.ts","./src/countries.ts","./src/countryinfo.ts","./src/hud.ts","./src/main.ts","./src/weapons.ts","./src/world.ts","./src/worldstats.ts"],"errors":true,"version":"5.9.3"}

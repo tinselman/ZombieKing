@@ -6,6 +6,7 @@ import { planShot } from './ai'
 import { createHud } from './hud'
 import { flagOf, randomCountry, type Country } from './countries'
 import { statOf, cashFromGdp, girthFromMil } from './worldstats'
+import { infoOf } from './countryinfo'
 import * as sfx from './audio'
 
 const COLLAPSE_AT = 0.2 // fort integrity below this = destroyed (≈8/10 of the tower gone)
@@ -253,6 +254,17 @@ function refreshIntegrity(): void {
 // Show the right number of fort bars, label each with its nation, highlight whose turn it is.
 function refreshForts(): void {
   hud.showForts(numPlayers, Array.from({ length: numPlayers }, (_, s) => fortLabel(s)), turn)
+  // In The Bitter Truth, each fort bar is a window onto a real nation: click it for the
+  // educational country panel (population, GDP, military, land area + a world locator map).
+  hud.setFortInfoClick(bitterTruth ? openCountryInfo : null)
+}
+// Open the country-info panel for a seat's real-world nation (Bitter Truth only).
+function openCountryInfo(s: number): void {
+  const c = playerCountry[s]
+  if (!c) return
+  const stat = statOf(c.code)
+  const info = infoOf(c.code)
+  hud.showCountryInfo({ flag: flagOf(c.code), name: c.name, pop: info.pop, gdp: stat.gdp, mil: stat.mil, area: info.area, lat: info.lat, lng: info.lng, region: info.region })
 }
 
 // ---------------------------------------------------------------- stratagem cards

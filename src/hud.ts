@@ -1,6 +1,7 @@
 // Scorched Earth 3D — DOM heads-up display: integrity bars, wind, weapons, power, banners.
 
 import { COUNTRIES, flagOf, type Country } from './countries'
+import { WORLD_MAP_SVG } from './countryinfo'
 
 export type WeaponRow = { idx: number; name: string; ammo: number; selected: boolean }
 
@@ -56,6 +57,23 @@ const CSS = `
 #sc-wheels .wdisc { position: absolute; top: 16px; left: 0; width: 176px; height: 176px; border-radius: 50%; background: conic-gradient(#ff5a5a,#ffd24a,#4ad07a,#4aa3ff,#c06aff,#ff5a5a,#ff5a5a); box-shadow: 0 10px 34px rgba(0,0,0,0.45), inset 0 0 0 8px #fff, inset 0 0 0 10px #2c3138; }
 #sc-wheels .wdisc .face { position: absolute; top: 50%; left: 50%; width: 42px; height: 42px; margin: -21px 0 0 -21px; display: flex; align-items: center; justify-content: center; font-size: 30px; }
 #sc-wheels .whint { font-size: 15px; font-weight: 700; letter-spacing: 0.08em; color: #ffef5a; text-shadow: 0 2px 8px rgba(0,0,0,0.5); min-height: 20px; }
+/* Country info panel (Bitter Truth): click a fort bar for real-world stats + a locator map. */
+#sc-cinfo { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(18,22,28,0.55); backdrop-filter: blur(3px); pointer-events: auto; z-index: 12; }
+#sc-cinfo .cbox { width: 460px; max-width: 92vw; background: #fff; border-radius: 16px; padding: 22px; box-shadow: 0 16px 44px rgba(0,0,0,0.35); }
+#sc-cinfo .chead { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+#sc-cinfo .cflag { font-size: 40px; line-height: 1; }
+#sc-cinfo .cname { font-size: 26px; font-weight: 800; color: #16181b; }
+#sc-cinfo .cmap { position: relative; width: 100%; aspect-ratio: 2 / 1; background: #c3c9cf; border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
+#sc-cinfo .cmapinner { position: absolute; inset: 0; }
+#sc-cinfo .cmapinner svg { width: 100%; height: 100%; display: block; }
+#sc-cinfo .cpin { position: absolute; width: 14px; height: 14px; margin: -13px 0 0 -7px; border-radius: 50% 50% 50% 0; background: #e63232; transform: rotate(-45deg); box-shadow: 0 2px 5px rgba(0,0,0,0.4); }
+#sc-cinfo .cpin::after { content: ''; position: absolute; top: 4px; left: 4px; width: 6px; height: 6px; border-radius: 50%; background: #fff; }
+#sc-cinfo .cstats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; margin-bottom: 16px; }
+#sc-cinfo .crow { display: flex; flex-direction: column; padding: 8px 0; border-bottom: 1px solid #eef1f4; }
+#sc-cinfo .crow span { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: #7a838d; }
+#sc-cinfo .crow b { font-size: 17px; color: #16181b; }
+#sc-cinfo .cclose { width: 100%; font-size: 14px; font-weight: 800; letter-spacing: 0.08em; padding: 11px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
+#sc-cinfo .cclose:hover { background: #454c55; }
 #sc-banner small { display: block; font-size: 15px; font-weight: 500; letter-spacing: 0.1em; color: #7a838d; margin-top: 6px; }
 /* Round-over celebration banner, shown over the wreckage when a castle bursts. */
 #sc-roundover { position: absolute; top: 15%; left: 0; right: 0; text-align: center; opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
@@ -272,6 +290,12 @@ export function createHud(
         <div class="wwrap"><div class="wptr"></div><div class="wdisc" id="sc-discB"></div></div>
       </div>
       <div class="whint"></div></div>
+    <div id="sc-cinfo"><div class="cbox">
+      <div class="chead"><span class="cflag"></span><span class="cname"></span></div>
+      <div class="cmap"><div class="cmapinner"></div><div class="cpin"></div></div>
+      <div class="cstats"></div>
+      <button class="cclose">CLOSE</button>
+    </div></div>
     <div id="sc-roundover"></div>
     <div id="sc-msg"></div>
     <div id="sc-skipped"><span>You've been SKIPPED!</span></div>
@@ -378,6 +402,13 @@ export function createHud(
   const wheelHint = q<HTMLElement>('#sc-wheels .whint')
   const wheelADisc = q<HTMLElement>('#sc-discA')
   const wheelBDisc = q<HTMLElement>('#sc-discB')
+  const cinfoEl = q<HTMLElement>('#sc-cinfo')
+  const cinfoFlag = q<HTMLElement>('#sc-cinfo .cflag')
+  const cinfoName = q<HTMLElement>('#sc-cinfo .cname')
+  const cinfoMap = q<HTMLElement>('#sc-cinfo .cmapinner')
+  const cinfoPin = q<HTMLElement>('#sc-cinfo .cpin')
+  const cinfoStats = q<HTMLElement>('#sc-cinfo .cstats')
+  const cinfoClose = q<HTMLButtonElement>('#sc-cinfo .cclose')
   const roundoverEl = q<HTMLElement>('#sc-roundover')
   let roundoverTimer = 0
   const msgEl = q<HTMLElement>('#sc-msg')
@@ -585,6 +616,41 @@ export function createHud(
     hideWheels() {
       wheelsEl.style.display = 'none'
       wheelsEl.onclick = null
+    },
+    // Wire the four fort bars so clicking one opens the country-info panel (Bitter Truth only).
+    // `cb(seat)` is called with the bar index; pass null to disable (bars become non-clickable).
+    setFortInfoClick(cb: ((seat: number) => void) | null) {
+      for (let i = 0; i < 4; i++) {
+        const el = fortPanels[i]
+        if (!el) continue
+        el.onclick = cb ? () => cb(i) : null
+        el.style.cursor = cb ? 'pointer' : ''
+      }
+    },
+    // Country info panel: real-world stats + a white-on-grey locator map with a red pin.
+    showCountryInfo(o: { flag: string; name: string; pop: number; gdp: number; mil: number; area: number; lat: number; lng: number; region: string }) {
+      cinfoFlag.textContent = o.flag
+      cinfoName.textContent = o.name
+      cinfoMap.innerHTML = WORLD_MAP_SVG
+      cinfoPin.style.left = `${((o.lng + 180) / 360) * 100}%`
+      cinfoPin.style.top = `${((90 - o.lat) / 180) * 100}%`
+      const popTxt = o.pop >= 1 ? `${o.pop >= 100 ? Math.round(o.pop) : o.pop.toFixed(1)} million` : `${Math.round(o.pop * 1e6).toLocaleString()} people`
+      const areaTxt = `${Math.round(o.area * 1000).toLocaleString()} km²`
+      const gdpTxt = o.gdp >= 1000 ? `$${(o.gdp / 1000).toFixed(1)} trillion` : `$${o.gdp.toLocaleString()} billion`
+      const rows: [string, string][] = [
+        ['Population', popTxt],
+        ['GDP', gdpTxt],
+        ['Land area', areaTxt],
+        ['Military', `${o.mil} / 100`],
+        ['Location', o.region],
+      ]
+      cinfoStats.innerHTML = rows.map(([k, v]) => `<div class="crow"><span>${k}</span><b>${v}</b></div>`).join('')
+      cinfoClose.onclick = () => { cinfoEl.style.display = 'none' }
+      cinfoEl.onclick = (e) => { if (e.target === cinfoEl) cinfoEl.style.display = 'none' }
+      cinfoEl.style.display = 'flex'
+    },
+    hideCountryInfo() {
+      cinfoEl.style.display = 'none'
     },
     // Big two-line round-over banner. `winner`: 0 (red) / 1 (blue) / -1 (neutral draw).
     roundOver(line1: string, line2: string, winner: number, ms = 4200) {
