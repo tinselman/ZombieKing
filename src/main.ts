@@ -2103,10 +2103,12 @@ type WheelState = {
 }
 let wheelSpin: WheelState | null = null
 let wheelForce: { a: WheelSlice; b: WheelSlice } | null = null // test hook: preset the next spin
+const wheelSkipFirst = [true, true, true, true] // each seat's first spin of the match is skipped (build first)
 
 function spinWheels(roller: number, done: () => void): void {
-  // No wheels on the opening round — nobody has an economy yet; income begins in round 2.
-  if (round <= 1 && !wheelForce) return void done()
+  // Skip a seat's VERY FIRST turn of the match — you plant/build once before income starts.
+  // From the second turn on, the wheels spin every turn.
+  if (wheelSkipFirst[roller] && !wheelForce) { wheelSkipFirst[roller] = false; return void done() }
   phase = 'shop' // inert while the wheels are up
   const a = wheelForce ? wheelForce.a : pickSlice(WHEEL_A)
   const b = wheelForce ? wheelForce.b : pickSlice(WHEEL_B)
@@ -3213,11 +3215,12 @@ function fullReset(): void {
     // the girth of your fortress (extra towers + storeys). Fun Time keeps everyone equal.
     const stat = statOf(playerCountry[s]?.code)
     money[s] = bitterTruth ? cashFromGdp(stat.gdp) : START_CASH
-    const girth = bitterTruth ? girthFromMil(stat.mil) : { towers: 0, height: 0 }
+    const girth = bitterTruth ? girthFromMil(stat.mil) : { towers: 0, height: 0, half: 4 }
     sides[s].arsenal = newArsenal()
     sides[s].wsel = 0
     forti[s].height = girth.height
     forti[s].towers = girth.towers
+    forti[s].half = girth.half // Bitter Truth: weak militaries get a thin, narrow keep
     forti[s].barricade = 0
     planted[s] = []
     pendingResources[s] = []

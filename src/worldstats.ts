@@ -221,14 +221,16 @@ export function cashFromGdp(gdp: number): number {
   return Math.round(Math.max(FLOOR, Math.min(CAP_CASH, FLOOR + (CAP_CASH - FLOOR) * Math.pow(g, 1.35))))
 }
 
-// Military power (0–100) → fortification: extra towers + height, real-scale. A superpower rears
-// up as a triple-towered spire; a minnow like Haiti gets a tiny stub SHORTER than the base tower,
-// so the board reads the inequality at a glance. `height` is a bonus (can be negative for a stub).
-export function girthFromMil(mil: number): { towers: number; height: number } {
+// Military power (0–100) → fortification: extra towers, height, AND tower WIDTH — real-scale. A
+// superpower rears up as a wide, triple-towered spire; a minnow like Haiti gets a thin, narrow
+// stub SHORTER than the base tower, so the board reads the inequality at a glance. `height` is a
+// bonus (can be negative for a stub); `half` is the tower half-width (1 = a 3×3 needle … 4 = 9×9).
+export function girthFromMil(mil: number): { towers: number; height: number; half: number } {
   const m = Math.min(1, Math.max(0, mil) / 100)
   const towers = mil >= 55 ? 2 : mil >= 26 ? 1 : 0 // "extra" count (0 → 1 tower total)
   const storeys = Math.round(Math.pow(m, 1.15) * 10) - 1 // -1 (tiny stub) … 9 (superpower ≈ 3× base)
-  return { towers, height: storeys * 6 }
+  const half = Math.min(4, Math.max(1, 1 + Math.round(Math.pow(m, 0.7) * 3))) // 1 (3×3 needle) … 4 (9×9)
+  return { towers, height: storeys * 6, half }
 }
 
 export function statOf(code: string | undefined): CountryStat {

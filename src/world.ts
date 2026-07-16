@@ -160,10 +160,12 @@ export type FortInfo = {
   towers: Tower[] // towers[0] is the main tower
   origCount: number
   facing: number // door/berm x-direction toward map center (+1 left seats, -1 right seats)
+  half: number // tower half-width (Bitter Truth: weak militaries get a thin, narrow keep)
 }
 
-// Purchasable, match-persistent structure upgrades per side.
-export type Fortifications = { height: number; towers: number; barricade: number }
+// Purchasable, match-persistent structure upgrades per side. `half` = tower half-width
+// (Bitter Truth scales it by military might; undefined → the standard FORT_HALF keep).
+export type Fortifications = { height: number; towers: number; barricade: number; half?: number }
 
 // A planted income-producer. Its income scales with how many of its voxels survive.
 export type ProducerInfo = { type: number; side: number; cx: number; cz: number; cells: number[]; origCount: number; baseYield: number; age: number }
@@ -415,7 +417,7 @@ export class World {
       const cell = cellOfSide(side)
       const b = built[side]
       const sites = towerSites(b.cx, b.cz, forti[side].towers, b.facing)
-      const fort: FortInfo = { cell, towers: [], origCount: 0, facing: b.facing }
+      const fort: FortInfo = { cell, towers: [], origCount: 0, facing: b.facing, half: forti[side].half ?? FORT_HALF }
       for (let ti = 0; ti < sites.length; ti++) {
         const extraH = ti === 0 ? forti[side].height : 0
         fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
@@ -439,13 +441,14 @@ export class World {
     // the tower to full. Recorded as offsets from each tower's origin, re-applied to the
     // matching tower after the rebuild. A full-health tower records nothing (no-op).
     const old = this.forts[side]
+    const half = forti.half ?? old?.half ?? FORT_HALF
     const damage: { dx: number; dy: number; dz: number }[][] = []
     if (old) {
       for (let ti = 0; ti < old.towers.length; ti++) {
         const t = old.towers[ti]
         const extraH = ti === 0 ? forti.height : 0
         const miss: { dx: number; dy: number; dz: number }[] = []
-        for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, cell, extraH, facing)) {
+        for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, cell, extraH, facing, old.half)) {
           if (this.cellAt(p.x, p.y, p.z) === EMPTY) miss.push({ dx: p.x - t.cx, dy: p.y - t.baseY, dz: p.z - t.cz })
         }
         damage.push(miss)
@@ -461,7 +464,7 @@ export class World {
           for (let y = 0; y < GY; y++) if (this.grid[this.idx(x, y, z)] === BARRICADE) this.grid[this.idx(x, y, z)] = EMPTY
     }
     const sites = this.fortSites(cx, cz, facing, forti.towers)
-    const fort: FortInfo = { cell, towers: [], origCount: 0, facing }
+    const fort: FortInfo = { cell, towers: [], origCount: 0, facing, half }
     for (let ti = 0; ti < sites.length; ti++) {
       const extraH = ti === 0 ? forti.height : 0
       fort.origCount += this.buildTower(fort, sites[ti].cx, sites[ti].cz, cell, extraH)
@@ -575,30 +578,30 @@ export class World {
   // Every voxel position a tower at (cx,cz,baseY) is SUPPOSED to occupy — the same
   // geometry buildTower raises (walls, floors, roof, crenellations, doorway gap, and
   // foundations rooted to the current ground). Used by repairTransfer to find holes.
-  private towerBlueprint(cx: number, cz: number, baseY: number, _cell: number, extraH: number, facing: number): Vec3[] {
+  private towerBlueprint(cx: number, cz: number, baseY: number, _cell: number, extraH: number, facing: number, half: number): Vec3[] {
     const height = Math.max(9, FORT_HEIGHT + extraH) // a stub (negative bonus) never sinks below a keepable minimum
     const out: Vec3[] = []
     const add = (x: number, y: number, z: number) => {
       if (this.inBounds(x, y, z)) out.push({ x, y, z })
     }
     for (let dy = 0; dy < height; dy++) {
-      for (let dx = -FORT_HALF; dx <= FORT_HALF; dx++) {
-        for (let dz = -FORT_HALF; dz <= FORT_HALF; dz++) {
-          const onWall = Math.abs(dx) === FORT_HALF || Math.abs(dz) === FORT_HALF
+      for (let dx = -half; dx <= half; dx++) {
+        for (let dz = -half; dz <= half; dz++) {
+          const onWall = Math.abs(dx) === half || Math.abs(dz) === half
           const isFloor = dy > 0 && dy < height - 1 && dy % 5 === 0
           const isTop = dy === height - 1
           if (!onWall && !isFloor && !isTop) continue
-          if (onWall && dx === facing * FORT_HALF && Math.abs(dz) <= 1 && dy >= 1 && dy <= 3) continue
+          if (onWall && half >= 2 && dx === facing * half && Math.abs(dz) <= 1 && dy >= 1 && dy <= 3) continue
           add(cx + dx, baseY + dy, cz + dz)
         }
       }
     }
-    for (let dx = -FORT_HALF; dx <= FORT_HALF; dx++) {
-      for (let dz = -FORT_HALF; dz <= FORT_HALF; dz++) {
-        const onWall = Math.abs(dx) === FORT_HALF || Math.abs(dz) === FORT_HALF
+    for (let dx = -half; dx <= half; dx++) {
+      for (let dz = -half; dz <= half; dz++) {
+        const onWall = Math.abs(dx) === half || Math.abs(dz) === half
         if (!onWall) continue
         if (((dx + dz) & 1) === 0) add(cx + dx, baseY + height, cz + dz)
-        if (Math.abs(dx) === FORT_HALF && Math.abs(dz) === FORT_HALF) {
+        if (Math.abs(dx) === half && Math.abs(dz) === half) {
           add(cx + dx, baseY + height, cz + dz)
           add(cx + dx, baseY + height + 1, cz + dz)
         }
@@ -628,7 +631,7 @@ export class World {
     for (let ti = 0; ti < tf.towers.length; ti++) {
       const t = tf.towers[ti]
       const extraH = ti === 0 ? forti.height : 0
-      for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, tf.cell, extraH, tf.facing)) {
+      for (const p of this.towerBlueprint(t.cx, t.cz, t.baseY, tf.cell, extraH, tf.facing, tf.half)) {
         const i = this.idx(p.x, p.y, p.z)
         if (seen.has(i)) continue
         seen.add(i)
@@ -785,19 +788,20 @@ export class World {
   private buildTower(fort: FortInfo, cx: number, cz: number, cell: number, extraH: number): number {
     const baseY = this.surfaceY(cx, cz) + 1
     const height = Math.max(9, FORT_HEIGHT + extraH) // a stub (negative bonus) never sinks below a keepable minimum
+    const half = fort.half // tower half-width (thin needle for weak militaries, up to the full 9×9)
     const facing = fort.facing // door faces toward the map centre
     const put = (x: number, y: number, z: number) => {
       if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
     }
     for (let dy = 0; dy < height; dy++) {
-      for (let dx = -FORT_HALF; dx <= FORT_HALF; dx++) {
-        for (let dz = -FORT_HALF; dz <= FORT_HALF; dz++) {
-          const onWall = Math.abs(dx) === FORT_HALF || Math.abs(dz) === FORT_HALF
+      for (let dx = -half; dx <= half; dx++) {
+        for (let dz = -half; dz <= half; dz++) {
+          const onWall = Math.abs(dx) === half || Math.abs(dz) === half
           const isFloor = dy > 0 && dy < height - 1 && dy % 5 === 0
           const isTop = dy === height - 1
           if (!onWall && !isFloor && !isTop) continue
-          // Doorway on the enemy-facing wall.
-          if (onWall && dx === facing * FORT_HALF && Math.abs(dz) <= 1 && dy >= 1 && dy <= 3) continue
+          // Doorway on the enemy-facing wall (only wide enough towers get one).
+          if (onWall && half >= 2 && dx === facing * half && Math.abs(dz) <= 1 && dy >= 1 && dy <= 3) continue
           put(cx + dx, baseY + dy, cz + dz)
         }
       }
@@ -805,12 +809,12 @@ export class World {
     // Crenellations + raised corners, and foundations: every wall column is
     // rooted down to the actual terrain so nothing hovers over the blended
     // pad edges (and undermining has something real to blast away).
-    for (let dx = -FORT_HALF; dx <= FORT_HALF; dx++) {
-      for (let dz = -FORT_HALF; dz <= FORT_HALF; dz++) {
-        const onWall = Math.abs(dx) === FORT_HALF || Math.abs(dz) === FORT_HALF
+    for (let dx = -half; dx <= half; dx++) {
+      for (let dz = -half; dz <= half; dz++) {
+        const onWall = Math.abs(dx) === half || Math.abs(dz) === half
         if (!onWall) continue
         if (((dx + dz) & 1) === 0) put(cx + dx, baseY + height, cz + dz)
-        if (Math.abs(dx) === FORT_HALF && Math.abs(dz) === FORT_HALF) {
+        if (Math.abs(dx) === half && Math.abs(dz) === half) {
           put(cx + dx, baseY + height, cz + dz)
           put(cx + dx, baseY + height + 1, cz + dz)
         }
