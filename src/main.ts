@@ -114,6 +114,9 @@ type SideState = {
 // Up to four seats, one cannon each, tinted to match the fort colours (red / blue /
 // green / gold). Only the first `numPlayers` are in play; the rest sit idle (hidden).
 const SEAT_CANNON_COLORS = [0xc0392b, 0x2f6fd6, 0x3a9d4a, 0xd6a72f]
+// CSS colours matching the four fort bars (red / blue / green / gold), for HUD accents.
+const SEAT_HEX = ['#d5473a', '#3a7bd5', '#3a9d4a', '#d6a72f']
+function seatColorHex(s: number): string { return SEAT_HEX[s] ?? '#2c3138' }
 const sides: SideState[] = SEAT_CANNON_COLORS.map((c, i) => ({
   cannon: makeCannon(c),
   az: i === 0 ? 0 : Math.PI,
@@ -1533,7 +1536,7 @@ function ensureSaucerArrows(): THREE.Group {
 function plantHudMsg(): void {
   const spec = PRODUCER_SPECS[plantType]
   const left = pendingResources[turn].filter(t => t === plantType).length
-  hud.setSetupHint(`Placing ${spec.name} (${left} left, +$${spec.baseYield}/turn) — anywhere, even on water`, '← → ↑ ↓ move  ·  SPACE or ENTER to place  ·  ESC back to aim')
+  hud.setSetupHint(`Placing ${spec.name} (${left} left, +$${spec.baseYield} when rolled) — anywhere, even on water`, '← → ↑ ↓ move  ·  SPACE or ENTER to place  ·  ESC back to aim')
 }
 
 // Enter placement mode for one resource type (clicked in the Resources list, during
@@ -1587,7 +1590,7 @@ function placeProducer(): void {
   sfx.tick()
   refreshResources()
   syncStatus() // update the "resources +$X/turn" readout right away
-  hud.msg(`${spec.name} placed — earning income each turn`)
+  hud.msg(`${spec.name} placed — pays out when its resource is rolled`)
   // Keep placing this type if you have more of it; otherwise back to aiming.
   if (pendingResources[turn].includes(type)) plantHudMsg()
   else enterAim()
@@ -2162,19 +2165,34 @@ function updateWheels(dt: number): void {
     w.rotB = w.startB + (w.targetB - w.startB) * e
     hud.setWheelRotation(w.rotA, w.rotB)
     if (u >= 1) {
-      payWheels(w.roller, w.a, w.b) // settled → pay every owner
-      hud.setWheelText(wheelCaption(w.a, w.b), w.human ? '' : 'everyone sees the roll…')
+      const rows = payWheels(w.roller, w.a, w.b) // settled → pay every owner, get the breakdown
       sfx.tick()
-      w.mode = 'hold'
-      w.t = 0
+      const { roller, a, b, done } = w
+      wheelSpin = null
+      hud.hideWheels()
+      // Show who-earned-what, then continue the turn (Blockade / Tribute may still prompt).
+      showRollPayout(roller, a, b, rows, () => runWheelSpecials(roller, a, b, done))
     }
-  } else if (w.t >= (w.human ? 1.4 : 3.0)) {
-    // Hold the result — briefly for a human, a full 3s on an enemy spin so everyone can read it.
-    const { roller, a, b, done } = w
-    wheelSpin = null
-    hud.hideWheels()
-    runWheelSpecials(roller, a, b, done) // Blockade / Tribute (may prompt), then continue the turn
   }
+}
+
+// Post-roll summary: for the resource(s) that came up, list each country, what it owns of
+// them, and the cash it earned — so the payout is never invisible. Stays until dismissed
+// (a human clicks; an AI's roll auto-advances after a beat so the game doesn't stall).
+function showRollPayout(roller: number, a: WheelSlice, b: WheelSlice, rows: RollPayout[], done: () => void): void {
+  const special = a === 'blockade' ? '🚫 Blockade — the spinner cuts a rival off next.' : (b === 'tribute8' || b === 'tribute4') ? '👑 Tribute — the spinner crowns a country next.' : ''
+  const hudRows = rows.map(r => {
+    const items = [...r.items.entries()].map(([type, n]) => `${sliceIcon(type)}×${n}`).join('  ')
+    const note = r.blocked ? '🚫 blockaded — earned nothing' : r.diverted > 0 ? `⚔️ raided — $${r.diverted.toLocaleString()} taken` : ''
+    return { color: seatColorHex(r.seat), label: fortLabel(r.seat), items, amount: r.amount, note }
+  })
+  hud.showRollPayout({
+    caption: wheelCaption(a, b),
+    rows: hudRows,
+    special,
+    empty: rows.length === 0,
+    dismissHint: isHuman(roller) ? 'CLICK to continue' : '',
+  }, done)
 }
 
 function wheelCaption(a: WheelSlice, b: WheelSlice): string {
@@ -2183,19 +2201,29 @@ function wheelCaption(a: WheelSlice, b: WheelSlice): string {
   return `${label(a)}  +  ${label(b)}`
 }
 
-// Pay every owner of the shown resource(s); a matching pair pays double.
-function payWheels(roller: number, a: WheelSlice, b: WheelSlice): void {
+// A per-country line of the post-roll payout summary: what they own of the rolled
+// resource(s), how much cash it paid them, and whether it was blocked/raided.
+type RollPayout = { seat: number; amount: number; items: Map<number, number>; diverted: number; blocked: boolean }
+
+// Pay every owner of the shown resource(s); a matching pair pays double. Returns a breakdown
+// (one row per affected country) so the HUD can show exactly who earned what this roll.
+function payWheels(roller: number, a: WheelSlice, b: WheelSlice): RollPayout[] {
   const aRes = typeof a === 'number' ? a : -1
   const bRes = typeof b === 'number' ? b : -1
+  const acc = new Map<number, RollPayout>()
+  const row = (s: number) => { let r = acc.get(s); if (!r) { r = { seat: s, amount: 0, items: new Map(), diverted: 0, blocked: false }; acc.set(s, r) } return r }
   const pay = (type: number, mult: number) => {
     for (let s = 0; s < numPlayers; s++) {
-      if (!alive[s] || resourceBlocked[s]) continue
+      if (!alive[s]) continue
+      const own = planted[s].filter(p => p.type === type).length
+      if (own > 0) { const r = row(s); r.items.set(type, (r.items.get(type) ?? 0) + own) } // records ownership even if $0
+      if (resourceBlocked[s]) { if (own > 0) row(s).blocked = true; continue }
       let inc = incomeFromType(s, type) * mult
       if (s === roller) inc = Math.round(inc * incomeBoost[s]) // Bumper Crop doubles the spinner's take
       if (inc <= 0) continue
       const raid = armyRaidOf[s]
-      if (raid && !raid.done) { raid.done = true; money[raid.caster] += inc } // Army diverts the payout
-      else money[s] += inc
+      if (raid && !raid.done) { raid.done = true; money[raid.caster] += inc; row(s).diverted += inc; row(raid.caster).amount += inc } // Army diverts the payout
+      else { money[s] += inc; row(s).amount += inc }
     }
   }
   if (aRes >= 0 && aRes === bRes) pay(aRes, 2)
@@ -2203,6 +2231,7 @@ function payWheels(roller: number, a: WheelSlice, b: WheelSlice): void {
   incomeBoost[roller] = 1
   syncStatus()
   if (isHuman(turn)) updateWeaponHud()
+  return [...acc.values()].sort((x, y) => y.amount - x.amount)
 }
 
 // Blockade / Tribute resolve in sequence (each may prompt the human roller), then `done`.
@@ -2935,15 +2964,38 @@ function finishResolve(force = false): void {
 
 // ---------------------------------------------------------------- rounds & armory
 
+// Nearest spot to (cx,cz) where a producer of `type` can legally sit, searched in growing
+// rings. Used to rescue a producer whose original spot got blocked between rounds, so it's
+// nudged aside rather than silently lost. Returns null only if nothing within range works.
+function nearestProducerSpot(cx: number, cz: number, type: number): { cx: number; cz: number } | null {
+  for (let r = 2; r <= 34; r += 2) {
+    for (let dx = -r; dx <= r; dx += 2) {
+      for (let dz = -r; dz <= r; dz += 2) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue // ring only
+        const x = cx + dx, z = cz + dz
+        if (world.canPlaceProducer(x, z, type)) return { cx: x, cz: z }
+      }
+    }
+  }
+  return null
+}
+
 // (Re)build the current round's battlefield — same seed, so buying a tower in
 // the armory adds it to the already-visible terrain.
 function rebuildRoundWorld(): void {
   world.generate(roundSeed, forti, numPlayers)
-  // Re-raise every planted producer into the fresh terrain (skip any spot a new
-  // fort/berm now occupies). Terrain is fixed per match, so positions stay valid.
+  // Re-raise every planted producer into the fresh terrain. A producer MUST come back —
+  // income counts its physical cells (integrityAt), so a producer left un-raised becomes an
+  // invisible "zombie" that you still own but that pays nothing (the bug where placed Nuclear
+  // Plants stopped paying). If its original spot is now blocked (a relocated fort/berm, or a
+  // Plant's water cell got covered), nudge it to the nearest valid spot instead of dropping it.
   for (let s = 0; s < numPlayers; s++) {
     for (const p of planted[s]) {
-      if (world.canPlaceProducer(p.cx, p.cz, p.type)) world.buildProducer(p.cx, p.cz, s, p.type, p.baseYield, p.age)
+      if (!world.canPlaceProducer(p.cx, p.cz, p.type)) {
+        const spot = nearestProducerSpot(p.cx, p.cz, p.type)
+        if (spot) { p.cx = spot.cx; p.cz = spot.cz }
+      }
+      world.buildProducer(p.cx, p.cz, s, p.type, p.baseYield, p.age)
     }
   }
   for (let s = 0; s < numPlayers; s++) {
@@ -3077,7 +3129,7 @@ function shopForts() {
 
 function shopResources() {
   return PRODUCER_TYPES.map(t => ({
-    name: t === PLANT ? `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield}/turn — needs water, MELTDOWN if destroyed)` : `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield}/turn)`,
+    name: t === PLANT ? `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield} when rolled — needs water, MELTDOWN if destroyed)` : `${PRODUCER_SPECS[t].name} (+$${PRODUCER_SPECS[t].baseYield} when rolled)`,
     price: PRODUCER_SPECS[t].cost,
     queued: pendingResources[turn].filter(x => x === t).length,
   }))

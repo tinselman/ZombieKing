@@ -22,6 +22,11 @@ const CSS = `
 #sc-fort2 .bar > div { background: #3a9d4a; }
 #sc-fort3 .bar > div { background: #d6a72f; }
 #sc-fort0.dead, #sc-fort1.dead, #sc-fort2.dead, #sc-fort3.dead { opacity: 0.4; }
+/* Bitter Truth: a fort bar opens the country-info panel. Signal it's clickable. */
+#sc-hud .panel.fort.info { transition: border-color 0.15s, box-shadow 0.15s; }
+#sc-hud .panel.fort.info::after { content: 'ⓘ'; position: absolute; top: 6px; right: 10px; font-size: 12px; font-weight: 700; color: #7a838d; }
+#sc-hud .panel.fort.info:hover { border-color: #2c3138; box-shadow: 0 3px 14px rgba(40,50,60,0.18); }
+#sc-hud .panel.fort.info:hover::after { color: #2c3138; }
 #sc-hud .fort.turn { outline: 2px solid #16181b; }
 #sc-hud .pct { font-size: 13px; font-weight: 600; margin-top: 4px; }
 #sc-wind { top: 16px; left: 50%; transform: translateX(-50%); text-align: center; min-width: 110px; }
@@ -74,6 +79,20 @@ const CSS = `
 #sc-cinfo .crow b { font-size: 17px; color: #16181b; }
 #sc-cinfo .cclose { width: 100%; font-size: 14px; font-weight: 800; letter-spacing: 0.08em; padding: 11px; border-radius: 10px; border: 1px solid #2c3138; background: #2c3138; color: #fff; cursor: pointer; }
 #sc-cinfo .cclose:hover { background: #454c55; }
+/* Post-roll payout: who earned what from the resource wheels. Stays until dismissed. */
+#sc-payout { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(18,22,28,0.5); backdrop-filter: blur(3px); pointer-events: auto; cursor: pointer; z-index: 13; }
+#sc-payout .pbox { width: 440px; max-width: 92vw; background: #fff; border-radius: 16px; padding: 20px 22px; box-shadow: 0 16px 44px rgba(0,0,0,0.35); animation: sc-pop 0.16s ease-out; }
+@keyframes sc-pop { from { transform: scale(0.94); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
+#sc-payout .pcap { font-size: 20px; font-weight: 800; color: #16181b; text-align: center; margin-bottom: 14px; letter-spacing: 0.02em; }
+#sc-payout .prows { display: flex; flex-direction: column; gap: 8px; }
+#sc-payout .prow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; background: #f5f7f9; border-left: 5px solid #999; border-radius: 8px; }
+#sc-payout .pname { font-size: 15px; font-weight: 800; color: #16181b; }
+#sc-payout .pitems { font-size: 13px; color: #5a636d; margin-top: 2px; }
+#sc-payout .pnote { color: #b0402c; font-weight: 700; }
+#sc-payout .pamt { font-size: 18px; font-weight: 800; color: #2f8f43; white-space: nowrap; }
+#sc-payout .pempty { text-align: center; color: #7a838d; font-size: 15px; padding: 10px 0; }
+#sc-payout .pspecial { margin-top: 12px; padding: 9px 12px; background: #fff6e0; border-radius: 8px; font-size: 13px; font-weight: 700; color: #8a6a1a; text-align: center; }
+#sc-payout .phint { margin-top: 14px; text-align: center; font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #a2abb4; min-height: 14px; }
 #sc-banner small { display: block; font-size: 15px; font-weight: 500; letter-spacing: 0.1em; color: #7a838d; margin-top: 6px; }
 /* Round-over celebration banner, shown over the wreckage when a castle bursts. */
 #sc-roundover { position: absolute; top: 15%; left: 0; right: 0; text-align: center; opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
@@ -296,6 +315,12 @@ export function createHud(
       <div class="cstats"></div>
       <button class="cclose">CLOSE</button>
     </div></div>
+    <div id="sc-payout"><div class="pbox">
+      <div class="pcap"></div>
+      <div class="prows"></div>
+      <div class="pspecial"></div>
+      <div class="phint"></div>
+    </div></div>
     <div id="sc-roundover"></div>
     <div id="sc-msg"></div>
     <div id="sc-skipped"><span>You've been SKIPPED!</span></div>
@@ -409,6 +434,11 @@ export function createHud(
   const cinfoPin = q<HTMLElement>('#sc-cinfo .cpin')
   const cinfoStats = q<HTMLElement>('#sc-cinfo .cstats')
   const cinfoClose = q<HTMLButtonElement>('#sc-cinfo .cclose')
+  const payoutEl = q<HTMLElement>('#sc-payout')
+  const payoutCap = q<HTMLElement>('#sc-payout .pcap')
+  const payoutRows = q<HTMLElement>('#sc-payout .prows')
+  const payoutSpecial = q<HTMLElement>('#sc-payout .pspecial')
+  const payoutHint = q<HTMLElement>('#sc-payout .phint')
   const roundoverEl = q<HTMLElement>('#sc-roundover')
   let roundoverTimer = 0
   const msgEl = q<HTMLElement>('#sc-msg')
@@ -625,6 +655,10 @@ export function createHud(
         if (!el) continue
         el.onclick = cb ? () => cb(i) : null
         el.style.cursor = cb ? 'pointer' : ''
+        // The HUD root is pointer-events:none; a clickable bar must opt back IN or real
+        // mouse clicks pass straight through it. The `info` class adds the ⓘ affordance.
+        el.style.pointerEvents = cb ? 'auto' : ''
+        el.classList.toggle('info', !!cb)
       }
     },
     // Country info panel: real-world stats + a white-on-grey locator map with a red pin.
@@ -651,6 +685,26 @@ export function createHud(
     },
     hideCountryInfo() {
       cinfoEl.style.display = 'none'
+    },
+    // Post-roll payout summary. `done` fires when dismissed — a human roll waits for a click,
+    // an AI roll (no dismissHint) auto-advances after a short beat so the game keeps moving.
+    showRollPayout(
+      o: { caption: string; rows: { color: string; label: string; items: string; amount: number; note: string }[]; special: string; empty: boolean; dismissHint: string },
+      done: () => void
+    ) {
+      payoutCap.textContent = o.caption
+      payoutRows.innerHTML = o.empty
+        ? '<div class="pempty">No resource income this roll.</div>'
+        : o.rows.map(r => `<div class="prow" style="border-left-color:${r.color}"><div><div class="pname">${r.label}</div><div class="pitems">${r.items}${r.note ? ` · <span class="pnote">${r.note}</span>` : ''}</div></div><div class="pamt">${r.amount > 0 ? '+$' + r.amount.toLocaleString() : '—'}</div></div>`).join('')
+      payoutSpecial.textContent = o.special
+      payoutSpecial.style.display = o.special ? 'block' : 'none'
+      payoutHint.textContent = o.dismissHint
+      let closed = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const close = () => { if (closed) return; closed = true; if (timer !== undefined) clearTimeout(timer); payoutEl.style.display = 'none'; payoutEl.onclick = null; done() }
+      payoutEl.onclick = close
+      timer = o.dismissHint ? undefined : setTimeout(close, 2600) // AI roll auto-advances; human clicks
+      payoutEl.style.display = 'flex'
     },
     // Big two-line round-over banner. `winner`: 0 (red) / 1 (blue) / -1 (neutral draw).
     roundOver(line1: string, line2: string, winner: number, ms = 4200) {
@@ -682,7 +736,7 @@ export function createHud(
     },
     // `player` (1 or 2) tags the readout with whose numbers these are in hotseat; 0 hides it.
     setStatus(round: number, rounds: number, you: number, foe: number, cash: number, income = 0, player = 0) {
-      const inc = income > 0 ? ` &nbsp;·&nbsp; <span>resources</span> +$${income.toLocaleString()}/turn` : ''
+      const inc = income > 0 ? ` &nbsp;·&nbsp; <span>resources</span> +$${income.toLocaleString()} when rolled` : ''
       const who = player > 0 ? `<b style="color:#d5473a">P${player}</b> &nbsp;·&nbsp; ` : ''
       statusEl.innerHTML = `${who}<span>round</span> ${round}/${rounds} &nbsp;·&nbsp; <span>score</span> ${you} — ${foe} &nbsp;·&nbsp; <span>cash</span> $${cash.toLocaleString()}${inc}`
       statusEl.style.opacity = '1' // re-shown after a round-over banner hid it
