@@ -333,10 +333,9 @@ const skipNext = [false, false, false, false]
 // Extra turns a seat must sit out (nuclear meltdown on its own reactor, or a fallout cloud
 // drifting over it) — counts DOWN one per would-be turn, on top of the one-shot Skip card.
 const skipTurns = [0, 0, 0, 0]
-// Resource-wheel round states: a Blockade denies a seat all wheel income for a round; a Tribute
-// makes a seat immune to attack for a round. Both reset at each round start.
+// Resource-wheel round state: a Blockade denies a seat all wheel income for a round. Resets at
+// each round start. (Nothing grants attack-immunity any more — only the Force Field card blocks.)
 const resourceBlocked = [false, false, false, false]
-const attackProtected = [false, false, false, false]
 // A drifting radioactive cloud from a meltdown (null when none is loose). It blows in a
 // random direction; any OTHER seat it passes over loses its crops and misses two turns.
 let fallout: { pos: THREE.Vector3; vx: number; vz: number; life: number; mesh: THREE.Mesh; hit: Set<number> } | null = null
@@ -388,9 +387,8 @@ function playCard(side: number, idx: number): void {
     applyCard(side, id, target)
     refreshResources() // steal/zombie move producers between sides
   }
-  // In a 3–4 player game a human chooses which opponent a hostile card hits (never a teammate or
-  // a Tribute-shielded country).
-  const foes = livingSeats().filter(s => !sameTeam(s, side) && !attackProtected[s])
+  // In a 3–4 player game a human chooses which opponent a hostile card hits (never a teammate).
+  const foes = livingSeats().filter(s => !sameTeam(s, side))
   if (isHuman(side) && HOSTILE_CARDS.has(id) && foes.length > 1) {
     hud.showTargetPicker(
       `${cardDef(id).emoji} ${cardDef(id).name} — strike whom?`,
@@ -654,7 +652,7 @@ function stealRandomCard(winner: number, loser: number): string {
 // The default victim for a hostile card: the weakest living opponent (the sole opponent
 // in a 2-player game). Callers may override with an explicit target (human picker / AI).
 function defaultFoe(side: number): number {
-  const foes = livingSeats().filter(s => !sameTeam(s, side) && !attackProtected[s])
+  const foes = livingSeats().filter(s => !sameTeam(s, side))
   if (!foes.length) return (side + 1) % Math.max(2, numPlayers)
   foes.sort((a, b) => world.integrity(a) - world.integrity(b))
   return foes[0]
@@ -1008,11 +1006,11 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
       return // nothing gets through
     }
   }
-  // Loyal-alliance ceasefire (Bitter Truth) + Tribute protection: a shell reaching a TEAMMATE of
-  // the acting seat, or a Tribute-shielded country, is turned aside at their walls.
+  // Loyal-alliance ceasefire (Bitter Truth): a shell reaching a TEAMMATE of the acting seat is
+  // turned aside at their walls.
   for (let a = 0; a < numPlayers; a++) {
     if (a === turn || !alive[a]) continue
-    if (!attackProtected[a] && !(bitterTruth && sameTeam(a, turn))) continue
+    if (!(bitterTruth && sameTeam(a, turn))) continue
     const ft = world.forts[a]?.towers[0]
     if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
       spawnShieldBlock(ft.cx, ft.cz)
@@ -2069,14 +2067,14 @@ function advanceTurn(): void {
 // Two discs spun at the start of EVERY turn. Wheel A carries the four producers + Blockade;
 // Wheel B carries the four producers + two Tribute tiers. Whatever a wheel lands on, EVERY
 // owner of that resource is paid its income (doubled when both wheels match). Income comes from
-// nowhere else. Blockade lets the spinner deny one rival a round of income; Tribute (rare)
-// shields a chosen country from attack and makes everyone bow with a slice of their cash.
-type WheelSlice = number | 'blockade' | 'tribute8' | 'tribute4'
+// nowhere else. Blockade lets the spinner deny one rival a round of income; Foreign Aid (rare)
+// makes every other country send a chosen one a random card out of their hand.
+type WheelSlice = number | 'blockade' | 'aid'
 const WHEEL_A: { s: WheelSlice; w: number }[] = [
   { s: CROP, w: 22 }, { s: MINE, w: 22 }, { s: DERRICK, w: 22 }, { s: PLANT, w: 20 }, { s: 'blockade', w: 12 },
 ]
 const WHEEL_B: { s: WheelSlice; w: number }[] = [
-  { s: CROP, w: 24 }, { s: MINE, w: 24 }, { s: DERRICK, w: 24 }, { s: PLANT, w: 22 }, { s: 'tribute8', w: 4 }, { s: 'tribute4', w: 1 },
+  { s: CROP, w: 24 }, { s: MINE, w: 24 }, { s: DERRICK, w: 24 }, { s: PLANT, w: 22 }, { s: 'aid', w: 5 },
 ]
 function pickSlice(wheel: { s: WheelSlice; w: number }[]): WheelSlice {
   const total = wheel.reduce((a, e) => a + e.w, 0)
@@ -2085,7 +2083,7 @@ function pickSlice(wheel: { s: WheelSlice; w: number }[]): WheelSlice {
   return wheel[0].s
 }
 function sliceIcon(s: WheelSlice): string {
-  return s === 'blockade' ? '🚫' : s === 'tribute8' || s === 'tribute4' ? '👑' : s === CROP ? '🌾' : s === MINE ? '⛏️' : s === DERRICK ? '🛢️' : '☢️'
+  return s === 'blockade' ? '🚫' : s === 'aid' ? '🎁' : s === CROP ? '🌾' : s === MINE ? '⛏️' : s === DERRICK ? '🛢️' : '☢️'
 }
 // A seat's live income from producers of one type (yield × integrity × maturity).
 function incomeFromType(s: number, type: number): number {
@@ -2096,7 +2094,7 @@ function incomeFromType(s: number, type: number): number {
 
 // The two discs' visual rim order (each face shown once), used to land the pointer on the result.
 const WHEEL_A_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'blockade']
-const WHEEL_B_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'tribute8', 'tribute4']
+const WHEEL_B_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'aid']
 
 type WheelState = {
   roller: number; a: WheelSlice; b: WheelSlice; human: boolean; done: () => void
@@ -2180,7 +2178,7 @@ function updateWheels(dt: number): void {
 // them, and the cash it earned — so the payout is never invisible. Stays until dismissed
 // (a human clicks; an AI's roll auto-advances after a beat so the game doesn't stall).
 function showRollPayout(roller: number, a: WheelSlice, b: WheelSlice, rows: RollPayout[], done: () => void): void {
-  const special = a === 'blockade' ? '🚫 Blockade — the spinner cuts a rival off next.' : (b === 'tribute8' || b === 'tribute4') ? '👑 Tribute — the spinner crowns a country next.' : ''
+  const special = a === 'blockade' ? '🚫 Blockade — the spinner cuts a rival off next.' : b === 'aid' ? '🎁 Foreign Aid — a country is about to be sent everyone else’s cards.' : ''
   const hudRows = rows.map(r => {
     const items = [...r.items.entries()].map(([type, n]) => `${sliceIcon(type)}×${n}`).join('  ')
     const note = r.blocked ? '🚫 blockaded — earned nothing' : r.diverted > 0 ? `⚔️ raided — $${r.diverted.toLocaleString()} taken` : ''
@@ -2197,7 +2195,7 @@ function showRollPayout(roller: number, a: WheelSlice, b: WheelSlice, rows: Roll
 
 function wheelCaption(a: WheelSlice, b: WheelSlice): string {
   if (typeof a === 'number' && a === b) return `DOUBLE ${PRODUCER_SPECS[a].name.toUpperCase()}!`
-  const label = (s: WheelSlice) => (typeof s === 'number' ? PRODUCER_SPECS[s].name : s === 'blockade' ? 'Blockade' : s === 'tribute4' ? 'Tribute ¼' : 'Tribute ⅛')
+  const label = (s: WheelSlice) => (typeof s === 'number' ? PRODUCER_SPECS[s].name : s === 'blockade' ? 'Blockade' : 'Foreign Aid')
   return `${label(a)}  +  ${label(b)}`
 }
 
@@ -2238,8 +2236,7 @@ function payWheels(roller: number, a: WheelSlice, b: WheelSlice): RollPayout[] {
 function runWheelSpecials(roller: number, a: WheelSlice, b: WheelSlice, done: () => void): void {
   const steps: ((next: () => void) => void)[] = []
   if (a === 'blockade') steps.push(next => blockadeStep(roller, next))
-  if (b === 'tribute8') steps.push(next => tributeStep(roller, 8, next))
-  if (b === 'tribute4') steps.push(next => tributeStep(roller, 4, next))
+  if (b === 'aid') steps.push(next => foreignAidStep(roller, next))
   const run = (i: number) => (i >= steps.length ? done() : steps[i](() => run(i + 1)))
   run(0)
 }
@@ -2257,56 +2254,44 @@ function blockadeStep(roller: number, next: () => void): void {
   else apply(aiPickBlockade(roller))
 }
 
-function tributeStep(roller: number, tier: number, next: () => void): void {
-  const others = livingSeats().filter(s => s !== roller) // the country(s) that could be crowned
+// 🎁 Foreign Aid: every OTHER living country sends the chosen one a random card out of its hand
+// (nothing to send if their hand is empty). In a 1v1 there's no choice to make — the spinner is
+// the only possible donor, so it ships a card across to its rival.
+function foreignAidStep(roller: number, next: () => void): void {
+  const others = livingSeats().filter(s => s !== roller) // who could receive the aid
   if (!others.length) return void next()
-  // Collect 1/tier of everyone-but-the-crowned's cash into the crowned seat's treasury.
-  const levy = (t: number) => {
-    let pot = 0
-    for (let s = 0; s < numPlayers; s++) {
-      if (!alive[s] || s === t) continue
-      const pay = Math.floor(money[s] / tier)
-      money[s] -= pay
-      pot += pay
-    }
-    money[t] += pot
-    return pot
-  }
-  // 1v1: there's no ally to crown, and shielding your only rival for a whole round is nonsense
-  // (that was the "enemy has shields with no card played" bug). The spinner simply levies tribute
-  // from the opponent — a cash swing, NO attack-immunity. Shields come only from the Force Field card.
-  if (numPlayers <= 2) {
-    const pot = levy(roller)
-    syncStatus()
-    hud.banner(`👑 TRIBUTE ·  1/${tier}`, `${fortLabel(roller)} levies tribute — $${pot.toLocaleString()} from ${fortLabel(others[0])}!`, 3200)
-    return void next()
-  }
   const apply = (t: number) => {
-    attackProtected[t] = true
-    const pot = levy(t)
+    const givers = livingSeats().filter(s => s !== t && hand[s].length)
+    for (const g of givers) {
+      const card = hand[g][Math.floor(Math.random() * hand[g].length)] // a RANDOM card, donor's choice denied
+      moveItem(g, t, 'card', card) // pure move + voxel flight; forced aid builds no trust
+    }
     refreshForts()
     syncStatus()
-    hud.banner(`👑 TRIBUTE ·  1/${tier}`, `all bow to ${fortLabel(t)} — $${pot.toLocaleString()} paid, and it can't be attacked for a round!`, 3600)
+    hud.banner('🎁 FOREIGN AID', givers.length
+      ? `${givers.map(g => fortLabel(g)).join(', ')} → ${fortLabel(t)}: ${givers.length} random card${givers.length > 1 ? 's' : ''} sent!`
+      : `nobody had a card to send ${fortLabel(t)}`, 3400)
     next()
   }
-  if (isHuman(roller)) hud.showTargetPicker(`👑 Tribute — crown & shield whom? Everyone (you too) pays them 1/${tier} of their cash, and they can't be attacked for a round.`, others.map(s => ({ seat: s, label: fortLabel(s) })), apply)
-  else apply(aiPickTribute(roller))
+  if (numPlayers <= 2) return void apply(others[0]) // 1v1: the spinner is the donor, its rival receives
+  if (isHuman(roller)) hud.showTargetPicker('🎁 Foreign Aid — which country receives aid? Every other player (you too) sends them a random card from their hand.', others.map(s => ({ seat: s, label: fortLabel(s) })), apply)
+  else apply(aiPickAid(roller))
 }
 
-// AI blockades the richest/strongest non-teammate; tributes a teammate (enrich + shield an ally)
-// if it has one, else it's forced to crown the poorest rival (least harmful).
+// AI blockades the richest/strongest non-teammate; sends Foreign Aid to a teammate (arm an ally)
+// if it has one, else it's forced to aid the weakest rival (least harmful).
 function aiPickBlockade(roller: number): number {
   const foes = livingSeats().filter(s => !sameTeam(s, roller))
   if (!foes.length) return livingSeats().filter(s => s !== roller)[0]
   foes.sort((a, b) => money[b] + world.integrity(b) * 5000 - (money[a] + world.integrity(a) * 5000))
   return foes[0]
 }
-function aiPickTribute(roller: number): number {
+function aiPickAid(roller: number): number {
   const mates = livingSeats().filter(s => s !== roller && sameTeam(s, roller))
-  if (mates.length) return mates[0]
+  if (mates.length) return mates[0] // arm an ally
   const foes = livingSeats().filter(s => s !== roller)
-  foes.sort((a, b) => money[a] - money[b]) // enrich the poorest rival — least harmful
-  return foes[0]
+  foes.sort((a, b) => money[a] + world.integrity(a) * 5000 - (money[b] + world.integrity(b) * 5000))
+  return foes[0] // forced to arm a rival — pick the weakest, least dangerous one
 }
 
 function startTurn(s: number): void {
@@ -2397,8 +2382,8 @@ function startAiThink(s: number): void {
 // ties broken by nearest to this seat's cannon. Used for both its shot and hostile cards.
 function aiTarget(s: number): number {
   const living = livingSeats()
-  // Teammates (surrendered vassals / masters) are never targets, nor is a Tribute-shielded seat.
-  const foes = living.filter(o => o !== s && !sameTeam(o, s) && !attackProtected[o])
+  // Teammates (surrendered vassals / masters) are never targets.
+  const foes = living.filter(o => o !== s && !sameTeam(o, s))
   if (!foes.length) return -1
   // Trade-allies are spared too — unless every remaining foe is an ally, or only two seats are
   // left (last castle standing forces the final betrayal). Attacking then breaks the pact.
@@ -3038,8 +3023,7 @@ function setupRoundWorld(): void {
     ghostDecoyOf[s] = null
     forceField[s] = false
     skipTurns[s] = 0
-    resourceBlocked[s] = false // blockade / tribute effects are round-long
-    attackProtected[s] = false
+    resourceBlocked[s] = false // a blockade lasts the round
     armyRaidOf[s] = null
     world.hiddenForts[s] = false
     // Stale trade obligations don't carry between rounds, but TRUST/alliances do (they build
@@ -3663,7 +3647,7 @@ declare global {
       moveFallout: (x: number, z: number) => void
       forceWheel: (a: number | string, b: number | string) => void
       testWheel: (roller: number, a: number | string, b: number | string) => void
-      wheelState: () => { blocked: boolean[]; protected: boolean[]; spinning: boolean }
+      wheelState: () => { blocked: boolean[]; spinning: boolean }
     }
   }
 }
@@ -3809,5 +3793,5 @@ window.__sv = {
     payWheels(roller, a as WheelSlice, b as WheelSlice)
     runWheelSpecials(roller, a as WheelSlice, b as WheelSlice, () => {})
   },
-  wheelState: () => ({ blocked: resourceBlocked.slice(0, numPlayers), protected: attackProtected.slice(0, numPlayers), spinning: !!wheelSpin }),
+  wheelState: () => ({ blocked: resourceBlocked.slice(0, numPlayers), spinning: !!wheelSpin }),
 }
