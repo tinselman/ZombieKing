@@ -2258,10 +2258,10 @@ function blockadeStep(roller: number, next: () => void): void {
 }
 
 function tributeStep(roller: number, tier: number, next: () => void): void {
-  const others = livingSeats().filter(s => s !== roller) // must choose ANOTHER country
+  const others = livingSeats().filter(s => s !== roller) // the country(s) that could be crowned
   if (!others.length) return void next()
-  const apply = (t: number) => {
-    attackProtected[t] = true
+  // Collect 1/tier of everyone-but-the-crowned's cash into the crowned seat's treasury.
+  const levy = (t: number) => {
     let pot = 0
     for (let s = 0; s < numPlayers; s++) {
       if (!alive[s] || s === t) continue
@@ -2270,6 +2270,20 @@ function tributeStep(roller: number, tier: number, next: () => void): void {
       pot += pay
     }
     money[t] += pot
+    return pot
+  }
+  // 1v1: there's no ally to crown, and shielding your only rival for a whole round is nonsense
+  // (that was the "enemy has shields with no card played" bug). The spinner simply levies tribute
+  // from the opponent — a cash swing, NO attack-immunity. Shields come only from the Force Field card.
+  if (numPlayers <= 2) {
+    const pot = levy(roller)
+    syncStatus()
+    hud.banner(`👑 TRIBUTE ·  1/${tier}`, `${fortLabel(roller)} levies tribute — $${pot.toLocaleString()} from ${fortLabel(others[0])}!`, 3200)
+    return void next()
+  }
+  const apply = (t: number) => {
+    attackProtected[t] = true
+    const pot = levy(t)
     refreshForts()
     syncStatus()
     hud.banner(`👑 TRIBUTE ·  1/${tier}`, `all bow to ${fortLabel(t)} — $${pot.toLocaleString()} paid, and it can't be attacked for a round!`, 3600)
@@ -3110,7 +3124,11 @@ const FORT_UPGRADES = [
 ]
 
 function shopItems() {
-  return WEAPONS.filter(w => w.price !== undefined).map(w => ({
+  // Only offer weapons the player can actually afford (or already owns) — the big guns stay
+  // out of reach until you've raised the money, so the smart opening is to build an economy
+  // first. Equal for everyone (same rule, same prices); the free Baby Missile is always in hand.
+  const cash = money[turn]
+  return WEAPONS.filter(w => w.price !== undefined && (w.price <= cash || (sides[turn].arsenal.get(w.id) ?? 0) > 0)).map(w => ({
     name: w.name,
     owned: sides[turn].arsenal.get(w.id) ?? 0,
     price: w.price!,
