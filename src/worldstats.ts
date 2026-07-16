@@ -210,24 +210,24 @@ export const WORLD_STATS: Record<string, CountryStat> = {
 }
 
 // Nominal GDP (USD billions) → starting cash. The real spread is absurd (~$0.03B to ~$27,000B),
-// and The Bitter Truth leans INTO it: a steep power curve (exponent > 1) so a handful of giants
-// hoard almost everything while everyone else scrapes the floor — grotesquely, comically unfair.
-// $500 for the poorest, up to a quarter-MILLION for the top economy.
+// and The Bitter Truth leans INTO it, real-scale: a handful of giants hoard almost everything
+// while the poorest nations start with barely pocket change — a stark, educational gap. A ~$10
+// floor for the likes of Haiti/Tuvalu, up to a quarter-MILLION for the top economy.
 export function cashFromGdp(gdp: number): number {
   const CAP_GDP = 27000 // ≈ the largest economy; anchors the top of the curve
   const CAP_CASH = 250000
-  const FLOOR = 500
+  const FLOOR = 10
   const g = Math.min(1, Math.max(0, gdp) / CAP_GDP)
   return Math.round(Math.max(FLOOR, Math.min(CAP_CASH, FLOOR + (CAP_CASH - FLOOR) * Math.pow(g, 1.35))))
 }
 
-// Military power (0–100) → fortification: extra towers + bonus height (in 6-voxel storeys) on the
-// starting fortress. Also deliberately lopsided — a superpower rears up as a triple-towered spire
-// while a minnow gets a lone stub — so the board reads the inequality at a glance.
+// Military power (0–100) → fortification: extra towers + height, real-scale. A superpower rears
+// up as a triple-towered spire; a minnow like Haiti gets a tiny stub SHORTER than the base tower,
+// so the board reads the inequality at a glance. `height` is a bonus (can be negative for a stub).
 export function girthFromMil(mil: number): { towers: number; height: number } {
   const m = Math.min(1, Math.max(0, mil) / 100)
   const towers = mil >= 55 ? 2 : mil >= 26 ? 1 : 0 // "extra" count (0 → 1 tower total)
-  const storeys = Math.round(Math.pow(m, 1.3) * 9) // 0 (minnow) … 9 (superpower ≈ 3× base height)
+  const storeys = Math.round(Math.pow(m, 1.15) * 10) - 1 // -1 (tiny stub) … 9 (superpower ≈ 3× base)
   return { towers, height: storeys * 6 }
 }
 

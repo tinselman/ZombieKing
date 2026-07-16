@@ -265,7 +265,7 @@ const DECK: CardDef[] = [
   { id: 'skip', name: 'Skip Player', weight: 18, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
   { id: 'bumper', name: 'Bumper Crop', weight: 28, impl: true, emoji: '🌾', blurb: 'A bounty harvest! Your next income payout from resources is doubled.' },
   { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: "An army overruns the enemy's resources — their producers glow pink and their ENTIRE next payout is delivered to you instead. They collect nothing." },
-  { id: 'ghost', name: 'Ghost Tower', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
+  { id: 'ghost', name: 'Stealth', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
   { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks you. The next hostile act — a shell on your castle, a toaster, an army, or a theft — is blocked completely, then the field is spent.' },
   { id: 'steal', name: 'Steal', weight: 12, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — it's ripped off the map and added to YOUR resources, to place anywhere you like." },
   { id: 'stealres', name: 'Steal Resources!', weight: 6, impl: true, emoji: '🏴‍☠️', blurb: 'A world-wide heist — the single richest producer from EVERY opponent is ripped off the map at once and added to YOUR resources to re-place.' },
@@ -2093,6 +2093,8 @@ let wheelSpin: WheelState | null = null
 let wheelForce: { a: WheelSlice; b: WheelSlice } | null = null // test hook: preset the next spin
 
 function spinWheels(roller: number, done: () => void): void {
+  // No wheels on the opening round — nobody has an economy yet; income begins in round 2.
+  if (round <= 1 && !wheelForce) return void done()
   phase = 'shop' // inert while the wheels are up
   const a = wheelForce ? wheelForce.a : pickSlice(WHEEL_A)
   const b = wheelForce ? wheelForce.b : pickSlice(WHEEL_B)
@@ -3037,7 +3039,7 @@ function aiShop(s: number): void {
 
 const FORT_UPGRADES = [
   { name: 'Curtain wall (rings the keep, +higher each)', price: 2500, max: 4, owned: (s: number) => forti[s].barricade, apply: (s: number) => (forti[s].barricade += 1) },
-  { name: 'Raise main tower (+6 levels, from the base)', price: 5000, max: 10, owned: (s: number) => Math.round(forti[s].height / 6), apply: (s: number) => (forti[s].height += 6) },
+  { name: 'Raise main tower (+6 levels, from the base)', price: 5000, max: 10, owned: (s: number) => Math.max(0, Math.round(forti[s].height / 6)), apply: (s: number) => (forti[s].height += 6) },
   { name: 'Extra tower', price: 8000, max: 2, owned: (s: number) => forti[s].towers, apply: (s: number) => (forti[s].towers += 1) },
 ]
 

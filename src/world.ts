@@ -576,7 +576,7 @@ export class World {
   // geometry buildTower raises (walls, floors, roof, crenellations, doorway gap, and
   // foundations rooted to the current ground). Used by repairTransfer to find holes.
   private towerBlueprint(cx: number, cz: number, baseY: number, _cell: number, extraH: number, facing: number): Vec3[] {
-    const height = FORT_HEIGHT + extraH
+    const height = Math.max(9, FORT_HEIGHT + extraH) // a stub (negative bonus) never sinks below a keepable minimum
     const out: Vec3[] = []
     const add = (x: number, y: number, z: number) => {
       if (this.inBounds(x, y, z)) out.push({ x, y, z })
@@ -758,6 +758,12 @@ export class World {
     }
     const ix0 = minX - gap, ix1 = maxX + gap, iz0 = minZ - gap, iz1 = maxZ + gap // open hole
     const ox0 = ix0 - thick, ox1 = ix1 + thick, oz0 = iz0 - thick, oz1 = iz1 + thick // outer edge
+    // Tear down any existing berm in this footprint FIRST, so a rebuild (buying more berms, or a
+    // relocation) starts from bare terrain. Otherwise surfaceY sees the old wall and the new one
+    // stacks on top of it, ballooning the height each purchase (and a later move "shrinks" it).
+    for (let x = Math.max(0, minX - 14); x <= Math.min(GX - 1, maxX + 14); x++)
+      for (let z = Math.max(0, minZ - 14); z <= Math.min(GZ - 1, maxZ + 14); z++)
+        for (let y = 0; y < GY; y++) { const i = this.idx(x, y, z); if (this.grid[i] === BARRICADE) this.grid[i] = EMPTY }
     for (let x = ox0; x <= ox1; x++) {
       for (let z = oz0; z <= oz1; z++) {
         if (x >= ix0 && x <= ix1 && z >= iz0 && z <= iz1) continue // inside the hole → open
@@ -778,7 +784,7 @@ export class World {
   // Build one tower; returns the voxel count above its rubble line.
   private buildTower(fort: FortInfo, cx: number, cz: number, cell: number, extraH: number): number {
     const baseY = this.surfaceY(cx, cz) + 1
-    const height = FORT_HEIGHT + extraH
+    const height = Math.max(9, FORT_HEIGHT + extraH) // a stub (negative bonus) never sinks below a keepable minimum
     const facing = fort.facing // door faces toward the map centre
     const put = (x: number, y: number, z: number) => {
       if (this.inBounds(x, y, z)) this.grid[this.idx(x, y, z)] = cell
