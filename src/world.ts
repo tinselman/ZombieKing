@@ -747,7 +747,7 @@ export class World {
   // combined footprint), and each extra berm bought makes it taller and thicker.
   buildBarricade(cx: number, cz: number, facing: number, extraTowers: number, level: number): void {
     if (level <= 0) return
-    const height = 4 + level * 4 // 1 berm: 8 tall, 2: 12, 3: 16 — more berms → higher wall
+    const height = 4 + level * 9 // 1: 13 tall, 2: 22, 3: 31, 4: 40 — a maxed wall towers over the 17-tall keep
     const thick = 1 + level // 1: 2 thick, 2: 3, 3: 4 (a chunkier wall soaks more)
     const gap = 4 // clear space between the outermost tower wall and the inner face of the berm
     // Bounding box of every tower footprint, then the open interior (hole) and outer extent.
