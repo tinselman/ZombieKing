@@ -201,12 +201,15 @@ function livingSeats(): number[] {
   for (let s = 0; s < numPlayers; s++) if (alive[s]) out.push(s)
   return out
 }
+// How a seat is named in messages. Prefer its flag + nation (fortLabel) so that when a card is
+// played ON you it's always obvious WHO did it — and so 3–4 player games don't call every rival
+// "the enemy". Falls back to a plain label only if no country was picked.
 function nameOf(s: number): string {
-  return twoPlayer ? `Player ${s + 1}` : s === 0 ? 'you' : 'the enemy'
+  return fortLabel(s)
 }
 function capName(s: number): string {
   const n = nameOf(s)
-  return n[0].toUpperCase() + n.slice(1)
+  return /^[a-z]/.test(n) ? n[0].toUpperCase() + n.slice(1) : n // never mangle a leading flag emoji
 }
 // Match-persistent structure upgrades (taller main tower, extra towers), one per seat.
 const forti: Fortifications[] = Array.from({ length: 4 }, () => ({ height: 0, towers: 0, barricade: 0 }))
@@ -333,9 +336,25 @@ const skipNext = [false, false, false, false]
 // Extra turns a seat must sit out (nuclear meltdown on its own reactor, or a fallout cloud
 // drifting over it) — counts DOWN one per would-be turn, on top of the one-shot Skip card.
 const skipTurns = [0, 0, 0, 0]
-// Resource-wheel round state: a Blockade denies a seat all wheel income for a round. Resets at
-// each round start. (Nothing grants attack-immunity any more — only the Force Field card blocks.)
+// Resource-wheel state: a Blockade denies a seat its wheel income. (Nothing grants attack-immunity
+// any more — only the Force Field card blocks.)
 const resourceBlocked = [false, false, false, false]
+// ---- one-turn effect lifetimes -------------------------------------------------------------
+// Every card / wheel effect lasts exactly ONE turn. `turnSerial` ticks once per turn; each effect
+// records the serial it was applied on, and expireTurnEffects() clears it at the END of the
+// AFFECTED seat's turn — but never on the turn it was applied. That one rule covers both
+// directions: a debuff cast on someone else's turn (Blockade, Army) costs the victim exactly
+// their next turn, while a self-buff cast on your own turn (Force Field, Stealth) still covers
+// the rotation you bought it for and then lapses on your next turn.
+let turnSerial = 0
+const appliedAt = { blocked: [0, 0, 0, 0], field: [0, 0, 0, 0], raid: [0, 0, 0, 0], ghost: [0, 0, 0, 0] }
+function blockSeat(s: number): void { resourceBlocked[s] = true; appliedAt.blocked[s] = turnSerial }
+function expireTurnEffects(s: number): void {
+  if (resourceBlocked[s] && appliedAt.blocked[s] < turnSerial) resourceBlocked[s] = false
+  if (forceField[s] && appliedAt.field[s] < turnSerial) forceField[s] = false
+  if (armyRaidOf[s] && appliedAt.raid[s] < turnSerial) armyRaidOf[s] = null
+  if ((world.hiddenForts[s] || ghostDecoyOf[s]) && appliedAt.ghost[s] < turnSerial) { world.hiddenForts[s] = false; ghostDecoyOf[s] = null; world.dirty = true }
+}
 // A drifting radioactive cloud from a meltdown (null when none is loose). It blows in a
 // random direction; any OTHER seat it passes over loses its crops and misses two turns.
 let fallout: { pos: THREE.Vector3; vx: number; vz: number; life: number; mesh: THREE.Mesh; hit: Set<number> } | null = null
@@ -706,7 +725,8 @@ function cardSkip(side: number, foe: number): void {
 // Force Field: raise an invisible one-hit shield over your castle (see crater()).
 function cardForcefield(side: number): void {
   forceField[side] = true
-  hud.msg(`${capName(side)} raised a force field`)
+  appliedAt.field[side] = turnSerial
+  hud.msg(`${capName(side)} raised a force field — it holds until the end of their next turn`)
 }
 
 // Rebuild: repair your own tower's missing voxels, brick by brick from the ground up,
@@ -770,6 +790,7 @@ function cardArmy(side: number, foe: number): void {
   if (shieldBlocks(foe)) return void hud.msg('the force field turns the army away!')
   spawnArmy(side)
   armyRaidOf[foe] = { caster: side, done: false }
+  appliedAt.raid[foe] = turnSerial
   world.setRaided(foe)
   hud.msg(`${capName(side)}'s army overruns ${nameOf(foe)}'s resources — their next payout is forfeit!`)
 }
@@ -823,6 +844,7 @@ function cardStealResources(side: number): void {
 function cardGhost(side: number): void {
   const oldT = world.forts[side]?.towers[0]
   ghostDecoyOf[side] = oldT ? { cx: oldT.cx, cz: oldT.cz } : null
+  appliedAt.ghost[side] = turnSerial // the cloak lapses at the end of the caster's next turn
   if (isHuman(side)) {
     // Hand-reposition; the ghost is confirmed on placement (placeCastle sets the decoy).
     ghostReposition = true
@@ -836,6 +858,7 @@ function cardGhost(side: number): void {
   world.castleOverride[side] = { cx, cz }
   world.moveFort(side, cx, cz, forti[side]) // carries the tower's damage to the new spot
   world.hiddenForts[side] = true
+  appliedAt.ghost[side] = turnSerial
   world.rebuild()
   refreshIntegrity()
   snapCannonToSeat(side)
@@ -2043,6 +2066,7 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
 // Hand off to the other side — unless Skip Player flagged them, in which case their
 // turn is skipped entirely and the current side goes again.
 function advanceTurn(): void {
+  expireTurnEffects(turn) // the finishing seat's one-turn effects lapse here
   // Rotate to the next LIVING seat, bypassing any eliminated or Skip-flagged seat. In a
   // 2-player game bypassing the (only) foe lands back on the caster — the classic Skip
   // "go again". In 3–4 players it simply denies the skipped seat its turn.
@@ -2097,7 +2121,7 @@ const WHEEL_A_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'blockade']
 const WHEEL_B_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'aid']
 
 type WheelState = {
-  roller: number; a: WheelSlice; b: WheelSlice; human: boolean; done: () => void
+  roller: number; a: WheelSlice; b: WheelSlice; done: () => void
   rotA: number; rotB: number; spA: number; spB: number // live rotation (deg) + spin speed (deg/s)
   mode: 'spin' | 'decel' | 'hold'; t: number
   startA: number; startB: number; targetA: number; targetB: number; decelDur: number
@@ -2114,20 +2138,15 @@ function spinWheels(roller: number, done: () => void): void {
   const a = wheelForce ? wheelForce.a : pickSlice(WHEEL_A)
   const b = wheelForce ? wheelForce.b : pickSlice(WHEEL_B)
   wheelForce = null
-  const human = isHuman(roller)
   wheelSpin = {
-    roller, a, b, human, done,
+    roller, a, b, done,
     rotA: 0, rotB: 0, spA: 900 + Math.random() * 220, spB: 820 + Math.random() * 220,
     mode: 'spin', t: 0, startA: 0, startB: 0, targetA: 0, targetB: 0, decelDur: 1.7,
   }
-  hud.showWheels(WHEEL_A_FACES.map(sliceIcon), WHEEL_B_FACES.map(sliceIcon), `${fortLabel(roller)} spins the resource wheels`, human ? stopWheels : null)
+  // The wheels slow down on their own — nobody has to click to stop them.
+  hud.showWheels(WHEEL_A_FACES.map(sliceIcon), WHEEL_B_FACES.map(sliceIcon), `${fortLabel(roller)} spins the resource wheels`, null)
   hud.setWheelRotation(0, 0)
-  hud.setWheelText(human ? `${fortLabel(roller)} — SPIN!` : `${fortLabel(roller)} spins the wheels…`, human ? 'CLICK to stop the wheels' : '')
-}
-
-// Human click → the wheels begin to decelerate onto the result.
-function stopWheels(): void {
-  if (wheelSpin && wheelSpin.mode === 'spin') beginWheelDecel(wheelSpin)
+  hud.setWheelText(`${fortLabel(roller)} spins the wheels…`, '')
 }
 
 function beginWheelDecel(w: WheelState): void {
@@ -2144,7 +2163,6 @@ function beginWheelDecel(w: WheelState): void {
   }
   w.targetA = land(WHEEL_A_FACES, w.a, w.rotA)
   w.targetB = land(WHEEL_B_FACES, w.b, w.rotB)
-  if (w.human) hud.setWheelText(`${fortLabel(w.roller)} spins the wheels…`, '')
 }
 
 function updateWheels(dt: number): void {
@@ -2155,7 +2173,7 @@ function updateWheels(dt: number): void {
     w.rotA += w.spA * dt
     w.rotB += w.spB * dt
     hud.setWheelRotation(w.rotA, w.rotB)
-    if (!w.human && w.t > 0.9) beginWheelDecel(w) // AI stops itself after a beat
+    if (w.t > 0.9) beginWheelDecel(w) // every spin slows itself after a beat — no click needed
   } else if (w.mode === 'decel') {
     const u = Math.min(1, w.t / w.decelDur)
     const e = 1 - Math.pow(1 - u, 3) // ease-out: fast → gliding to a stop
@@ -2245,12 +2263,12 @@ function blockadeStep(roller: number, next: () => void): void {
   const foes = livingSeats().filter(s => s !== roller)
   if (!foes.length) return void next()
   const apply = (t: number) => {
-    resourceBlocked[t] = true
+    blockSeat(t)
     refreshForts()
-    hud.banner('🚫 BLOCKADE', `${fortLabel(t)} is cut off — no resource income for a round!`, 2800)
+    hud.banner('🚫 BLOCKADE', `${fortLabel(roller)} cuts off ${fortLabel(t)} — no resource income on their next turn!`, 3000)
     next()
   }
-  if (isHuman(roller)) hud.showTargetPicker('🚫 Blockade — starve whom of income?', foes.map(s => ({ seat: s, label: fortLabel(s) })), apply)
+  if (isHuman(roller)) hud.showTargetPicker('🚫 Blockade — starve whom of income for a turn?', foes.map(s => ({ seat: s, label: fortLabel(s) })), apply)
   else apply(aiPickBlockade(roller))
 }
 
@@ -2295,6 +2313,7 @@ function aiPickAid(roller: number): number {
 }
 
 function startTurn(s: number): void {
+  turnSerial++ // stamps effect lifetimes — see expireTurnEffects
   // Hotseat: gate every human turn behind a "pass the keyboard" screen so the other
   // player's leftover keypresses can't act, and it's unmistakable whose turn it is.
   if (twoPlayer && isHuman(s)) {
