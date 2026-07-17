@@ -151,7 +151,7 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
+type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'fallout' | 'aiThink' | 'aiAim' | 'end' | 'shop'
 
 // Match economy: best-of-ROUNDS. Income comes from producers (see sideIncome);
 // winning a round plunders half the loser's cash + one card (not per-hit pay).
@@ -353,9 +353,25 @@ function expireTurnEffects(s: number): void {
   if (resourceBlocked[s] && appliedAt.blocked[s] < turnSerial) resourceBlocked[s] = false
   if (armyRaidOf[s] && appliedAt.raid[s] < turnSerial) armyRaidOf[s] = null
 }
-// A drifting radioactive cloud from a meltdown (null when none is loose). It blows in a
-// random direction; any OTHER seat it passes over loses its crops and misses two turns.
-let fallout: { pos: THREE.Vector3; vx: number; vz: number; life: number; mesh: THREE.Mesh; hit: Set<number> } | null = null
+// Drifting radioactive clouds from meltdowns — a roiling mass of dark particle puffs per
+// exploded reactor (chain reactions loose several at once). Each rises from its plant, then
+// rides a live, meandering wind; every nation it passes over loses its crops and two turns.
+// While ANY cloud (or a pending chain detonation) is in the sky, the game holds the next turn
+// so every player watches where the fallout goes (see finishResolve / updateFallouts).
+type FalloutCloud = {
+  pos: THREE.Vector3
+  life: number
+  group: THREE.Group
+  puffs: { m: THREE.Mesh; base: THREE.Vector3; ph: number; sp: number }[]
+  hit: Set<number>
+}
+let fallouts: FalloutCloud[] = []
+// The fallout's own weather: seeded from the turn's wind, then meandering smoothly (layered
+// sines ≈ Perlin) — so venting a reactor when the wind points at an enemy is a real gamble;
+// the sky can turn on you mid-drift. The HUD wind arrow tracks it live.
+let falloutWind: { baseAng: number; baseMag: number; t: number; p1: number; p2: number; p3: number } | null = null
+const pendingMeltdowns: { owner: number; cx: number; cz: number; delay: number }[] = [] // staggered chain blasts
+let falloutContinuation: (() => void) | null = null // the held remainder of finishResolve
 // Ghost Tower: set while the player is hand-repositioning their (still-visible) tower.
 let ghostReposition = false
 function cardDef(id: CardId): CardDef {
@@ -1822,6 +1838,13 @@ function updateCamera(dt: number): void {
     } else {
       aimCamera(turn, desiredPos, desiredLook)
     }
+  } else if (phase === 'fallout') {
+    // Everyone watches the sky: the whole board from the SHOOTER's side (turn hasn't advanced
+    // while the fallout holds the game), so the player who lit the fuse sees where it drifts.
+    const m = seatMirror()
+    desiredPos.set(GX / 2 - m * 96, 150, GZ / 2)
+    desiredLook.set(GX / 2, 2, GZ / 2)
+    k = 2.2
   } else if (phase === 'aiThink' || phase === 'aiAim') {
     aimCamera(turn, desiredPos, desiredLook) // frame the acting AI seat's cannon
   } else if (phase === 'fly') {
@@ -2857,6 +2880,7 @@ function checkMeltdowns(): void {
 
 function meltdown(owner: number, cx: number, cz: number): void {
   sfx.rumble()
+  sfx.boom(9)
   hud.banner('☢️ NUCLEAR MELTDOWN', `${capName(owner)}'s reactor detonates — the fallout spreads!`, 3600)
   killCropsNear(cx, cz, MELT_R) // every crop in the blast (anyone's) dies
   world.contaminated.push({ cx, cz, r: MELT_R }) // and the ground is poisoned for the round
@@ -2864,10 +2888,24 @@ function meltdown(owner: number, cx: number, cz: number): void {
   // caves in anything (forts included) caught in the blast.
   crater(new THREE.Vector3(cx, world.surfaceY(cx, cz), cz), 9.5, true)
   const at = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 6, cz)
-  spawnExplosion(at, 16, true)
-  addShake(18, at)
+  spawnExplosion(at, 20, true)
+  addShake(20, at)
   skipTurns[owner] = Math.max(skipTurns[owner], 2) // the owner is knocked out for two turns
-  spawnFallout(cx, cz) // the black cloud can drift over anyone — the owner included
+  spawnFalloutCloud(cx, cz) // the black cloud can drift over anyone — the owner included
+  // CHAIN REACTION: any other reactor whose 9×9 pad sits within a ~3-voxel gap of this one
+  // (centre-to-centre ≤ 11) cooks off moments later — each with its own blast and cloud.
+  // They're pulled off the map NOW (a cooking reactor produces nothing and can't re-chain).
+  let chainDelay = 0.45
+  for (let s = 0; s < numPlayers; s++) {
+    for (let i = planted[s].length - 1; i >= 0; i--) {
+      const p = planted[s][i]
+      if (p.type !== PLANT || Math.max(Math.abs(p.cx - cx), Math.abs(p.cz - cz)) > 11) continue
+      planted[s].splice(i, 1)
+      world.removeProducer(p.cx, p.cz)
+      pendingMeltdowns.push({ owner: s, cx: p.cx, cz: p.cz, delay: chainDelay })
+      chainDelay += 0.45
+    }
+  }
 }
 
 // Destroy every crop (any seat's) whose bed sits within `r` of (cx,cz). Permanent — they're
@@ -2883,50 +2921,113 @@ function killCropsNear(cx: number, cz: number, r: number): void {
   }
 }
 
-// Loose a single black fallout cloud from the meltdown site, drifting in a RANDOM direction.
-// Nothing is safe — it can roll over anyone, the reactor's owner included.
-function spawnFallout(cx: number, cz: number): void {
-  if (fallout) scene.remove(fallout.mesh)
-  const geo = new THREE.SphereGeometry(9, 12, 10)
-  const mat = new THREE.MeshLambertMaterial({ color: 0x1a1e16, emissive: 0x1f2a12, emissiveIntensity: 0.5, transparent: true, opacity: 0.72 })
-  const mesh = new THREE.Mesh(geo, mat)
-  const ang = wind.x || wind.z ? Math.atan2(wind.z, wind.x) + (Math.random() - 0.5) : Math.random() * Math.PI * 2
-  const speed = 7
-  const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 20, cz)
-  mesh.position.copy(pos)
-  scene.add(mesh)
-  fallout = { pos, vx: Math.cos(ang) * speed, vz: Math.sin(ang) * speed, life: 0, mesh, hit: new Set() }
+// Loose a black cloud of roiling particle puffs from a meltdown site. It swells up out of the
+// wreck, then rides the (meandering) wind. Nothing is safe — it can roll over anyone, the
+// reactor's owner included, and it keeps going until it blows clean off the map.
+const FALLOUT_RISE = 1.7 // seconds spent boiling upward before the drift begins
+function spawnFalloutCloud(cx: number, cz: number): void {
+  const group = new THREE.Group()
+  const puffs: FalloutCloud['puffs'] = []
+  for (let i = 0; i < 22; i++) {
+    const r = 1.6 + Math.random() * 2.7
+    const geo = new THREE.SphereGeometry(r, 7, 6)
+    const mat = new THREE.MeshLambertMaterial({
+      color: 0x14170f, emissive: 0x223012, emissiveIntensity: 0.45,
+      transparent: true, opacity: 0.22 + Math.random() * 0.3, depthWrite: false, // soft, blurred overlap
+    })
+    const m = new THREE.Mesh(geo, mat)
+    const base = new THREE.Vector3((Math.random() - 0.5) * 13, (Math.random() - 0.5) * 6, (Math.random() - 0.5) * 13)
+    m.position.copy(base)
+    group.add(m)
+    puffs.push({ m, base, ph: Math.random() * Math.PI * 2, sp: 0.6 + Math.random() * 1.2 })
+  }
+  const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 5, cz)
+  group.position.copy(pos)
+  group.scale.setScalar(0.35)
+  scene.add(group)
+  fallouts.push({ pos, life: 0, group, puffs, hit: new Set() })
+  if (!falloutWind) {
+    // Seed the fallout's weather from the turn's wind (that's the read the shooter gambled on).
+    const baseAng = wind.x || wind.z ? Math.atan2(wind.z, wind.x) : Math.random() * Math.PI * 2
+    const baseMag = Math.max(3, Math.hypot(wind.x, wind.z))
+    falloutWind = { baseAng, baseMag, t: 0, p1: Math.random() * 6.28, p2: Math.random() * 6.28, p3: Math.random() * 6.28 }
+  }
 }
 
-// Drift the fallout cloud each frame; the first OTHER seat it reaches loses its crops and two
-// turns. It fizzles after ~14s or once it blows off the map — it may hit no one.
-function updateFallout(dt: number): void {
-  if (!fallout) return
-  const f = fallout
-  f.life += dt
-  f.pos.x += f.vx * dt
-  f.pos.z += f.vz * dt
-  f.pos.y = world.surfaceY(Math.round(Math.max(0, Math.min(GX - 1, f.pos.x))), Math.round(Math.max(0, Math.min(GZ - 1, f.pos.z)))) + 20
-  f.mesh.position.copy(f.pos)
-  f.mesh.rotation.y += dt * 0.6
-  for (let s = 0; s < numPlayers; s++) {
-    if (f.hit.has(s) || !alive[s]) continue
-    const ft = world.forts[s]?.towers[0]
-    const overFort = ft && Math.hypot(f.pos.x - ft.cx, f.pos.z - ft.cz) < 13
-    const overCrop = planted[s].some(p => p.type === CROP && Math.hypot(f.pos.x - p.cx, f.pos.z - p.cz) < 13)
-    if (overFort || overCrop) {
-      f.hit.add(s)
-      killCropsNear(f.pos.x, f.pos.z, 15)
-      skipTurns[s] = Math.max(skipTurns[s], 2)
-      if (isHuman(turn)) refreshResources()
-      syncStatus()
-      hud.banner('☢️ FALLOUT', `the radioactive cloud rolls over ${nameOf(s)} — crops ruined, two turns lost!`, 3200)
-      sfx.boom(4)
+// Per-frame: pop staggered chain detonations, evolve the meandering wind, drift every cloud,
+// damage whoever it rolls over, and — once the sky is clear — release the held turn.
+function updateFallouts(dt: number): void {
+  for (let i = pendingMeltdowns.length - 1; i >= 0; i--) {
+    const p = pendingMeltdowns[i]
+    p.delay -= dt
+    if (p.delay <= 0) {
+      pendingMeltdowns.splice(i, 1)
+      meltdown(p.owner, p.cx, p.cz) // may chain further plants + loose another cloud
     }
   }
-  if (f.life > 14 || f.pos.x < -6 || f.pos.x > GX + 6 || f.pos.z < -6 || f.pos.z > GZ + 6) {
-    scene.remove(f.mesh)
-    fallout = null
+  if (fallouts.length && falloutWind) {
+    const fw = falloutWind
+    fw.t += dt
+    // Smooth pseudo-Perlin meander: the heading wanders up to ~±77° off the seed wind, and the
+    // strength breathes — a cloud aimed at an enemy can genuinely turn back on its maker.
+    const ang = fw.baseAng + 0.85 * Math.sin(fw.t * 0.21 + fw.p1) + 0.5 * Math.sin(fw.t * 0.57 + fw.p2)
+    const mag = fw.baseMag * (0.8 + 0.3 * Math.sin(fw.t * 0.37 + fw.p3))
+    hud.setWind(Math.cos(ang) * mag, Math.sin(ang) * mag) // the HUD arrow tracks the shifting sky
+    const speed = 4.5 + mag * 0.55
+    for (let ci = fallouts.length - 1; ci >= 0; ci--) {
+      const f = fallouts[ci]
+      f.life += dt
+      const gx = Math.round(Math.max(0, Math.min(GX - 1, f.pos.x)))
+      const gz = Math.round(Math.max(0, Math.min(GZ - 1, f.pos.z)))
+      const gy = world.surfaceY(gx, gz)
+      if (f.life < FALLOUT_RISE) {
+        // Boil upward out of the wreck, swelling to full size.
+        const e = 1 - Math.pow(1 - f.life / FALLOUT_RISE, 2)
+        f.pos.y = gy + 5 + e * 15
+        f.group.scale.setScalar(0.35 + e * 0.65)
+      } else {
+        f.pos.x += Math.cos(ang) * speed * dt
+        f.pos.z += Math.sin(ang) * speed * dt
+        f.pos.y += (gy + 20 - f.pos.y) * Math.min(1, dt * 2)
+        for (let s = 0; s < numPlayers; s++) {
+          if (f.hit.has(s) || !alive[s]) continue
+          const ft = world.forts[s]?.towers[0]
+          const overFort = ft && Math.hypot(f.pos.x - ft.cx, f.pos.z - ft.cz) < 13
+          const overCrop = planted[s].some(p => p.type === CROP && Math.hypot(f.pos.x - p.cx, f.pos.z - p.cz) < 13)
+          if (overFort || overCrop) {
+            f.hit.add(s)
+            killCropsNear(f.pos.x, f.pos.z, 15)
+            skipTurns[s] = Math.max(skipTurns[s], 2)
+            if (isHuman(turn)) refreshResources()
+            syncStatus()
+            hud.banner('☢️ FALLOUT', `the radioactive cloud rolls over ${nameOf(s)} — crops ruined, two turns lost!`, 3200)
+            sfx.boom(4)
+          }
+        }
+      }
+      f.group.position.copy(f.pos)
+      f.group.rotation.y += dt * 0.25
+      for (const p of f.puffs) {
+        // Each puff churns around its anchor — the roiling, blurred look.
+        p.m.position.set(
+          p.base.x + Math.sin(fw.t * p.sp + p.ph) * 1.6,
+          p.base.y + Math.sin(fw.t * p.sp * 0.8 + p.ph * 1.7) * 1.1,
+          p.base.z + Math.cos(fw.t * p.sp + p.ph) * 1.6
+        )
+      }
+      // Gone once it clears the map (or a 40s hard cap so the game can never wedge).
+      if (f.life > 40 || f.pos.x < -6 || f.pos.x > GX + 6 || f.pos.z < -6 || f.pos.z > GZ + 6) {
+        scene.remove(f.group)
+        fallouts.splice(ci, 1)
+      }
+    }
+    if (!fallouts.length) falloutWind = null
+  }
+  // Sky clear + no chain blasts pending → release the held turn (the rest of finishResolve).
+  if (!fallouts.length && !pendingMeltdowns.length && falloutContinuation) {
+    const go = falloutContinuation
+    falloutContinuation = null
+    go()
   }
 }
 
@@ -2948,6 +3049,20 @@ function finishResolve(force = false): void {
   }
   refreshIntegrity()
   checkMeltdowns() // a nuclear plant reduced to rubble this shot melts down
+  // A meltdown holds the game: nobody takes a turn until every player has watched the fallout
+  // ride the wind to wherever it lands (and any chain reactions finish going off). The rest of
+  // this resolve — deaths, round end, next turn — runs when the sky clears (updateFallouts).
+  if (fallouts.length || pendingMeltdowns.length) {
+    falloutContinuation = () => finishResolveTail(wasCard)
+    phase = 'fallout'
+    return
+  }
+  finishResolveTail(wasCard)
+}
+
+// The tail of a resolve — trust fallout, eliminations, and the handoff to the next turn.
+// Split out so a nuclear-fallout sequence can hold it until the clouds clear the map.
+function finishResolveTail(wasCard: boolean): void {
   // Attacking a seat costs their trust in you — an ally you shell defects (and a betrayer
   // you already dislike sinks further). Only the acting seat `turn` is blamed for this shot.
   if (numPlayers > 2) {
@@ -3034,7 +3149,12 @@ function setupRoundWorld(): void {
   tasks.length = 0
   // Card effects don't carry between rounds: clear ghost/field/raid, restore cannons.
   ghostReposition = false
-  if (fallout) { scene.remove(fallout.mesh); fallout = null } // no cloud carries into a new round
+  // No cloud, pending chain blast, or held turn carries into a new round.
+  for (const f of fallouts) scene.remove(f.group)
+  fallouts = []
+  pendingMeltdowns.length = 0
+  falloutWind = null
+  falloutContinuation = null
   if (wheelSpin) { wheelSpin = null; hud.hideWheels() }
   for (let s = 0; s < 4; s++) {
     ghostDecoyOf[s] = null
@@ -3423,7 +3543,7 @@ function tick(now: number): void {
   updatePlayerAim(dt)
   updatePlant(dt)
   updateCastle(dt)
-  updateFallout(dt)
+  updateFallouts(dt)
   updateWheels(dt)
   updateAi(dt)
 
@@ -3707,7 +3827,9 @@ window.__sv = {
     forceField: forceField.slice(0, numPlayers),
     skipTurns: skipTurns.slice(0, numPlayers),
     contaminated: world.contaminated.length,
-    fallout: fallout ? { x: Math.round(fallout.pos.x), z: Math.round(fallout.pos.z), hit: [...fallout.hit] } : null,
+    fallout: fallouts[0] ? { x: Math.round(fallouts[0].pos.x), z: Math.round(fallouts[0].pos.z), hit: [...fallouts[0].hit] } : null,
+    fallouts: fallouts.length,
+    pendingMeltdowns: pendingMeltdowns.length,
     plantedTypes: Array.from({ length: numPlayers }, (_, s) => planted[s].map(p => p.type)),
   }),
   world,
@@ -3798,9 +3920,16 @@ window.__sv = {
     planted[seat].push({ cx, cz, type, baseYield: spec.baseYield, age: 3 })
     world.buildProducer(cx, cz, seat, type, spec.baseYield, 3)
   },
-  meltdownAt: (owner: number, cx: number, cz: number) => meltdown(owner, cx, cz),
+  // Mirrors the real path (checkMeltdowns): the plant leaves the map BEFORE it blows, so the
+  // chain scan can't re-trigger on the origin.
+  meltdownAt: (owner: number, cx: number, cz: number) => {
+    const i = planted[owner].findIndex(p => p.type === PLANT && p.cx === cx && p.cz === cz)
+    if (i >= 0) { planted[owner].splice(i, 1); world.removeProducer(cx, cz) }
+    meltdown(owner, cx, cz)
+  },
   moveFallout(x: number, z: number) {
-    if (fallout) { fallout.pos.x = x; fallout.pos.z = z }
+    const f0 = fallouts[0]
+    if (f0) { f0.pos.x = x; f0.pos.z = z; f0.life = Math.max(f0.life, FALLOUT_RISE) } // skip the rise so damage checks run
   },
   forceWheel(a: number | string, b: number | string) {
     wheelForce = { a: a as WheelSlice, b: b as WheelSlice }
