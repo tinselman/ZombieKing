@@ -2887,9 +2887,13 @@ function meltdown(owner: number, cx: number, cz: number): void {
   // The reactor goes up with the force of a Nuke — a real crater that carves terrain and
   // caves in anything (forts included) caught in the blast.
   crater(new THREE.Vector3(cx, world.surfaceY(cx, cz), cz), 9.5, true)
-  const at = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 6, cz)
-  spawnExplosion(at, 20, true)
-  addShake(20, at)
+  const sy = world.surfaceY(cx, cz)
+  // A big, tall detonation: a ground fireball, a fireball rising up the stem, a blinding
+  // double flash, and a hard shake — so the meltdown reads as a genuine nuclear blast.
+  spawnExplosion(new THREE.Vector3(cx, sy + 6, cz), 28, true)
+  spawnExplosion(new THREE.Vector3(cx, sy + 22, cz), 18, true) // a second burst higher up the column
+  spawnFlash(new THREE.Vector3(cx, sy + 14, cz), 34, 0xfff0c8)
+  addShake(26, new THREE.Vector3(cx, sy, cz))
   skipTurns[owner] = Math.max(skipTurns[owner], 2) // the owner is knocked out for two turns
   spawnFalloutCloud(cx, cz) // the black cloud can drift over anyone — the owner included
   // CHAIN REACTION: any other reactor whose 9×9 pad sits within a ~3-voxel gap of this one
@@ -2921,29 +2925,39 @@ function killCropsNear(cx: number, cz: number, r: number): void {
   }
 }
 
-// Loose a black cloud of roiling particle puffs from a meltdown site. It swells up out of the
-// wreck, then rides the (meandering) wind. Nothing is safe — it can roll over anyone, the
-// reactor's owner included, and it keeps going until it blows clean off the map.
-const FALLOUT_RISE = 1.7 // seconds spent boiling upward before the drift begins
+// Loose a towering black mushroom cloud of roiling particle puffs from a meltdown site. It erupts
+// up out of the wreck as a tall plume — a broad billowing cap over a narrower stem — then leans
+// over and rides the (meandering) wind. Nothing is safe: it rolls over anyone, the reactor's
+// owner included, and keeps going until it blows clean off the map.
+const FALLOUT_RISE = 2.2 // seconds spent erupting upward before the drift begins
+const FALLOUT_CAP_H = 34 // height (above terrain) the cap rides at once risen
 function spawnFalloutCloud(cx: number, cz: number): void {
   const group = new THREE.Group()
   const puffs: FalloutCloud['puffs'] = []
-  for (let i = 0; i < 22; i++) {
-    const r = 1.6 + Math.random() * 2.7
-    const geo = new THREE.SphereGeometry(r, 7, 6)
+  const puff = (base: THREE.Vector3, r: number, op: number) => {
+    const geo = new THREE.SphereGeometry(r, 8, 7)
     const mat = new THREE.MeshLambertMaterial({
-      color: 0x14170f, emissive: 0x223012, emissiveIntensity: 0.45,
-      transparent: true, opacity: 0.22 + Math.random() * 0.3, depthWrite: false, // soft, blurred overlap
+      color: 0x0b0d07, emissive: 0x1f2c0a, emissiveIntensity: 0.5, // near-black, sickly nuclear-green glow
+      transparent: true, opacity: op, depthWrite: false, // soft, blurred overlap
     })
     const m = new THREE.Mesh(geo, mat)
-    const base = new THREE.Vector3((Math.random() - 0.5) * 13, (Math.random() - 0.5) * 6, (Math.random() - 0.5) * 13)
     m.position.copy(base)
     group.add(m)
     puffs.push({ m, base, ph: Math.random() * Math.PI * 2, sp: 0.6 + Math.random() * 1.2 })
   }
-  const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 5, cz)
+  // Broad billowing CAP (24 big puffs, disc up to r≈13, around the group origin = cap centre).
+  for (let i = 0; i < 24; i++) {
+    const a = Math.random() * Math.PI * 2
+    const rad = Math.pow(Math.random(), 0.7) * 13
+    puff(new THREE.Vector3(Math.cos(a) * rad, (Math.random() - 0.4) * 12, Math.sin(a) * rad), 3.5 + Math.random() * 4, 0.5 + Math.random() * 0.32)
+  }
+  // Narrower STEM (13 puffs) reaching from the cap down toward the ground.
+  for (let i = 0; i < 13; i++) {
+    puff(new THREE.Vector3((Math.random() - 0.5) * 8, -6 - Math.random() * (FALLOUT_CAP_H - 8), (Math.random() - 0.5) * 8), 2.5 + Math.random() * 2.2, 0.4 + Math.random() * 0.3)
+  }
+  const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 4, cz)
   group.position.copy(pos)
-  group.scale.setScalar(0.35)
+  group.scale.setScalar(0.25)
   scene.add(group)
   fallouts.push({ pos, life: 0, group, puffs, hit: new Set() })
   if (!falloutWind) {
@@ -2981,14 +2995,14 @@ function updateFallouts(dt: number): void {
       const gz = Math.round(Math.max(0, Math.min(GZ - 1, f.pos.z)))
       const gy = world.surfaceY(gx, gz)
       if (f.life < FALLOUT_RISE) {
-        // Boil upward out of the wreck, swelling to full size.
+        // Erupt upward out of the wreck, the cap climbing to full height and swelling to size.
         const e = 1 - Math.pow(1 - f.life / FALLOUT_RISE, 2)
-        f.pos.y = gy + 5 + e * 15
-        f.group.scale.setScalar(0.35 + e * 0.65)
+        f.pos.y = gy + 4 + e * FALLOUT_CAP_H
+        f.group.scale.setScalar(0.25 + e * 0.9)
       } else {
         f.pos.x += Math.cos(ang) * speed * dt
         f.pos.z += Math.sin(ang) * speed * dt
-        f.pos.y += (gy + 20 - f.pos.y) * Math.min(1, dt * 2)
+        f.pos.y += (gy + FALLOUT_CAP_H - f.pos.y) * Math.min(1, dt * 2)
         for (let s = 0; s < numPlayers; s++) {
           if (f.hit.has(s) || !alive[s]) continue
           const ft = world.forts[s]?.towers[0]
@@ -3010,9 +3024,9 @@ function updateFallouts(dt: number): void {
       for (const p of f.puffs) {
         // Each puff churns around its anchor — the roiling, blurred look.
         p.m.position.set(
-          p.base.x + Math.sin(fw.t * p.sp + p.ph) * 1.6,
-          p.base.y + Math.sin(fw.t * p.sp * 0.8 + p.ph * 1.7) * 1.1,
-          p.base.z + Math.cos(fw.t * p.sp + p.ph) * 1.6
+          p.base.x + Math.sin(fw.t * p.sp + p.ph) * 2.4,
+          p.base.y + Math.sin(fw.t * p.sp * 0.8 + p.ph * 1.7) * 1.6,
+          p.base.z + Math.cos(fw.t * p.sp + p.ph) * 2.4
         )
       }
       // Gone once it clears the map (or a 40s hard cap so the game can never wedge).
