@@ -23,7 +23,7 @@ const CSS = `
 #sc-fort3 .bar > div { background: #d6a72f; }
 #sc-fort0.dead, #sc-fort1.dead, #sc-fort2.dead, #sc-fort3.dead { opacity: 0.4; }
 /* Bitter Truth: a fort bar opens the country-info panel. Signal it's clickable. */
-#sc-hud .panel.fort.info { transition: border-color 0.15s, box-shadow 0.15s, transform 0.07s ease, filter 0.07s ease; }
+#sc-hud .panel.fort.info { transition: border-color 0.15s, box-shadow 0.15s; }
 #sc-hud .panel.fort.info::after { content: 'ⓘ'; position: absolute; top: 6px; right: 10px; font-size: 12px; font-weight: 700; color: #7a838d; }
 #sc-hud .panel.fort.info:hover { border-color: #2c3138; box-shadow: 0 3px 14px rgba(40,50,60,0.18); }
 #sc-hud .panel.fort.info:hover::after { color: #2c3138; }
@@ -271,14 +271,6 @@ const CSS = `
 #sc-cardPlay:hover { background: #35953f; }
 #sc-cardClose { background: rgba(255,255,255,0.9); color: #2c3138; }
 #sc-cardClose:hover { background: #fff; }
-/* --- Press feedback ------------------------------------------------------
-   Every clickable surface visibly depresses and darkens while held, so a click
-   always registers even when the action itself takes a moment. Kept out of
-   #sc-flip (it owns its own 3D transform) and full-screen dismiss overlays. */
-button, #sc-weapons .w, #sc-hand .c, #sc-resources .r { transition: transform 0.07s ease, filter 0.07s ease; }
-button:active:not(:disabled), #sc-weapons .w:active, #sc-hand .c:active, #sc-resources .r:active { transform: scale(0.95); filter: brightness(0.86); }
-#sc-hud .panel.fort.info:active { transform: scale(0.97); filter: brightness(0.94); }
-button:disabled { cursor: default; }
 `
 
 export function createHud(

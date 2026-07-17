@@ -151,7 +151,7 @@ function applyCannonPose(side: number): void {
 
 // ---------------------------------------------------------------- game state
 
-type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'fallout' | 'aiThink' | 'aiAim' | 'end' | 'shop'
+type Phase = 'castle' | 'plant' | 'aim' | 'charge' | 'fly' | 'resolve' | 'aiThink' | 'aiAim' | 'end' | 'shop'
 
 // Match economy: best-of-ROUNDS. Income comes from producers (see sideIncome);
 // winning a round plunders half the loser's cash + one card (not per-hit pay).
@@ -201,15 +201,12 @@ function livingSeats(): number[] {
   for (let s = 0; s < numPlayers; s++) if (alive[s]) out.push(s)
   return out
 }
-// How a seat is named in messages. Prefer its flag + nation (fortLabel) so that when a card is
-// played ON you it's always obvious WHO did it — and so 3–4 player games don't call every rival
-// "the enemy". Falls back to a plain label only if no country was picked.
 function nameOf(s: number): string {
-  return fortLabel(s)
+  return twoPlayer ? `Player ${s + 1}` : s === 0 ? 'you' : 'the enemy'
 }
 function capName(s: number): string {
   const n = nameOf(s)
-  return /^[a-z]/.test(n) ? n[0].toUpperCase() + n.slice(1) : n // never mangle a leading flag emoji
+  return n[0].toUpperCase() + n.slice(1)
 }
 // Match-persistent structure upgrades (taller main tower, extra towers), one per seat.
 const forti: Fortifications[] = Array.from({ length: 4 }, () => ({ height: 0, towers: 0, barricade: 0 }))
@@ -283,8 +280,8 @@ const DECK: CardDef[] = [
   { id: 'skip', name: 'Skip Player', weight: 18, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
   { id: 'bumper', name: 'Bumper Crop', weight: 28, impl: true, emoji: '🌾', blurb: 'A bounty harvest! Your next income payout from resources is doubled.' },
   { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: "An army overruns the enemy's resources — their producers glow pink and their ENTIRE next payout is delivered to you instead. They collect nothing." },
-  { id: 'ghost', name: 'Stealth', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere and vanish. You still see it, but every other player is blind to it — turn after turn — until a shell lands within ten voxels of the real tower.' },
-  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'A hidden shield no other player can see. It holds, turn after turn, until one hostile hit — a shell, a toaster, an army, or a theft — is blocked completely; then the field is spent. It never blocks twice.' },
+  { id: 'ghost', name: 'Stealth', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
+  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks you. The next hostile act — a shell on your castle, a toaster, an army, or a theft — is blocked completely, then the field is spent.' },
   { id: 'steal', name: 'Steal', weight: 12, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — it's ripped off the map and added to YOUR resources, to place anywhere you like." },
   { id: 'stealres', name: 'Steal Resources!', weight: 6, impl: true, emoji: '🏴‍☠️', blurb: 'A world-wide heist — the single richest producer from EVERY opponent is ripped off the map at once and added to YOUR resources to re-place.' },
   { id: 'rebuild', name: 'Rebuild', weight: 11, impl: true, emoji: '🧱', blurb: "Repair your castle voxel by voxel — every missing block refills using bricks ripped from the enemy tower, spending up to half their tower. Never builds past the turret top." },
@@ -336,42 +333,13 @@ const skipNext = [false, false, false, false]
 // Extra turns a seat must sit out (nuclear meltdown on its own reactor, or a fallout cloud
 // drifting over it) — counts DOWN one per would-be turn, on top of the one-shot Skip card.
 const skipTurns = [0, 0, 0, 0]
-// Resource-wheel state: a Blockade denies a seat its wheel income. (Nothing grants attack-immunity
-// any more — only the Force Field card blocks.)
+// Resource-wheel round states: a Blockade denies a seat all wheel income for a round; a Tribute
+// makes a seat immune to attack for a round. Both reset at each round start.
 const resourceBlocked = [false, false, false, false]
-// ---- one-turn DEBUFF lifetimes --------------------------------------------------------------
-// One-turn effects are the DEBUFFS you inflict on a rival: a Blockade (no wheel income) and an
-// Army raid (next payout forfeit). `turnSerial` ticks once per turn; each records the serial it
-// was applied on, and expireTurnEffects() clears it at the END of the victim's turn — but never
-// on the turn it was applied — so it costs them exactly their next turn and no more.
-// (Force Field and Stealth are NOT here: those self-buffs persist until TRIGGERED — a shield
-// until it eats a hit, a cloaked fort until a shell lands near its real tower — see below.)
-let turnSerial = 0
-const appliedAt = { blocked: [0, 0, 0, 0], raid: [0, 0, 0, 0] }
-function blockSeat(s: number): void { resourceBlocked[s] = true; appliedAt.blocked[s] = turnSerial }
-function expireTurnEffects(s: number): void {
-  if (resourceBlocked[s] && appliedAt.blocked[s] < turnSerial) resourceBlocked[s] = false
-  if (armyRaidOf[s] && appliedAt.raid[s] < turnSerial) armyRaidOf[s] = null
-}
-// Drifting radioactive clouds from meltdowns — a roiling mass of dark particle puffs per
-// exploded reactor (chain reactions loose several at once). Each rises from its plant, then
-// rides a live, meandering wind; every nation it passes over loses its crops and two turns.
-// While ANY cloud (or a pending chain detonation) is in the sky, the game holds the next turn
-// so every player watches where the fallout goes (see finishResolve / updateFallouts).
-type FalloutCloud = {
-  pos: THREE.Vector3
-  life: number
-  group: THREE.Group
-  puffs: { m: THREE.Mesh; base: THREE.Vector3; ph: number; sp: number }[]
-  hit: Set<number>
-}
-let fallouts: FalloutCloud[] = []
-// The fallout's own weather: seeded from the turn's wind, then meandering smoothly (layered
-// sines ≈ Perlin) — so venting a reactor when the wind points at an enemy is a real gamble;
-// the sky can turn on you mid-drift. The HUD wind arrow tracks it live.
-let falloutWind: { baseAng: number; baseMag: number; t: number; p1: number; p2: number; p3: number } | null = null
-const pendingMeltdowns: { owner: number; cx: number; cz: number; delay: number }[] = [] // staggered chain blasts
-let falloutContinuation: (() => void) | null = null // the held remainder of finishResolve
+const attackProtected = [false, false, false, false]
+// A drifting radioactive cloud from a meltdown (null when none is loose). It blows in a
+// random direction; any OTHER seat it passes over loses its crops and misses two turns.
+let fallout: { pos: THREE.Vector3; vx: number; vz: number; life: number; mesh: THREE.Mesh; hit: Set<number> } | null = null
 // Ghost Tower: set while the player is hand-repositioning their (still-visible) tower.
 let ghostReposition = false
 function cardDef(id: CardId): CardDef {
@@ -420,8 +388,9 @@ function playCard(side: number, idx: number): void {
     applyCard(side, id, target)
     refreshResources() // steal/zombie move producers between sides
   }
-  // In a 3–4 player game a human chooses which opponent a hostile card hits (never a teammate).
-  const foes = livingSeats().filter(s => !sameTeam(s, side))
+  // In a 3–4 player game a human chooses which opponent a hostile card hits (never a teammate or
+  // a Tribute-shielded country).
+  const foes = livingSeats().filter(s => !sameTeam(s, side) && !attackProtected[s])
   if (isHuman(side) && HOSTILE_CARDS.has(id) && foes.length > 1) {
     hud.showTargetPicker(
       `${cardDef(id).emoji} ${cardDef(id).name} — strike whom?`,
@@ -685,7 +654,7 @@ function stealRandomCard(winner: number, loser: number): string {
 // The default victim for a hostile card: the weakest living opponent (the sole opponent
 // in a 2-player game). Callers may override with an explicit target (human picker / AI).
 function defaultFoe(side: number): number {
-  const foes = livingSeats().filter(s => !sameTeam(s, side))
+  const foes = livingSeats().filter(s => !sameTeam(s, side) && !attackProtected[s])
   if (!foes.length) return (side + 1) % Math.max(2, numPlayers)
   foes.sort((a, b) => world.integrity(a) - world.integrity(b))
   return foes[0]
@@ -736,12 +705,10 @@ function cardSkip(side: number, foe: number): void {
   hud.msg(`${capName(side)} played Skip — ${nameOf(foe)} loses the next turn`)
 }
 
-// Force Field: raise an INVISIBLE one-hit shield over your castle (see crater()). It is unseen by
-// every other player and holds — turn after turn — until it eats a single hostile hit, then it's
-// spent (it can never block twice). The confirmation shows only on the caster's own turn.
+// Force Field: raise an invisible one-hit shield over your castle (see crater()).
 function cardForcefield(side: number): void {
   forceField[side] = true
-  hud.msg(`${capName(side)} raised a hidden force field — it holds until it takes a hit`)
+  hud.msg(`${capName(side)} raised a force field`)
 }
 
 // Rebuild: repair your own tower's missing voxels, brick by brick from the ground up,
@@ -805,7 +772,6 @@ function cardArmy(side: number, foe: number): void {
   if (shieldBlocks(foe)) return void hud.msg('the force field turns the army away!')
   spawnArmy(side)
   armyRaidOf[foe] = { caster: side, done: false }
-  appliedAt.raid[foe] = turnSerial
   world.setRaided(foe)
   hud.msg(`${capName(side)}'s army overruns ${nameOf(foe)}'s resources — their next payout is forfeit!`)
 }
@@ -1030,11 +996,10 @@ const tasks: Task[] = []
 let flyIsCard = false
 
 function crater(at: THREE.Vector3, r: number, fire: boolean): void {
-  // Force field: an ANOTHER player's blast reaching a shielded castle is eaten entirely (any
-  // weapon, no penetration) and the shield is spent — it never blocks twice, and it holds across
-  // turns until that one hit lands. Your own shell can't trip your own shield (fsel === turn).
+  // Force field: if this blast would reach any shielded castle, that shield eats it
+  // entirely (any weapon, no penetration) and is spent. A miss leaves it up.
   for (let fsel = 0; fsel < numPlayers; fsel++) {
-    if (!forceField[fsel] || fsel === turn) continue
+    if (!forceField[fsel]) continue
     const ft = world.forts[fsel]?.towers[0]
     if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
       spawnShieldBlock(ft.cx, ft.cz)
@@ -1043,11 +1008,11 @@ function crater(at: THREE.Vector3, r: number, fire: boolean): void {
       return // nothing gets through
     }
   }
-  // Loyal-alliance ceasefire (Bitter Truth): a shell reaching a TEAMMATE of the acting seat is
-  // turned aside at their walls.
+  // Loyal-alliance ceasefire (Bitter Truth) + Tribute protection: a shell reaching a TEAMMATE of
+  // the acting seat, or a Tribute-shielded country, is turned aside at their walls.
   for (let a = 0; a < numPlayers; a++) {
     if (a === turn || !alive[a]) continue
-    if (!(bitterTruth && sameTeam(a, turn))) continue
+    if (!attackProtected[a] && !(bitterTruth && sameTeam(a, turn))) continue
     const ft = world.forts[a]?.towers[0]
     if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
       spawnShieldBlock(ft.cx, ft.cz)
@@ -1838,13 +1803,6 @@ function updateCamera(dt: number): void {
     } else {
       aimCamera(turn, desiredPos, desiredLook)
     }
-  } else if (phase === 'fallout') {
-    // Everyone watches the sky: the whole board from the SHOOTER's side (turn hasn't advanced
-    // while the fallout holds the game), so the player who lit the fuse sees where it drifts.
-    const m = seatMirror()
-    desiredPos.set(GX / 2 - m * 96, 150, GZ / 2)
-    desiredLook.set(GX / 2, 2, GZ / 2)
-    k = 2.2
   } else if (phase === 'aiThink' || phase === 'aiAim') {
     aimCamera(turn, desiredPos, desiredLook) // frame the acting AI seat's cannon
   } else if (phase === 'fly') {
@@ -2087,7 +2045,6 @@ function fireShot(side: number, weapon: WeaponDef, power: number): void {
 // Hand off to the other side — unless Skip Player flagged them, in which case their
 // turn is skipped entirely and the current side goes again.
 function advanceTurn(): void {
-  expireTurnEffects(turn) // the finishing seat's one-turn effects lapse here
   // Rotate to the next LIVING seat, bypassing any eliminated or Skip-flagged seat. In a
   // 2-player game bypassing the (only) foe lands back on the caster — the classic Skip
   // "go again". In 3–4 players it simply denies the skipped seat its turn.
@@ -2112,14 +2069,14 @@ function advanceTurn(): void {
 // Two discs spun at the start of EVERY turn. Wheel A carries the four producers + Blockade;
 // Wheel B carries the four producers + two Tribute tiers. Whatever a wheel lands on, EVERY
 // owner of that resource is paid its income (doubled when both wheels match). Income comes from
-// nowhere else. Blockade lets the spinner deny one rival a round of income; Foreign Aid (rare)
-// makes every other country send a chosen one a random card out of their hand.
-type WheelSlice = number | 'blockade' | 'aid'
+// nowhere else. Blockade lets the spinner deny one rival a round of income; Tribute (rare)
+// shields a chosen country from attack and makes everyone bow with a slice of their cash.
+type WheelSlice = number | 'blockade' | 'tribute8' | 'tribute4'
 const WHEEL_A: { s: WheelSlice; w: number }[] = [
   { s: CROP, w: 22 }, { s: MINE, w: 22 }, { s: DERRICK, w: 22 }, { s: PLANT, w: 20 }, { s: 'blockade', w: 12 },
 ]
 const WHEEL_B: { s: WheelSlice; w: number }[] = [
-  { s: CROP, w: 24 }, { s: MINE, w: 24 }, { s: DERRICK, w: 24 }, { s: PLANT, w: 22 }, { s: 'aid', w: 5 },
+  { s: CROP, w: 24 }, { s: MINE, w: 24 }, { s: DERRICK, w: 24 }, { s: PLANT, w: 22 }, { s: 'tribute8', w: 4 }, { s: 'tribute4', w: 1 },
 ]
 function pickSlice(wheel: { s: WheelSlice; w: number }[]): WheelSlice {
   const total = wheel.reduce((a, e) => a + e.w, 0)
@@ -2128,7 +2085,7 @@ function pickSlice(wheel: { s: WheelSlice; w: number }[]): WheelSlice {
   return wheel[0].s
 }
 function sliceIcon(s: WheelSlice): string {
-  return s === 'blockade' ? '🚫' : s === 'aid' ? '🎁' : s === CROP ? '🌾' : s === MINE ? '⛏️' : s === DERRICK ? '🛢️' : '☢️'
+  return s === 'blockade' ? '🚫' : s === 'tribute8' || s === 'tribute4' ? '👑' : s === CROP ? '🌾' : s === MINE ? '⛏️' : s === DERRICK ? '🛢️' : '☢️'
 }
 // A seat's live income from producers of one type (yield × integrity × maturity).
 function incomeFromType(s: number, type: number): number {
@@ -2139,10 +2096,10 @@ function incomeFromType(s: number, type: number): number {
 
 // The two discs' visual rim order (each face shown once), used to land the pointer on the result.
 const WHEEL_A_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'blockade']
-const WHEEL_B_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'aid']
+const WHEEL_B_FACES: WheelSlice[] = [CROP, MINE, DERRICK, PLANT, 'tribute8', 'tribute4']
 
 type WheelState = {
-  roller: number; a: WheelSlice; b: WheelSlice; done: () => void
+  roller: number; a: WheelSlice; b: WheelSlice; human: boolean; done: () => void
   rotA: number; rotB: number; spA: number; spB: number // live rotation (deg) + spin speed (deg/s)
   mode: 'spin' | 'decel' | 'hold'; t: number
   startA: number; startB: number; targetA: number; targetB: number; decelDur: number
@@ -2159,15 +2116,20 @@ function spinWheels(roller: number, done: () => void): void {
   const a = wheelForce ? wheelForce.a : pickSlice(WHEEL_A)
   const b = wheelForce ? wheelForce.b : pickSlice(WHEEL_B)
   wheelForce = null
+  const human = isHuman(roller)
   wheelSpin = {
-    roller, a, b, done,
+    roller, a, b, human, done,
     rotA: 0, rotB: 0, spA: 900 + Math.random() * 220, spB: 820 + Math.random() * 220,
     mode: 'spin', t: 0, startA: 0, startB: 0, targetA: 0, targetB: 0, decelDur: 1.7,
   }
-  // The wheels slow down on their own — nobody has to click to stop them.
-  hud.showWheels(WHEEL_A_FACES.map(sliceIcon), WHEEL_B_FACES.map(sliceIcon), `${fortLabel(roller)} spins the resource wheels`, null)
+  hud.showWheels(WHEEL_A_FACES.map(sliceIcon), WHEEL_B_FACES.map(sliceIcon), `${fortLabel(roller)} spins the resource wheels`, human ? stopWheels : null)
   hud.setWheelRotation(0, 0)
-  hud.setWheelText(`${fortLabel(roller)} spins the wheels…`, '')
+  hud.setWheelText(human ? `${fortLabel(roller)} — SPIN!` : `${fortLabel(roller)} spins the wheels…`, human ? 'CLICK to stop the wheels' : '')
+}
+
+// Human click → the wheels begin to decelerate onto the result.
+function stopWheels(): void {
+  if (wheelSpin && wheelSpin.mode === 'spin') beginWheelDecel(wheelSpin)
 }
 
 function beginWheelDecel(w: WheelState): void {
@@ -2184,6 +2146,7 @@ function beginWheelDecel(w: WheelState): void {
   }
   w.targetA = land(WHEEL_A_FACES, w.a, w.rotA)
   w.targetB = land(WHEEL_B_FACES, w.b, w.rotB)
+  if (w.human) hud.setWheelText(`${fortLabel(w.roller)} spins the wheels…`, '')
 }
 
 function updateWheels(dt: number): void {
@@ -2194,7 +2157,7 @@ function updateWheels(dt: number): void {
     w.rotA += w.spA * dt
     w.rotB += w.spB * dt
     hud.setWheelRotation(w.rotA, w.rotB)
-    if (w.t > 0.9) beginWheelDecel(w) // every spin slows itself after a beat — no click needed
+    if (!w.human && w.t > 0.9) beginWheelDecel(w) // AI stops itself after a beat
   } else if (w.mode === 'decel') {
     const u = Math.min(1, w.t / w.decelDur)
     const e = 1 - Math.pow(1 - u, 3) // ease-out: fast → gliding to a stop
@@ -2217,7 +2180,7 @@ function updateWheels(dt: number): void {
 // them, and the cash it earned — so the payout is never invisible. Stays until dismissed
 // (a human clicks; an AI's roll auto-advances after a beat so the game doesn't stall).
 function showRollPayout(roller: number, a: WheelSlice, b: WheelSlice, rows: RollPayout[], done: () => void): void {
-  const special = a === 'blockade' ? '🚫 Blockade — the spinner cuts a rival off next.' : b === 'aid' ? '🎁 Foreign Aid — a country is about to be sent everyone else’s cards.' : ''
+  const special = a === 'blockade' ? '🚫 Blockade — the spinner cuts a rival off next.' : (b === 'tribute8' || b === 'tribute4') ? '👑 Tribute — the spinner crowns a country next.' : ''
   const hudRows = rows.map(r => {
     const items = [...r.items.entries()].map(([type, n]) => `${sliceIcon(type)}×${n}`).join('  ')
     const note = r.blocked ? '🚫 blockaded — earned nothing' : r.diverted > 0 ? `⚔️ raided — $${r.diverted.toLocaleString()} taken` : ''
@@ -2234,7 +2197,7 @@ function showRollPayout(roller: number, a: WheelSlice, b: WheelSlice, rows: Roll
 
 function wheelCaption(a: WheelSlice, b: WheelSlice): string {
   if (typeof a === 'number' && a === b) return `DOUBLE ${PRODUCER_SPECS[a].name.toUpperCase()}!`
-  const label = (s: WheelSlice) => (typeof s === 'number' ? PRODUCER_SPECS[s].name : s === 'blockade' ? 'Blockade' : 'Foreign Aid')
+  const label = (s: WheelSlice) => (typeof s === 'number' ? PRODUCER_SPECS[s].name : s === 'blockade' ? 'Blockade' : s === 'tribute4' ? 'Tribute ¼' : 'Tribute ⅛')
   return `${label(a)}  +  ${label(b)}`
 }
 
@@ -2275,7 +2238,8 @@ function payWheels(roller: number, a: WheelSlice, b: WheelSlice): RollPayout[] {
 function runWheelSpecials(roller: number, a: WheelSlice, b: WheelSlice, done: () => void): void {
   const steps: ((next: () => void) => void)[] = []
   if (a === 'blockade') steps.push(next => blockadeStep(roller, next))
-  if (b === 'aid') steps.push(next => foreignAidStep(roller, next))
+  if (b === 'tribute8') steps.push(next => tributeStep(roller, 8, next))
+  if (b === 'tribute4') steps.push(next => tributeStep(roller, 4, next))
   const run = (i: number) => (i >= steps.length ? done() : steps[i](() => run(i + 1)))
   run(0)
 }
@@ -2284,57 +2248,68 @@ function blockadeStep(roller: number, next: () => void): void {
   const foes = livingSeats().filter(s => s !== roller)
   if (!foes.length) return void next()
   const apply = (t: number) => {
-    blockSeat(t)
+    resourceBlocked[t] = true
     refreshForts()
-    hud.banner('🚫 BLOCKADE', `${fortLabel(roller)} cuts off ${fortLabel(t)} — no resource income on their next turn!`, 3000)
+    hud.banner('🚫 BLOCKADE', `${fortLabel(t)} is cut off — no resource income for a round!`, 2800)
     next()
   }
-  if (isHuman(roller)) hud.showTargetPicker('🚫 Blockade — starve whom of income for a turn?', foes.map(s => ({ seat: s, label: fortLabel(s) })), apply)
+  if (isHuman(roller)) hud.showTargetPicker('🚫 Blockade — starve whom of income?', foes.map(s => ({ seat: s, label: fortLabel(s) })), apply)
   else apply(aiPickBlockade(roller))
 }
 
-// 🎁 Foreign Aid: every OTHER living country sends the chosen one a random card out of its hand
-// (nothing to send if their hand is empty). In a 1v1 there's no choice to make — the spinner is
-// the only possible donor, so it ships a card across to its rival.
-function foreignAidStep(roller: number, next: () => void): void {
-  const others = livingSeats().filter(s => s !== roller) // who could receive the aid
+function tributeStep(roller: number, tier: number, next: () => void): void {
+  const others = livingSeats().filter(s => s !== roller) // the country(s) that could be crowned
   if (!others.length) return void next()
-  const apply = (t: number) => {
-    const givers = livingSeats().filter(s => s !== t && hand[s].length)
-    for (const g of givers) {
-      const card = hand[g][Math.floor(Math.random() * hand[g].length)] // a RANDOM card, donor's choice denied
-      moveItem(g, t, 'card', card) // pure move + voxel flight; forced aid builds no trust
+  // Collect 1/tier of everyone-but-the-crowned's cash into the crowned seat's treasury.
+  const levy = (t: number) => {
+    let pot = 0
+    for (let s = 0; s < numPlayers; s++) {
+      if (!alive[s] || s === t) continue
+      const pay = Math.floor(money[s] / tier)
+      money[s] -= pay
+      pot += pay
     }
+    money[t] += pot
+    return pot
+  }
+  // 1v1: there's no ally to crown, and shielding your only rival for a whole round is nonsense
+  // (that was the "enemy has shields with no card played" bug). The spinner simply levies tribute
+  // from the opponent — a cash swing, NO attack-immunity. Shields come only from the Force Field card.
+  if (numPlayers <= 2) {
+    const pot = levy(roller)
+    syncStatus()
+    hud.banner(`👑 TRIBUTE ·  1/${tier}`, `${fortLabel(roller)} levies tribute — $${pot.toLocaleString()} from ${fortLabel(others[0])}!`, 3200)
+    return void next()
+  }
+  const apply = (t: number) => {
+    attackProtected[t] = true
+    const pot = levy(t)
     refreshForts()
     syncStatus()
-    hud.banner('🎁 FOREIGN AID', givers.length
-      ? `${givers.map(g => fortLabel(g)).join(', ')} → ${fortLabel(t)}: ${givers.length} random card${givers.length > 1 ? 's' : ''} sent!`
-      : `nobody had a card to send ${fortLabel(t)}`, 3400)
+    hud.banner(`👑 TRIBUTE ·  1/${tier}`, `all bow to ${fortLabel(t)} — $${pot.toLocaleString()} paid, and it can't be attacked for a round!`, 3600)
     next()
   }
-  if (numPlayers <= 2) return void apply(others[0]) // 1v1: the spinner is the donor, its rival receives
-  if (isHuman(roller)) hud.showTargetPicker('🎁 Foreign Aid — which country receives aid? Every other player (you too) sends them a random card from their hand.', others.map(s => ({ seat: s, label: fortLabel(s) })), apply)
-  else apply(aiPickAid(roller))
+  if (isHuman(roller)) hud.showTargetPicker(`👑 Tribute — crown & shield whom? Everyone (you too) pays them 1/${tier} of their cash, and they can't be attacked for a round.`, others.map(s => ({ seat: s, label: fortLabel(s) })), apply)
+  else apply(aiPickTribute(roller))
 }
 
-// AI blockades the richest/strongest non-teammate; sends Foreign Aid to a teammate (arm an ally)
-// if it has one, else it's forced to aid the weakest rival (least harmful).
+// AI blockades the richest/strongest non-teammate; tributes a teammate (enrich + shield an ally)
+// if it has one, else it's forced to crown the poorest rival (least harmful).
 function aiPickBlockade(roller: number): number {
   const foes = livingSeats().filter(s => !sameTeam(s, roller))
   if (!foes.length) return livingSeats().filter(s => s !== roller)[0]
   foes.sort((a, b) => money[b] + world.integrity(b) * 5000 - (money[a] + world.integrity(a) * 5000))
   return foes[0]
 }
-function aiPickAid(roller: number): number {
+function aiPickTribute(roller: number): number {
   const mates = livingSeats().filter(s => s !== roller && sameTeam(s, roller))
-  if (mates.length) return mates[0] // arm an ally
+  if (mates.length) return mates[0]
   const foes = livingSeats().filter(s => s !== roller)
-  foes.sort((a, b) => money[a] + world.integrity(a) * 5000 - (money[b] + world.integrity(b) * 5000))
-  return foes[0] // forced to arm a rival — pick the weakest, least dangerous one
+  foes.sort((a, b) => money[a] - money[b]) // enrich the poorest rival — least harmful
+  return foes[0]
 }
 
 function startTurn(s: number): void {
-  turnSerial++ // stamps effect lifetimes — see expireTurnEffects
   // Hotseat: gate every human turn behind a "pass the keyboard" screen so the other
   // player's leftover keypresses can't act, and it's unmistakable whose turn it is.
   if (twoPlayer && isHuman(s)) {
@@ -2422,8 +2397,8 @@ function startAiThink(s: number): void {
 // ties broken by nearest to this seat's cannon. Used for both its shot and hostile cards.
 function aiTarget(s: number): number {
   const living = livingSeats()
-  // Teammates (surrendered vassals / masters) are never targets.
-  const foes = living.filter(o => o !== s && !sameTeam(o, s))
+  // Teammates (surrendered vassals / masters) are never targets, nor is a Tribute-shielded seat.
+  const foes = living.filter(o => o !== s && !sameTeam(o, s) && !attackProtected[o])
   if (!foes.length) return -1
   // Trade-allies are spared too — unless every remaining foe is an ally, or only two seats are
   // left (last castle standing forces the final betrayal). Attacking then breaks the pact.
@@ -2880,36 +2855,17 @@ function checkMeltdowns(): void {
 
 function meltdown(owner: number, cx: number, cz: number): void {
   sfx.rumble()
-  sfx.boom(9)
   hud.banner('☢️ NUCLEAR MELTDOWN', `${capName(owner)}'s reactor detonates — the fallout spreads!`, 3600)
   killCropsNear(cx, cz, MELT_R) // every crop in the blast (anyone's) dies
   world.contaminated.push({ cx, cz, r: MELT_R }) // and the ground is poisoned for the round
   // The reactor goes up with the force of a Nuke — a real crater that carves terrain and
   // caves in anything (forts included) caught in the blast.
   crater(new THREE.Vector3(cx, world.surfaceY(cx, cz), cz), 9.5, true)
-  const sy = world.surfaceY(cx, cz)
-  // A big, tall detonation: a ground fireball, a fireball rising up the stem, a blinding
-  // double flash, and a hard shake — so the meltdown reads as a genuine nuclear blast.
-  spawnExplosion(new THREE.Vector3(cx, sy + 6, cz), 28, true)
-  spawnExplosion(new THREE.Vector3(cx, sy + 22, cz), 18, true) // a second burst higher up the column
-  spawnFlash(new THREE.Vector3(cx, sy + 14, cz), 34, 0xfff0c8)
-  addShake(26, new THREE.Vector3(cx, sy, cz))
+  const at = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 6, cz)
+  spawnExplosion(at, 16, true)
+  addShake(18, at)
   skipTurns[owner] = Math.max(skipTurns[owner], 2) // the owner is knocked out for two turns
-  spawnFalloutCloud(cx, cz) // the black cloud can drift over anyone — the owner included
-  // CHAIN REACTION: any other reactor whose 9×9 pad sits within a ~3-voxel gap of this one
-  // (centre-to-centre ≤ 11) cooks off moments later — each with its own blast and cloud.
-  // They're pulled off the map NOW (a cooking reactor produces nothing and can't re-chain).
-  let chainDelay = 0.45
-  for (let s = 0; s < numPlayers; s++) {
-    for (let i = planted[s].length - 1; i >= 0; i--) {
-      const p = planted[s][i]
-      if (p.type !== PLANT || Math.max(Math.abs(p.cx - cx), Math.abs(p.cz - cz)) > 11) continue
-      planted[s].splice(i, 1)
-      world.removeProducer(p.cx, p.cz)
-      pendingMeltdowns.push({ owner: s, cx: p.cx, cz: p.cz, delay: chainDelay })
-      chainDelay += 0.45
-    }
-  }
+  spawnFallout(cx, cz) // the black cloud can drift over anyone — the owner included
 }
 
 // Destroy every crop (any seat's) whose bed sits within `r` of (cx,cz). Permanent — they're
@@ -2925,123 +2881,50 @@ function killCropsNear(cx: number, cz: number, r: number): void {
   }
 }
 
-// Loose a towering black mushroom cloud of roiling particle puffs from a meltdown site. It erupts
-// up out of the wreck as a tall plume — a broad billowing cap over a narrower stem — then leans
-// over and rides the (meandering) wind. Nothing is safe: it rolls over anyone, the reactor's
-// owner included, and keeps going until it blows clean off the map.
-const FALLOUT_RISE = 2.2 // seconds spent erupting upward before the drift begins
-const FALLOUT_CAP_H = 34 // height (above terrain) the cap rides at once risen
-function spawnFalloutCloud(cx: number, cz: number): void {
-  const group = new THREE.Group()
-  const puffs: FalloutCloud['puffs'] = []
-  const puff = (base: THREE.Vector3, r: number, op: number) => {
-    const geo = new THREE.SphereGeometry(r, 8, 7)
-    const mat = new THREE.MeshLambertMaterial({
-      color: 0x0b0d07, emissive: 0x1f2c0a, emissiveIntensity: 0.5, // near-black, sickly nuclear-green glow
-      transparent: true, opacity: op, depthWrite: false, // soft, blurred overlap
-    })
-    const m = new THREE.Mesh(geo, mat)
-    m.position.copy(base)
-    group.add(m)
-    puffs.push({ m, base, ph: Math.random() * Math.PI * 2, sp: 0.6 + Math.random() * 1.2 })
-  }
-  // Broad billowing CAP (24 big puffs, disc up to r≈13, around the group origin = cap centre).
-  for (let i = 0; i < 24; i++) {
-    const a = Math.random() * Math.PI * 2
-    const rad = Math.pow(Math.random(), 0.7) * 13
-    puff(new THREE.Vector3(Math.cos(a) * rad, (Math.random() - 0.4) * 12, Math.sin(a) * rad), 3.5 + Math.random() * 4, 0.5 + Math.random() * 0.32)
-  }
-  // Narrower STEM (13 puffs) reaching from the cap down toward the ground.
-  for (let i = 0; i < 13; i++) {
-    puff(new THREE.Vector3((Math.random() - 0.5) * 8, -6 - Math.random() * (FALLOUT_CAP_H - 8), (Math.random() - 0.5) * 8), 2.5 + Math.random() * 2.2, 0.4 + Math.random() * 0.3)
-  }
-  const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 4, cz)
-  group.position.copy(pos)
-  group.scale.setScalar(0.25)
-  scene.add(group)
-  fallouts.push({ pos, life: 0, group, puffs, hit: new Set() })
-  if (!falloutWind) {
-    // Seed the fallout's weather from the turn's wind (that's the read the shooter gambled on).
-    const baseAng = wind.x || wind.z ? Math.atan2(wind.z, wind.x) : Math.random() * Math.PI * 2
-    const baseMag = Math.max(3, Math.hypot(wind.x, wind.z))
-    falloutWind = { baseAng, baseMag, t: 0, p1: Math.random() * 6.28, p2: Math.random() * 6.28, p3: Math.random() * 6.28 }
-  }
+// Loose a single black fallout cloud from the meltdown site, drifting in a RANDOM direction.
+// Nothing is safe — it can roll over anyone, the reactor's owner included.
+function spawnFallout(cx: number, cz: number): void {
+  if (fallout) scene.remove(fallout.mesh)
+  const geo = new THREE.SphereGeometry(9, 12, 10)
+  const mat = new THREE.MeshLambertMaterial({ color: 0x1a1e16, emissive: 0x1f2a12, emissiveIntensity: 0.5, transparent: true, opacity: 0.72 })
+  const mesh = new THREE.Mesh(geo, mat)
+  const ang = wind.x || wind.z ? Math.atan2(wind.z, wind.x) + (Math.random() - 0.5) : Math.random() * Math.PI * 2
+  const speed = 7
+  const pos = new THREE.Vector3(cx, world.surfaceY(cx, cz) + 20, cz)
+  mesh.position.copy(pos)
+  scene.add(mesh)
+  fallout = { pos, vx: Math.cos(ang) * speed, vz: Math.sin(ang) * speed, life: 0, mesh, hit: new Set() }
 }
 
-// Per-frame: pop staggered chain detonations, evolve the meandering wind, drift every cloud,
-// damage whoever it rolls over, and — once the sky is clear — release the held turn.
-function updateFallouts(dt: number): void {
-  for (let i = pendingMeltdowns.length - 1; i >= 0; i--) {
-    const p = pendingMeltdowns[i]
-    p.delay -= dt
-    if (p.delay <= 0) {
-      pendingMeltdowns.splice(i, 1)
-      meltdown(p.owner, p.cx, p.cz) // may chain further plants + loose another cloud
+// Drift the fallout cloud each frame; the first OTHER seat it reaches loses its crops and two
+// turns. It fizzles after ~14s or once it blows off the map — it may hit no one.
+function updateFallout(dt: number): void {
+  if (!fallout) return
+  const f = fallout
+  f.life += dt
+  f.pos.x += f.vx * dt
+  f.pos.z += f.vz * dt
+  f.pos.y = world.surfaceY(Math.round(Math.max(0, Math.min(GX - 1, f.pos.x))), Math.round(Math.max(0, Math.min(GZ - 1, f.pos.z)))) + 20
+  f.mesh.position.copy(f.pos)
+  f.mesh.rotation.y += dt * 0.6
+  for (let s = 0; s < numPlayers; s++) {
+    if (f.hit.has(s) || !alive[s]) continue
+    const ft = world.forts[s]?.towers[0]
+    const overFort = ft && Math.hypot(f.pos.x - ft.cx, f.pos.z - ft.cz) < 13
+    const overCrop = planted[s].some(p => p.type === CROP && Math.hypot(f.pos.x - p.cx, f.pos.z - p.cz) < 13)
+    if (overFort || overCrop) {
+      f.hit.add(s)
+      killCropsNear(f.pos.x, f.pos.z, 15)
+      skipTurns[s] = Math.max(skipTurns[s], 2)
+      if (isHuman(turn)) refreshResources()
+      syncStatus()
+      hud.banner('☢️ FALLOUT', `the radioactive cloud rolls over ${nameOf(s)} — crops ruined, two turns lost!`, 3200)
+      sfx.boom(4)
     }
   }
-  if (fallouts.length && falloutWind) {
-    const fw = falloutWind
-    fw.t += dt
-    // Smooth pseudo-Perlin meander: the heading wanders up to ~±77° off the seed wind, and the
-    // strength breathes — a cloud aimed at an enemy can genuinely turn back on its maker.
-    const ang = fw.baseAng + 0.85 * Math.sin(fw.t * 0.21 + fw.p1) + 0.5 * Math.sin(fw.t * 0.57 + fw.p2)
-    const mag = fw.baseMag * (0.8 + 0.3 * Math.sin(fw.t * 0.37 + fw.p3))
-    hud.setWind(Math.cos(ang) * mag, Math.sin(ang) * mag) // the HUD arrow tracks the shifting sky
-    const speed = 4.5 + mag * 0.55
-    for (let ci = fallouts.length - 1; ci >= 0; ci--) {
-      const f = fallouts[ci]
-      f.life += dt
-      const gx = Math.round(Math.max(0, Math.min(GX - 1, f.pos.x)))
-      const gz = Math.round(Math.max(0, Math.min(GZ - 1, f.pos.z)))
-      const gy = world.surfaceY(gx, gz)
-      if (f.life < FALLOUT_RISE) {
-        // Erupt upward out of the wreck, the cap climbing to full height and swelling to size.
-        const e = 1 - Math.pow(1 - f.life / FALLOUT_RISE, 2)
-        f.pos.y = gy + 4 + e * FALLOUT_CAP_H
-        f.group.scale.setScalar(0.25 + e * 0.9)
-      } else {
-        f.pos.x += Math.cos(ang) * speed * dt
-        f.pos.z += Math.sin(ang) * speed * dt
-        f.pos.y += (gy + FALLOUT_CAP_H - f.pos.y) * Math.min(1, dt * 2)
-        for (let s = 0; s < numPlayers; s++) {
-          if (f.hit.has(s) || !alive[s]) continue
-          const ft = world.forts[s]?.towers[0]
-          const overFort = ft && Math.hypot(f.pos.x - ft.cx, f.pos.z - ft.cz) < 13
-          const overCrop = planted[s].some(p => p.type === CROP && Math.hypot(f.pos.x - p.cx, f.pos.z - p.cz) < 13)
-          if (overFort || overCrop) {
-            f.hit.add(s)
-            killCropsNear(f.pos.x, f.pos.z, 15)
-            skipTurns[s] = Math.max(skipTurns[s], 2)
-            if (isHuman(turn)) refreshResources()
-            syncStatus()
-            hud.banner('☢️ FALLOUT', `the radioactive cloud rolls over ${nameOf(s)} — crops ruined, two turns lost!`, 3200)
-            sfx.boom(4)
-          }
-        }
-      }
-      f.group.position.copy(f.pos)
-      f.group.rotation.y += dt * 0.25
-      for (const p of f.puffs) {
-        // Each puff churns around its anchor — the roiling, blurred look.
-        p.m.position.set(
-          p.base.x + Math.sin(fw.t * p.sp + p.ph) * 2.4,
-          p.base.y + Math.sin(fw.t * p.sp * 0.8 + p.ph * 1.7) * 1.6,
-          p.base.z + Math.cos(fw.t * p.sp + p.ph) * 2.4
-        )
-      }
-      // Gone once it clears the map (or a 40s hard cap so the game can never wedge).
-      if (f.life > 40 || f.pos.x < -6 || f.pos.x > GX + 6 || f.pos.z < -6 || f.pos.z > GZ + 6) {
-        scene.remove(f.group)
-        fallouts.splice(ci, 1)
-      }
-    }
-    if (!fallouts.length) falloutWind = null
-  }
-  // Sky clear + no chain blasts pending → release the held turn (the rest of finishResolve).
-  if (!fallouts.length && !pendingMeltdowns.length && falloutContinuation) {
-    const go = falloutContinuation
-    falloutContinuation = null
-    go()
+  if (f.life > 14 || f.pos.x < -6 || f.pos.x > GX + 6 || f.pos.z < -6 || f.pos.z > GZ + 6) {
+    scene.remove(f.mesh)
+    fallout = null
   }
 }
 
@@ -3063,20 +2946,6 @@ function finishResolve(force = false): void {
   }
   refreshIntegrity()
   checkMeltdowns() // a nuclear plant reduced to rubble this shot melts down
-  // A meltdown holds the game: nobody takes a turn until every player has watched the fallout
-  // ride the wind to wherever it lands (and any chain reactions finish going off). The rest of
-  // this resolve — deaths, round end, next turn — runs when the sky clears (updateFallouts).
-  if (fallouts.length || pendingMeltdowns.length) {
-    falloutContinuation = () => finishResolveTail(wasCard)
-    phase = 'fallout'
-    return
-  }
-  finishResolveTail(wasCard)
-}
-
-// The tail of a resolve — trust fallout, eliminations, and the handoff to the next turn.
-// Split out so a nuclear-fallout sequence can hold it until the clouds clear the map.
-function finishResolveTail(wasCard: boolean): void {
   // Attacking a seat costs their trust in you — an ally you shell defects (and a betrayer
   // you already dislike sinks further). Only the acting seat `turn` is blamed for this shot.
   if (numPlayers > 2) {
@@ -3163,18 +3032,14 @@ function setupRoundWorld(): void {
   tasks.length = 0
   // Card effects don't carry between rounds: clear ghost/field/raid, restore cannons.
   ghostReposition = false
-  // No cloud, pending chain blast, or held turn carries into a new round.
-  for (const f of fallouts) scene.remove(f.group)
-  fallouts = []
-  pendingMeltdowns.length = 0
-  falloutWind = null
-  falloutContinuation = null
+  if (fallout) { scene.remove(fallout.mesh); fallout = null } // no cloud carries into a new round
   if (wheelSpin) { wheelSpin = null; hud.hideWheels() }
   for (let s = 0; s < 4; s++) {
     ghostDecoyOf[s] = null
     forceField[s] = false
     skipTurns[s] = 0
-    resourceBlocked[s] = false // a blockade lasts the round
+    resourceBlocked[s] = false // blockade / tribute effects are round-long
+    attackProtected[s] = false
     armyRaidOf[s] = null
     world.hiddenForts[s] = false
     // Stale trade obligations don't carry between rounds, but TRUST/alliances do (they build
@@ -3557,7 +3422,7 @@ function tick(now: number): void {
   updatePlayerAim(dt)
   updatePlant(dt)
   updateCastle(dt)
-  updateFallouts(dt)
+  updateFallout(dt)
   updateWheels(dt)
   updateAi(dt)
 
@@ -3798,7 +3663,7 @@ declare global {
       moveFallout: (x: number, z: number) => void
       forceWheel: (a: number | string, b: number | string) => void
       testWheel: (roller: number, a: number | string, b: number | string) => void
-      wheelState: () => { blocked: boolean[]; spinning: boolean }
+      wheelState: () => { blocked: boolean[]; protected: boolean[]; spinning: boolean }
     }
   }
 }
@@ -3841,9 +3706,7 @@ window.__sv = {
     forceField: forceField.slice(0, numPlayers),
     skipTurns: skipTurns.slice(0, numPlayers),
     contaminated: world.contaminated.length,
-    fallout: fallouts[0] ? { x: Math.round(fallouts[0].pos.x), z: Math.round(fallouts[0].pos.z), hit: [...fallouts[0].hit] } : null,
-    fallouts: fallouts.length,
-    pendingMeltdowns: pendingMeltdowns.length,
+    fallout: fallout ? { x: Math.round(fallout.pos.x), z: Math.round(fallout.pos.z), hit: [...fallout.hit] } : null,
     plantedTypes: Array.from({ length: numPlayers }, (_, s) => planted[s].map(p => p.type)),
   }),
   world,
@@ -3934,16 +3797,9 @@ window.__sv = {
     planted[seat].push({ cx, cz, type, baseYield: spec.baseYield, age: 3 })
     world.buildProducer(cx, cz, seat, type, spec.baseYield, 3)
   },
-  // Mirrors the real path (checkMeltdowns): the plant leaves the map BEFORE it blows, so the
-  // chain scan can't re-trigger on the origin.
-  meltdownAt: (owner: number, cx: number, cz: number) => {
-    const i = planted[owner].findIndex(p => p.type === PLANT && p.cx === cx && p.cz === cz)
-    if (i >= 0) { planted[owner].splice(i, 1); world.removeProducer(cx, cz) }
-    meltdown(owner, cx, cz)
-  },
+  meltdownAt: (owner: number, cx: number, cz: number) => meltdown(owner, cx, cz),
   moveFallout(x: number, z: number) {
-    const f0 = fallouts[0]
-    if (f0) { f0.pos.x = x; f0.pos.z = z; f0.life = Math.max(f0.life, FALLOUT_RISE) } // skip the rise so damage checks run
+    if (fallout) { fallout.pos.x = x; fallout.pos.z = z }
   },
   forceWheel(a: number | string, b: number | string) {
     wheelForce = { a: a as WheelSlice, b: b as WheelSlice }
@@ -3953,5 +3809,5 @@ window.__sv = {
     payWheels(roller, a as WheelSlice, b as WheelSlice)
     runWheelSpecials(roller, a as WheelSlice, b as WheelSlice, () => {})
   },
-  wheelState: () => ({ blocked: resourceBlocked.slice(0, numPlayers), spinning: !!wheelSpin }),
+  wheelState: () => ({ blocked: resourceBlocked.slice(0, numPlayers), protected: attackProtected.slice(0, numPlayers), spinning: !!wheelSpin }),
 }
