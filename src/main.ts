@@ -283,8 +283,8 @@ const DECK: CardDef[] = [
   { id: 'skip', name: 'Skip Player', weight: 18, impl: true, emoji: '⏭️', blurb: "Skip the enemy's entire next turn — no income, no building, no shot — and take another turn yourself." },
   { id: 'bumper', name: 'Bumper Crop', weight: 28, impl: true, emoji: '🌾', blurb: 'A bounty harvest! Your next income payout from resources is doubled.' },
   { id: 'army', name: 'Army', weight: 22, impl: true, emoji: '🪖', blurb: "An army overruns the enemy's resources — their producers glow pink and their ENTIRE next payout is delivered to you instead. They collect nothing." },
-  { id: 'ghost', name: 'Stealth', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere. You still see it, but the enemy is blind to it until a shell lands within ten voxels of the real tower.' },
-  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'An invisible shield cloaks you. The next hostile act — a shell on your castle, a toaster, an army, or a theft — is blocked completely, then the field is spent.' },
+  { id: 'ghost', name: 'Stealth', weight: 16, impl: true, emoji: '👻', blurb: 'Reposition your castle anywhere and vanish. You still see it, but every other player is blind to it — turn after turn — until a shell lands within ten voxels of the real tower.' },
+  { id: 'forcefield', name: 'Force Field', weight: 15, impl: true, emoji: '🛡️', blurb: 'A hidden shield no other player can see. It holds, turn after turn, until one hostile hit — a shell, a toaster, an army, or a theft — is blocked completely; then the field is spent. It never blocks twice.' },
   { id: 'steal', name: 'Steal', weight: 12, impl: true, emoji: '🫳', blurb: "Seize the enemy's richest producer — it's ripped off the map and added to YOUR resources, to place anywhere you like." },
   { id: 'stealres', name: 'Steal Resources!', weight: 6, impl: true, emoji: '🏴‍☠️', blurb: 'A world-wide heist — the single richest producer from EVERY opponent is ripped off the map at once and added to YOUR resources to re-place.' },
   { id: 'rebuild', name: 'Rebuild', weight: 11, impl: true, emoji: '🧱', blurb: "Repair your castle voxel by voxel — every missing block refills using bricks ripped from the enemy tower, spending up to half their tower. Never builds past the turret top." },
@@ -339,21 +339,19 @@ const skipTurns = [0, 0, 0, 0]
 // Resource-wheel state: a Blockade denies a seat its wheel income. (Nothing grants attack-immunity
 // any more — only the Force Field card blocks.)
 const resourceBlocked = [false, false, false, false]
-// ---- one-turn effect lifetimes -------------------------------------------------------------
-// Every card / wheel effect lasts exactly ONE turn. `turnSerial` ticks once per turn; each effect
-// records the serial it was applied on, and expireTurnEffects() clears it at the END of the
-// AFFECTED seat's turn — but never on the turn it was applied. That one rule covers both
-// directions: a debuff cast on someone else's turn (Blockade, Army) costs the victim exactly
-// their next turn, while a self-buff cast on your own turn (Force Field, Stealth) still covers
-// the rotation you bought it for and then lapses on your next turn.
+// ---- one-turn DEBUFF lifetimes --------------------------------------------------------------
+// One-turn effects are the DEBUFFS you inflict on a rival: a Blockade (no wheel income) and an
+// Army raid (next payout forfeit). `turnSerial` ticks once per turn; each records the serial it
+// was applied on, and expireTurnEffects() clears it at the END of the victim's turn — but never
+// on the turn it was applied — so it costs them exactly their next turn and no more.
+// (Force Field and Stealth are NOT here: those self-buffs persist until TRIGGERED — a shield
+// until it eats a hit, a cloaked fort until a shell lands near its real tower — see below.)
 let turnSerial = 0
-const appliedAt = { blocked: [0, 0, 0, 0], field: [0, 0, 0, 0], raid: [0, 0, 0, 0], ghost: [0, 0, 0, 0] }
+const appliedAt = { blocked: [0, 0, 0, 0], raid: [0, 0, 0, 0] }
 function blockSeat(s: number): void { resourceBlocked[s] = true; appliedAt.blocked[s] = turnSerial }
 function expireTurnEffects(s: number): void {
   if (resourceBlocked[s] && appliedAt.blocked[s] < turnSerial) resourceBlocked[s] = false
-  if (forceField[s] && appliedAt.field[s] < turnSerial) forceField[s] = false
   if (armyRaidOf[s] && appliedAt.raid[s] < turnSerial) armyRaidOf[s] = null
-  if ((world.hiddenForts[s] || ghostDecoyOf[s]) && appliedAt.ghost[s] < turnSerial) { world.hiddenForts[s] = false; ghostDecoyOf[s] = null; world.dirty = true }
 }
 // A drifting radioactive cloud from a meltdown (null when none is loose). It blows in a
 // random direction; any OTHER seat it passes over loses its crops and misses two turns.
@@ -722,11 +720,12 @@ function cardSkip(side: number, foe: number): void {
   hud.msg(`${capName(side)} played Skip — ${nameOf(foe)} loses the next turn`)
 }
 
-// Force Field: raise an invisible one-hit shield over your castle (see crater()).
+// Force Field: raise an INVISIBLE one-hit shield over your castle (see crater()). It is unseen by
+// every other player and holds — turn after turn — until it eats a single hostile hit, then it's
+// spent (it can never block twice). The confirmation shows only on the caster's own turn.
 function cardForcefield(side: number): void {
   forceField[side] = true
-  appliedAt.field[side] = turnSerial
-  hud.msg(`${capName(side)} raised a force field — it holds until the end of their next turn`)
+  hud.msg(`${capName(side)} raised a hidden force field — it holds until it takes a hit`)
 }
 
 // Rebuild: repair your own tower's missing voxels, brick by brick from the ground up,
@@ -844,7 +843,6 @@ function cardStealResources(side: number): void {
 function cardGhost(side: number): void {
   const oldT = world.forts[side]?.towers[0]
   ghostDecoyOf[side] = oldT ? { cx: oldT.cx, cz: oldT.cz } : null
-  appliedAt.ghost[side] = turnSerial // the cloak lapses at the end of the caster's next turn
   if (isHuman(side)) {
     // Hand-reposition; the ghost is confirmed on placement (placeCastle sets the decoy).
     ghostReposition = true
@@ -858,7 +856,6 @@ function cardGhost(side: number): void {
   world.castleOverride[side] = { cx, cz }
   world.moveFort(side, cx, cz, forti[side]) // carries the tower's damage to the new spot
   world.hiddenForts[side] = true
-  appliedAt.ghost[side] = turnSerial
   world.rebuild()
   refreshIntegrity()
   snapCannonToSeat(side)
@@ -1017,10 +1014,11 @@ const tasks: Task[] = []
 let flyIsCard = false
 
 function crater(at: THREE.Vector3, r: number, fire: boolean): void {
-  // Force field: if this blast would reach any shielded castle, that shield eats it
-  // entirely (any weapon, no penetration) and is spent. A miss leaves it up.
+  // Force field: an ANOTHER player's blast reaching a shielded castle is eaten entirely (any
+  // weapon, no penetration) and the shield is spent — it never blocks twice, and it holds across
+  // turns until that one hit lands. Your own shell can't trip your own shield (fsel === turn).
   for (let fsel = 0; fsel < numPlayers; fsel++) {
-    if (!forceField[fsel]) continue
+    if (!forceField[fsel] || fsel === turn) continue
     const ft = world.forts[fsel]?.towers[0]
     if (ft && Math.hypot(at.x - ft.cx, at.z - ft.cz) < 5 + r) {
       spawnShieldBlock(ft.cx, ft.cz)
